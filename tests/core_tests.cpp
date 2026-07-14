@@ -26,12 +26,17 @@ void testProducts() {
 
 void testCatalog() {
     const auto sites = RadarCatalog::defaultSites();
-    assert(sites.size() >= 150);
+    assert(sites.size() >= 200);
     assert(sites.front().id == "KABR");
     assert(std::any_of(sites.begin(), sites.end(), [](const RadarSite& site) { return site.id == "PAHG"; }));
     assert(std::any_of(sites.begin(), sites.end(), [](const RadarSite& site) { return site.id == "KTLX"; }));
+    const auto tdwr = std::find_if(sites.begin(), sites.end(), [](const RadarSite& site) { return site.id == "TATL"; });
+    assert(tdwr != sites.end());
+    assert(tdwr->owner == "TDWR");
+    assert(tdwr->latitude.has_value() && tdwr->longitude.has_value());
     assert(RadarCatalog::isValidRadarId("KTLX"));
     assert(RadarCatalog::isValidRadarId("PAHG"));
+    assert(RadarCatalog::isValidRadarId("TATL"));
     assert(!RadarCatalog::isValidRadarId("TLX"));
     assert(!RadarCatalog::isValidRadarId("K1LX"));
     assert(!RadarCatalog::isValidRadarId("ktlx"));
@@ -168,9 +173,11 @@ void testOptionalRealChunk() {
     std::ifstream input(path, std::ios::binary);
     const std::vector<char> raw((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     assert(!raw.empty());
+    const char* configuredRadarId = std::getenv("CAPPEDWEATHER_RADAR_ID");
+    const std::string radarId = configuredRadarId && *configuredRadarId != '\0' ? configuredRadarId : "KTLX";
     const auto* bytes = reinterpret_cast<const std::byte*>(raw.data());
     const auto decoded = decodeMessage31Chunk(
-        std::span<const std::byte>(bytes, raw.size()), "KTLX");
+        std::span<const std::byte>(bytes, raw.size()), radarId);
     assert(decoded.messageCount > 0);
     assert(!decoded.rays.empty());
     assert(decoded.rays.front().has(ProductKind::Reflectivity));
@@ -180,10 +187,13 @@ void testOptionalRealChunk() {
     assert(std::any_of(decoded.rays.begin(), decoded.rays.end(), [](const DecodedRay& ray) {
         return ray.has(ProductKind::SpectrumWidth);
     }));
-    for (const auto kind : productDescriptors()) {
-        assert(std::any_of(decoded.rays.begin(), decoded.rays.end(), [kind](const DecodedRay& ray) {
-            return ray.has(kind.kind);
-        }));
+    const auto isTdwr = radarId.starts_with('T') && radarId != "TJUA";
+    if (!isTdwr) {
+        for (const auto kind : productDescriptors()) {
+            assert(std::any_of(decoded.rays.begin(), decoded.rays.end(), [kind](const DecodedRay& ray) {
+                return ray.has(kind.kind);
+            }));
+        }
     }
 }
 

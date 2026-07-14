@@ -8,6 +8,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QSlider>
+#include <QProgressBar>
+#include <QStandardPaths>
 #include <QTest>
 #include <QToolButton>
 
@@ -17,6 +19,7 @@ using namespace cappedweather;
 
 int main(int argc, char** argv) {
     QApplication application(argc, argv);
+    QStandardPaths::setTestModeEnabled(true);
     MainWindow window;
     window.show();
     application.processEvents();
@@ -27,23 +30,28 @@ int main(int argc, char** argv) {
     auto* playButton = window.findChild<QToolButton*>(QStringLiteral("playButton"));
     auto* warningsCheck = window.findChild<QCheckBox*>(QStringLiteral("warningsCheck"));
     auto* reportsCheck = window.findChild<QCheckBox*>(QStringLiteral("reportsCheck"));
+    auto* stationCombo = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
+    auto* liveButton = window.findChild<QToolButton*>(QStringLiteral("liveButton"));
+    auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
     if (!map || !products || !frameSlider || !playButton || !warningsCheck || !reportsCheck ||
-        !model || model->rowCount() < 150) {
+        !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
+        !model || model->rowCount() < 200) {
         std::cerr << "UI smoke setup failed\n";
         return 1;
     }
 
-    map->setSites({{"KTLX", "Oklahoma City, OK", "WSR-88D", 35.3331, -97.2778, 389.0}});
+    map->setSites({{"TATL", "Atlanta", "TDWR", 33.6470, -84.2620, 327.7}});
+    map->showNationalView();
     application.processEvents();
-    const auto targetPoint = map->radarScreenPoint(QStringLiteral("KTLX"));
+    const auto targetPoint = map->radarScreenPoint(QStringLiteral("TATL"));
     if (!map->rect().contains(targetPoint)) {
         std::cerr << "Radar pill is not visible\n";
         return 1;
     }
     QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, targetPoint);
     application.processEvents();
-    if (map->radarId() != QStringLiteral("KTLX")) {
+    if (map->radarId() != QStringLiteral("TATL")) {
         std::cerr << "Radar pill click did not select the requested radar\n";
         return 1;
     }
@@ -78,6 +86,12 @@ int main(int argc, char** argv) {
         std::cerr << "SPC report parsing failed\n";
         return 1;
     }
+    const auto noReports = WeatherOverlaySource::parseStormReports(
+        QByteArray{}, StormReportKind::Tornado, &parseError);
+    if (!parseError.isEmpty() || !noReports.isEmpty()) {
+        std::cerr << "Empty SPC report response should be a valid zero-report result\n";
+        return 1;
+    }
     map->setWeatherOverlays(warnings, stormReports);
     if (map->warningCount() != 1 || map->stormReportCount() != 1) {
         std::cerr << "Weather overlays did not reach the map\n";
@@ -95,13 +109,24 @@ int main(int argc, char** argv) {
     ray.gateSpacingByProduct.at(reflectivityIndex) = 250;
     ray.scaleByProduct.at(reflectivityIndex) = 2.0F;
     ray.offsetByProduct.at(reflectivityIndex) = 66.0F;
+    map->setSites({{"TATL", "Atlanta", "TDWR", 33.6470, -84.2620, 327.7}});
+    map->setSelectedRadar(QStringLiteral("TATL"));
     map->setProduct(ProductKind::Reflectivity);
     map->setElevationFilter(1);
-    map->setDecodedChunk({"KTLX", {ray}, 1}, QDateTime::currentDateTimeUtc());
-    QTest::mouseMove(map, map->radarScreenPoint(QStringLiteral("KTLX")) + QPoint(20, 0));
-    application.processEvents();
+    map->setDecodedChunk({"TATL", {ray}, 1}, QDateTime::currentDateTimeUtc());
+    map->recenterSelected();
+    map->setVolumeQuality(9, 10, 1);
+    map->setPalette(RadarMapCanvas::PaletteKind::Operational);
+    map->setRadarOpacity(65);
+    map->setBelowThresholdVisible(true);
+    const auto probePoint = map->radarScreenPoint(QStringLiteral("TATL")) + QPoint(20, 0);
+    map->inspectAt(QPointF(probePoint));
     if (map->probeText().isEmpty() || !map->probeText().contains(QStringLiteral("dBZ"))) {
-        std::cerr << "Radar cursor probe failed\n";
+        const auto radarPoint = map->radarScreenPoint(QStringLiteral("TATL"));
+        std::cerr << "Radar cursor probe failed: " << map->probeText().toStdString()
+                  << " radar=" << map->radarId().toStdString()
+                  << " point=" << radarPoint.x() << ',' << radarPoint.y()
+                  << " size=" << map->width() << 'x' << map->height() << "\n";
         return 1;
     }
 

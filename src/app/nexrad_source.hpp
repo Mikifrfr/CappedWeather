@@ -24,11 +24,16 @@ public slots:
     void requestCatalog();
     void requestLatest(const QString& radarId);
     void requestRecent(const QString& radarId, int volumeCount = 6);
+    void clearDownloaded(const QString& radarId);
+    void cancel(const QString& radarId);
 
 signals:
     void volumeStarted(QString radarId, QString volumeId, int chunkCount);
+    void volumeProgress(QString radarId, QString volumeId, int completed, int total,
+                        int decoded, int failed);
     void chunkDecompressed(QString radarId, QString volumeId, QString key, QByteArray data, QDateTime receivedAt);
-    void volumeReady(QString radarId, QString volumeId, int chunkCount, QDateTime receivedAt);
+    void volumeReady(QString radarId, QString volumeId, int chunkCount, int failedChunks,
+                     QDateTime receivedAt);
     void catalogReceived(QByteArray data);
     void statusChanged(QString radarId, QString status);
     void requestFailed(QString radarId, QString message);
@@ -68,6 +73,7 @@ private:
     struct ObjectContext {
         PendingObject object;
         QString volumeId;
+        int attempt = 0;
     };
 
     struct ActiveVolume {
@@ -90,6 +96,7 @@ private:
                             int requestedCount, int completedCount);
     void requestVolumePage(VolumeListingContext context);
     void beginVolume(const QString& radarId, const QString& volumeId, QVector<PendingObject> objects);
+    void requestObject(ObjectContext context);
     void finishRadar(const QString& radarId);
     static QString utcPrefix(const QString& radarId);
     static QUrl objectUrl(const QString& key);
@@ -101,6 +108,7 @@ private:
     QHash<QNetworkReply*, ObjectContext> objectRequests_;
     QHash<QString, ActiveVolume> activeVolumes_;
     QSet<QString> activeRadars_;
+    QSet<QString> cancelledRadars_;
     QHash<QString, QSet<QString>> downloadedVolumeIds_;
 };
 

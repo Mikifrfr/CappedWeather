@@ -11,9 +11,9 @@
 namespace cappedweather {
 
 std::vector<RadarSite> RadarCatalog::defaultSites() {
-    // Official NWS WSR-88D radar list. Coordinates are refreshed from the
-    // NWS radar-stations GeoJSON at application startup; this real catalog is
-    // the offline fallback and intentionally contains no generated sites.
+    // Official NWS WSR-88D and TDWR radar list. Coordinates are refreshed from
+    // the NWS radar-stations GeoJSON at application startup; this real catalog
+    // is the offline fallback and intentionally contains no generated sites.
     static constexpr std::string_view kFallbackCatalog = R"CATALOG(
 KABR|Aberdeen, SD|NWS|1383
 KENX|Albany, NY|NWS|1934
@@ -174,6 +174,51 @@ KAKQ|Wakefield, VA|NWS|255
 KICT|Wichita, KS|NWS|1399
 KLTX|Wilmington, NC|NWS|145
 KYUX|Yuma, AZ|NWS|239
+TADW|Andrews Air Force Base|TDWR|346|38.6950|-76.8450
+TATL|Atlanta|TDWR|1075|33.6470|-84.2620
+TBNA|Nashville|TDWR|817|35.9800|-86.6620
+TBOS|Boston|TDWR|264|42.1580|-70.9330
+TBWI|Baltimore/Wash|TDWR|297|39.0900|-76.6300
+TCLT|Charlotte|TDWR|871|35.3370|-80.8850
+TCMH|Columbus, OH|TDWR|1148|40.0060|-82.7150
+TCVG|Covington|TDWR|1053|38.8980|-84.5800
+TDAL|Dallas Love Field|TDWR|622|32.9260|-96.9680
+TDAY|Dayton|TDWR|1019|40.0220|-84.1230
+TDCA|Washington National|TDWR|345|38.7590|-76.9620
+TDEN|Denver|TDWR|5701|39.7280|-104.5260
+TDFW|Dallas/Ft. Worth|TDWR|585|33.0650|-96.9180
+TDTW|Detroit|TDWR|772|42.1110|-83.5150
+TEWR|Newark|TDWR|136|40.5930|-74.2700
+TFLL|Fort Lauderdale|TDWR|120|26.1430|-80.3440
+THOU|Houston Hobby|TDWR|117|29.5160|-95.2420
+TIAD|Dulles|TDWR|473|39.0840|-77.5290
+TIAH|Houston International|TDWR|253|30.0650|-95.5670
+TICH|Wichita|TDWR|1351|37.5070|-97.4370
+TIDS|Indianapolis|TDWR|847|39.6370|-86.4360
+TJFK|New York City|TDWR|112|40.5890|-73.8810
+TLAS|Las Vegas|TDWR|2058|36.1440|-115.0070
+TLVE|Cleveland, OH|TDWR|931|41.2900|-82.0080
+TMCI|Kansas City|TDWR|1090|39.4980|-94.7420
+TMCO|Orlando International|TDWR|169|28.3440|-81.3260
+TMDW|Chicago Midway|TDWR|763|41.6510|-87.7300
+TMEM|Memphis|TDWR|483|34.8960|-89.9930
+TMIA|Miami|TDWR|125|25.7580|-80.4910
+TMKE|Milwaukee|TDWR|933|42.8190|-88.0460
+TMSP|Minneapolis|TDWR|1121|44.8710|-92.9330
+TMSY|New Orleans|TDWR|99|30.0220|-90.4030
+TOKC|Oklahoma City|TDWR|1308|35.2760|-97.5100
+TORD|Chicago O'Hare|TDWR|744|41.7970|-87.8580
+TPBI|West Palm Beach|TDWR|133|26.6880|-80.2730
+TPHL|Philadelphia|TDWR|153|39.9490|-75.0690
+TPHX|Phoenix|TDWR|1089|33.4210|-112.1630
+TPIT|Pittsburgh|TDWR|1386|40.5010|-80.4860
+TRDU|Raleigh Durham|TDWR|515|36.0020|-78.6970
+TSDF|Louisville, KY|TDWR|731|38.0460|-85.6100
+TSJU|San Juan|TDWR|157|18.4740|-66.1790
+TSLC|Salt Lake City|TDWR|4295|40.9670|-111.9300
+TSTL|St. Louis|TDWR|647|38.8050|-90.4890
+TTPA|Tampa Bay|TDWR|93|27.8600|-82.5180
+TTUL|Tulsa|TDWR|823|36.0710|-95.8270
 )CATALOG";
 
     std::vector<RadarSite> sites;
@@ -186,11 +231,20 @@ KYUX|Yuma, AZ|NWS|239
         std::string name;
         std::string owner;
         std::string elevationFeet;
+        std::string latitude;
+        std::string longitude;
         if (!std::getline(fields, id, '|') || !std::getline(fields, name, '|') ||
             !std::getline(fields, owner, '|') || !std::getline(fields, elevationFeet)) {
             continue;
         }
-        sites.push_back({std::move(id), std::move(name), std::move(owner), std::nullopt, std::nullopt,
+        std::optional<double> parsedLatitude;
+        std::optional<double> parsedLongitude;
+        if (std::getline(fields, latitude, '|') && std::getline(fields, longitude) &&
+            !latitude.empty() && !longitude.empty()) {
+            parsedLatitude = std::stod(latitude);
+            parsedLongitude = std::stod(longitude);
+        }
+        sites.push_back({std::move(id), std::move(name), std::move(owner), parsedLatitude, parsedLongitude,
                          std::stod(elevationFeet) * 0.3048});
     }
 

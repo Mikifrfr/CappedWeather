@@ -110,7 +110,8 @@ QVector<StormReport> WeatherOverlaySource::parseStormReports(const QByteArray& d
     QVector<StormReport> reports;
     const auto lines = QString::fromUtf8(data).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     if (lines.isEmpty()) {
-        if (error) *error = QStringLiteral("Empty SPC storm-report response");
+        // SPC legitimately returns an empty response when no reports exist yet.
+        if (error) error->clear();
         return reports;
     }
 

@@ -167,9 +167,40 @@ void NexradSource::requestRecent(const QString& radarId, const int volumeCount) 
         return;
     }
 
-    if (volumeCount > 1) downloadedVolumeIds_[radarId].clear();
+    cancelledRadars_.remove(radarId);
     activeRadars_.insert(radarId);
     startRootListing(radarId, {}, {}, std::clamp(volumeCount, 1, 12));
+}
+
+void NexradSource::clearDownloaded(const QString& radarId) {
+    downloadedVolumeIds_.remove(radarId);
+}
+
+void NexradSource::cancel(const QString& radarId) {
+    cancelledRadars_.insert(radarId);
+    const auto rootReplies = rootListingRequests_.keys();
+    for (auto* reply : rootReplies) {
+        if (rootListingRequests_.value(reply).radarId != radarId) continue;
+        rootListingRequests_.remove(reply);
+        reply->abort();
+        reply->deleteLater();
+    }
+    const auto volumeReplies = volumeListingRequests_.keys();
+    for (auto* reply : volumeReplies) {
+        if (volumeListingRequests_.value(reply).radarId != radarId) continue;
+        volumeListingRequests_.remove(reply);
+        reply->abort();
+        reply->deleteLater();
+    }
+    const auto objectReplies = objectRequests_.keys();
+    for (auto* reply : objectReplies) {
+        if (objectRequests_.value(reply).object.radarId != radarId) continue;
+        objectRequests_.remove(reply);
+        reply->abort();
+        reply->deleteLater();
+    }
+    finishRadar(radarId);
+    emit statusChanged(radarId, QStringLiteral("cancelled"));
 }
 
 void NexradSource::startRootListing(const QString& radarId, const QString& startAfter,
@@ -371,17 +402,23 @@ void NexradSource::beginVolume(const QString& radarId, const QString& volumeId,
     }
     activeVolumes_.insert(radarId, ActiveVolume{radarId, volumeId, chunkCount, 0, 0, {}, dataTime});
     emit volumeStarted(radarId, volumeId, chunkCount);
+    emit volumeProgress(radarId, volumeId, 0, chunkCount, 0, 0);
     emit statusChanged(radarId, QStringLiteral("downloading %1 volume chunks").arg(objects.size()));
     for (const auto& object : objects) {
-        QNetworkRequest request(objectUrl(object.key));
-        request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("CappedWeather/0.1"));
-        auto* reply = network_.get(request);
-        objectRequests_.insert(reply, ObjectContext{object, volumeId});
+        requestObject(ObjectContext{object, volumeId, 0});
     }
 }
 
+void NexradSource::requestObject(ObjectContext context) {
+    if (cancelledRadars_.contains(context.object.radarId)) return;
+    QNetworkRequest request(objectUrl(context.object.key));
+    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("CappedWeather/0.1"));
+    auto* reply = network_.get(request);
+    objectRequests_.insert(reply, std::move(context));
+}
+
 void NexradSource::objectFinished(QNetworkReply* reply) {
-    const auto context = objectRequests_.take(reply);
+    auto context = objectRequests_.take(reply);
     const auto radarId = context.object.radarId;
     auto active = activeVolumes_.find(radarId);
     if (active == activeVolumes_.end()) {
@@ -390,12 +427,10 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
     }
 
     const auto receivedAt = QDateTime::currentDateTimeUtc();
+    QString failure;
     bool decoded = false;
     if (reply->error() != QNetworkReply::NoError) {
-        ++active->failedChunks;
-        if (active->firstError.isEmpty()) {
-            active->firstError = reply->errorString();
-        }
+        failure = reply->errorString();
     } else {
         const auto data = reply->readAll();
 #ifdef CAPPEDWEATHER_HAS_BZIP2
@@ -405,19 +440,31 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
             ++active->decodedChunks;
             emit chunkDecompressed(radarId, context.volumeId, context.object.key, *decompressed, receivedAt);
         } else {
-            ++active->failedChunks;
-            if (active->firstError.isEmpty()) {
-                active->firstError = decompressionError;
-            }
+            failure = decompressionError;
         }
 #else
         Q_UNUSED(data);
-        ++active->failedChunks;
+        failure = QStringLiteral("bzip2 support unavailable");
 #endif
     }
-    Q_UNUSED(decoded);
-    --active->remaining;
     reply->deleteLater();
+
+    constexpr int kMaximumAttempts = 3;
+    if (!decoded && context.attempt + 1 < kMaximumAttempts && !cancelledRadars_.contains(radarId)) {
+        ++context.attempt;
+        emit statusChanged(radarId, QStringLiteral("retrying volume chunk (%1/%2)")
+                                        .arg(context.attempt + 1).arg(kMaximumAttempts));
+        requestObject(std::move(context));
+        return;
+    }
+    if (!decoded) {
+        ++active->failedChunks;
+        if (active->firstError.isEmpty()) active->firstError = failure;
+    }
+    --active->remaining;
+    const auto total = active->decodedChunks + active->failedChunks + active->remaining;
+    emit volumeProgress(radarId, active->volumeId, total - active->remaining, total,
+                        active->decodedChunks, active->failedChunks);
 
     if (active->remaining != 0) {
         return;
@@ -432,7 +479,7 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
     const auto nextIndex = active->candidateIndex + 1;
     const auto requestedCount = active->requestedCount;
     const auto completedCount = active->completedCount + 1;
-    if (failedChunks != 0 || decodedChunks == 0) {
+    if (decodedChunks == 0) {
         finishRadar(radarId);
         const auto detail = firstError.isEmpty()
                                 ? QStringLiteral("unknown network or decode error")
@@ -445,7 +492,8 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
     }
 
     downloadedVolumeIds_[radarId].insert(volumeId);
-    emit volumeReady(radarId, volumeId, decodedChunks, dataTime.isValid() ? dataTime : receivedAt);
+    emit volumeReady(radarId, volumeId, decodedChunks + failedChunks, failedChunks,
+                     dataTime.isValid() ? dataTime : receivedAt);
     activeVolumes_.remove(radarId);
     if (completedCount < requestedCount) {
         emit statusChanged(radarId, QStringLiteral("loading history %1 of %2")
@@ -453,9 +501,13 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
         startVolumeListing(radarId, volumePrefixes, nextIndex, requestedCount, completedCount);
     } else {
         activeRadars_.remove(radarId);
-        emit statusChanged(radarId, QStringLiteral("received %1 complete volume%2")
-                                       .arg(completedCount)
-                                       .arg(completedCount == 1 ? QString{} : QStringLiteral("s")));
+        emit statusChanged(radarId, failedChunks == 0
+                                        ? QStringLiteral("received %1 complete volume%2")
+                                              .arg(completedCount)
+                                              .arg(completedCount == 1 ? QString{} : QStringLiteral("s"))
+                                        : QStringLiteral("received partial volume (%1 chunk%2 unavailable)")
+                                              .arg(failedChunks)
+                                              .arg(failedChunks == 1 ? QString{} : QStringLiteral("s")));
     }
 }
 

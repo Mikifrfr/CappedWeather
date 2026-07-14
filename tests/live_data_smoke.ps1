@@ -7,8 +7,15 @@ $headers = @{ 'User-Agent' = 'CappedWeather live smoke test contact@example.inva
 
 $catalog = Invoke-RestMethod -Uri 'https://api.weather.gov/radar/stations' -Headers $headers -TimeoutSec 30
 $wsr88d = @($catalog.features | Where-Object { $_.properties.stationType -eq 'WSR-88D' })
+$tdwr = @($catalog.features | Where-Object { $_.properties.stationType -eq 'TDWR' })
 if ($wsr88d.Count -lt 150) {
     throw "Expected at least 150 official WSR-88D stations, received $($wsr88d.Count)."
+}
+if ($tdwr.Count -lt 45) {
+    throw "Expected at least 45 official TDWR stations, received $($tdwr.Count)."
+}
+if (-not @($catalog.features | Where-Object { $_.properties.id -eq $RadarId })) {
+    throw "$RadarId is not present in the official NWS radar catalog."
 }
 
 $token = $null
@@ -35,4 +42,4 @@ if ($bytes.Length -lt 7 -or $bytes[4] -ne 0x42 -or $bytes[5] -ne 0x5A -or $bytes
     throw "Latest object is not a bzip2 Level II chunk."
 }
 
-"Live smoke test passed: $($wsr88d.Count) WSR-88D stations; $($latest.Key); $($bytes.Length) bytes."
+"Live smoke test passed: $($wsr88d.Count) WSR-88D + $($tdwr.Count) TDWR stations; $($latest.Key); $($bytes.Length) bytes."
