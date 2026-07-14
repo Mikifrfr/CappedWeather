@@ -4,6 +4,16 @@ CappedWeather is a small Qt6/C++ WSR-88D and TDWR Level II viewer focused on dir
 
 The application does not ship synthetic or demo radar frames. It discovers live Level II objects from NOAA's public AWS buckets and displays an explicit unavailable/stale state when data cannot be obtained.
 
+## Screenshots
+
+### Live reflectivity
+
+![CappedWeather showing live KEWX reflectivity with warning overlays](docs/screenshots/cappedweather-reflectivity.png)
+
+### Radial velocity
+
+![CappedWeather showing live KEWX radial velocity](docs/screenshots/cappedweather-velocity.png)
+
 ## Build
 
 The core library and tests require only a C++20 compiler and CMake:
