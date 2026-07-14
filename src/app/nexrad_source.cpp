@@ -4,6 +4,8 @@
 
 #include <QDateTime>
 #include <QNetworkRequest>
+#include <QSettings>
+#include <QTimer>
 #include <QUrlQuery>
 #include <QXmlStreamReader>
 
@@ -20,6 +22,34 @@ namespace {
 constexpr auto kRealtimeBucket = "https://unidata-nexrad-level2-chunks.s3.amazonaws.com/";
 constexpr auto kRadarCatalogUrl = "https://api.weather.gov/radar/stations";
 constexpr int kVolumeQuietSeconds = 45;
+
+int networkTimeoutMilliseconds() {
+    return std::clamp(QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(), 5, 120) * 1000;
+}
+
+int maximumConcurrentObjects() {
+    return std::clamp(QSettings().value(QStringLiteral("network/parallelChunks"), 6).toInt(), 1, 12);
+}
+
+int maximumAttempts() {
+    return std::clamp(QSettings().value(QStringLiteral("network/retries"), 2).toInt(), 0, 5) + 1;
+}
+
+int retryBackoffMilliseconds() {
+    return std::clamp(QSettings().value(QStringLiteral("network/retryBackoffMs"), 250).toInt(), 100, 5000);
+}
+
+QString userAgent() {
+    const auto contact = QSettings().value(QStringLiteral("network/contact")).toString().trimmed();
+    return contact.isEmpty()
+               ? QStringLiteral("CappedWeather/0.3 operational radar viewer")
+               : QStringLiteral("CappedWeather/0.3 operational radar viewer (%1)").arg(contact);
+}
+
+void configureRequest(QNetworkRequest& request) {
+    request.setHeader(QNetworkRequest::UserAgentHeader, userAgent());
+    request.setTransferTimeout(networkTimeoutMilliseconds());
+}
 
 #ifdef CAPPEDWEATHER_HAS_BZIP2
 std::optional<QByteArray> decompressChunk(const QByteArray& input, QString& error) {
@@ -135,8 +165,7 @@ NexradSource::NexradSource(QObject* parent)
 
 void NexradSource::requestCatalog() {
     QNetworkRequest request(QUrl(QString::fromUtf8(kRadarCatalogUrl)));
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("CappedWeather/0.1 radar viewer contact@example.invalid"));
+    configureRequest(request);
     auto* reply = network_.get(request);
     catalogRequests_.insert(reply, true);
 }
@@ -196,9 +225,14 @@ void NexradSource::cancel(const QString& radarId) {
     for (auto* reply : objectReplies) {
         if (objectRequests_.value(reply).object.radarId != radarId) continue;
         objectRequests_.remove(reply);
+        activeObjectRequests_ = std::max(0, activeObjectRequests_ - 1);
         reply->abort();
         reply->deleteLater();
     }
+    for (qsizetype index = queuedObjects_.size() - 1; index >= 0; --index) {
+        if (queuedObjects_.at(index).object.radarId == radarId) queuedObjects_.removeAt(index);
+    }
+    pumpObjectQueue();
     finishRadar(radarId);
     emit statusChanged(radarId, QStringLiteral("cancelled"));
 }
@@ -206,7 +240,7 @@ void NexradSource::cancel(const QString& radarId) {
 void NexradSource::startRootListing(const QString& radarId, const QString& startAfter,
                                     QStringList volumePrefixes, const int requestedCount) {
     QNetworkRequest request(listingUrl(utcPrefix(radarId), QStringLiteral("/"), startAfter));
-    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("CappedWeather/0.1"));
+    configureRequest(request);
     auto* reply = network_.get(request);
     rootListingRequests_.insert(
         reply, ListingContext{radarId, startAfter, std::move(volumePrefixes), requestedCount});
@@ -287,7 +321,7 @@ void NexradSource::startVolumeListing(const QString& radarId, const QStringList&
 
 void NexradSource::requestVolumePage(VolumeListingContext context) {
     QNetworkRequest request(listingUrl(context.volumePrefix, {}, context.startAfter));
-    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("CappedWeather/0.1"));
+    configureRequest(request);
     auto* reply = network_.get(request);
     volumeListingRequests_.insert(reply, std::move(context));
     emit statusChanged(volumeListingRequests_.value(reply).radarId, QStringLiteral("checking volume chunks"));
@@ -411,14 +445,27 @@ void NexradSource::beginVolume(const QString& radarId, const QString& volumeId,
 
 void NexradSource::requestObject(ObjectContext context) {
     if (cancelledRadars_.contains(context.object.radarId)) return;
+    if (activeObjectRequests_ >= maximumConcurrentObjects()) {
+        queuedObjects_.enqueue(std::move(context));
+        return;
+    }
     QNetworkRequest request(objectUrl(context.object.key));
-    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("CappedWeather/0.1"));
+    configureRequest(request);
     auto* reply = network_.get(request);
     objectRequests_.insert(reply, std::move(context));
+    ++activeObjectRequests_;
+}
+
+void NexradSource::pumpObjectQueue() {
+    while (activeObjectRequests_ < maximumConcurrentObjects() && !queuedObjects_.isEmpty()) {
+        auto context = queuedObjects_.dequeue();
+        if (!cancelledRadars_.contains(context.object.radarId)) requestObject(std::move(context));
+    }
 }
 
 void NexradSource::objectFinished(QNetworkReply* reply) {
     auto context = objectRequests_.take(reply);
+    activeObjectRequests_ = std::max(0, activeObjectRequests_ - 1);
     const auto radarId = context.object.radarId;
     auto active = activeVolumes_.find(radarId);
     if (active == activeVolumes_.end()) {
@@ -449,12 +496,17 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
     }
     reply->deleteLater();
 
-    constexpr int kMaximumAttempts = 3;
-    if (!decoded && context.attempt + 1 < kMaximumAttempts && !cancelledRadars_.contains(radarId)) {
+    const auto attempts = maximumAttempts();
+    if (!decoded && context.attempt + 1 < attempts && !cancelledRadars_.contains(radarId)) {
         ++context.attempt;
         emit statusChanged(radarId, QStringLiteral("retrying volume chunk (%1/%2)")
-                                        .arg(context.attempt + 1).arg(kMaximumAttempts));
-        requestObject(std::move(context));
+                                        .arg(context.attempt + 1).arg(attempts));
+        const auto delayMilliseconds = retryBackoffMilliseconds() * (1 << context.attempt);
+        QTimer::singleShot(delayMilliseconds, this, [this, context = std::move(context)]() mutable {
+            requestObject(std::move(context));
+            pumpObjectQueue();
+        });
+        pumpObjectQueue();
         return;
     }
     if (!decoded) {
@@ -467,6 +519,7 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
                         active->decodedChunks, active->failedChunks);
 
     if (active->remaining != 0) {
+        pumpObjectQueue();
         return;
     }
 
@@ -488,6 +541,7 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
                                       .arg(failedChunks)
                                       .arg(failedChunks + decodedChunks)
                                       .arg(detail));
+        pumpObjectQueue();
         return;
     }
 
@@ -509,6 +563,7 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
                                               .arg(failedChunks)
                                               .arg(failedChunks == 1 ? QString{} : QStringLiteral("s")));
     }
+    pumpObjectQueue();
 }
 
 void NexradSource::finishRadar(const QString& radarId) {

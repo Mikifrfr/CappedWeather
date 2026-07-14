@@ -3,7 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$headers = @{ 'User-Agent' = 'CappedWeather live smoke test contact@example.invalid' }
+$headers = @{ 'User-Agent' = 'CappedWeather/0.3 live smoke test' }
 
 $catalog = Invoke-RestMethod -Uri 'https://api.weather.gov/radar/stations' -Headers $headers -TimeoutSec 30
 $wsr88d = @($catalog.features | Where-Object { $_.properties.stationType -eq 'WSR-88D' })

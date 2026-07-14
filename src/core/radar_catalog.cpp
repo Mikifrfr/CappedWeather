@@ -234,7 +234,7 @@ TTUL|Tulsa|TDWR|823|36.0710|-95.8270
         std::string latitude;
         std::string longitude;
         if (!std::getline(fields, id, '|') || !std::getline(fields, name, '|') ||
-            !std::getline(fields, owner, '|') || !std::getline(fields, elevationFeet)) {
+            !std::getline(fields, owner, '|') || !std::getline(fields, elevationFeet, '|')) {
             continue;
         }
         std::optional<double> parsedLatitude;

@@ -2,6 +2,9 @@
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 #include "core/radar_catalog.hpp"
+#include "core/radar_geometry.hpp"
+#include "core/scan_diagnostics.hpp"
+#include "core/velocity_processing.hpp"
 #include "core/s3_object.hpp"
 
 #include <array>
@@ -13,10 +16,24 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <random>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 using namespace cappedweather;
+
+namespace {
+void check(const bool condition, const char* expression, const char* file, const int line) {
+    if (!condition) {
+        std::cerr << file << ':' << line << ": check failed: " << expression << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+}
+}
+
+#undef assert
+#define assert(expression) check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 void testProducts() {
     assert(productDescriptors().size() == 6);
@@ -73,6 +90,54 @@ void testNativeEncodings() {
     assert(nativeValue(ProductKind::Reflectivity, 66).value() == 0.0);
     assert(nativeValue(ProductKind::Velocity, 129).value() == 0.0);
     assert(nativeValue(ProductKind::CorrelationCoefficient, 1).has_value() == false);
+}
+
+void testRadarGeometry() {
+    const auto east = destinationPoint({0.0, 0.0}, 90.0, 100000.0);
+    assert(std::abs(east.latitude) < 0.001);
+    assert(std::abs(east.longitude - 0.8993) < 0.002);
+    const auto inverse = rangeAndBearing({0.0, 0.0}, east);
+    assert(std::abs(inverse.distanceMeters - 100000.0) < 1.0);
+    assert(std::abs(inverse.bearingDegrees - 90.0) < 0.01);
+    const auto beam = standardBeamGeometry(100000.0, 0.5);
+    assert(beam.heightAboveRadarMeters > 1400.0 && beam.heightAboveRadarMeters < 1550.0);
+    assert(std::abs(slantRangeForSurfaceDistance(beam.surfaceDistanceMeters, 0.5) - 100000.0) < 0.1);
+}
+
+void testScanDiagnostics() {
+    DecodedChunk chunk;
+    for (const float azimuth : {0.0F, 90.0F, 180.0F, 270.0F}) {
+        DecodedRay ray;
+        ray.azimuthDegrees = azimuth;
+        ray.elevationNumber = 1;
+        const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+        ray.fields.at(index).assign(100, 80);
+        ray.gateSpacingByProduct.at(index) = 250;
+        chunk.rays.push_back(std::move(ray));
+    }
+    const auto diagnostics = analyzeScan(chunk, ProductKind::Reflectivity, 1);
+    assert(diagnostics.rayCount == 4);
+    assert(diagnostics.tiltCount == 1);
+    assert(std::abs(diagnostics.largestAzimuthGapDegrees - 90.0) < 0.01);
+    assert(std::abs(diagnostics.maximumRangeMeters - 25000.0) < 0.01);
+}
+
+void testVelocityProcessing() {
+    DecodedRay ray;
+    ray.azimuthDegrees = 0.0F;
+    const auto index = static_cast<std::size_t>(ProductKind::Velocity);
+    ray.fields.at(index) = {169, 89}; // +20 and -20 m/s with scale 2 / offset 129.
+    ray.scaleByProduct.at(index) = 2.0F;
+    ray.offsetByProduct.at(index) = 129.0F;
+    DecodedChunk chunk{"KTLX", {ray}, 1};
+    const auto native = processVelocity(chunk, {VelocityProcessingMode::Native, 25.0, 0.0, 0.0});
+    assert(std::abs(native[0][0] - 20.0) < 0.01);
+    assert(std::abs(native[0][1] + 20.0) < 0.01);
+    const auto dealiased = processVelocity(chunk, {VelocityProcessingMode::Dealiased, 25.0, 0.0, 0.0});
+    assert(std::abs(dealiased[0][1] - 30.0) < 0.01);
+    const auto stormRelative = processVelocity(
+        chunk, {VelocityProcessingMode::StormRelative, 25.0, 0.0, 10.0});
+    assert(std::abs(stormRelative[0][0] - 10.0) < 0.01);
 }
 
 void writeBigEndian16(std::vector<std::byte>& bytes, const std::size_t offset, const std::uint16_t value) {
@@ -165,6 +230,27 @@ void testMessage31SixteenBitMoment() {
                     179.82) < 0.1);
 }
 
+void testMessage31MalformedInputs() {
+    std::mt19937 generator(0xCA77EDu);
+    std::uniform_int_distribution<int> sizeDistribution(0, 2048);
+    std::uniform_int_distribution<int> byteDistribution(0, 255);
+    for (int iteration = 0; iteration < 1000; ++iteration) {
+        std::vector<std::byte> raw(static_cast<std::size_t>(sizeDistribution(generator)));
+        for (auto& value : raw) value = static_cast<std::byte>(byteDistribution(generator));
+        const auto decoded = decodeMessage31Chunk(raw, "KTLX");
+        assert(decoded.rays.size() == decoded.messageCount);
+    }
+
+    std::vector<std::byte> malformed(80);
+    for (std::size_t index = 0; index < 4; ++index)
+        malformed[index] = static_cast<std::byte>(static_cast<unsigned char>("KTLX"[index]));
+    writeBigEndian16(malformed, 18, 79);
+    writeBigEndian16(malformed, 30, 10);
+    const auto decoded = decodeMessage31Chunk(malformed, "KTLX");
+    assert(decoded.rays.empty());
+    assert(decoded.rejectedMessages == 1);
+}
+
 void testOptionalRealChunk() {
     const char* path = std::getenv("CAPPEDWEATHER_DECOMPRESSED_CHUNK");
     if (!path || *path == '\0') {
@@ -203,8 +289,12 @@ int main() {
     testS3Selection();
     testBinaryPrimitives();
     testNativeEncodings();
+    testRadarGeometry();
+    testScanDiagnostics();
+    testVelocityProcessing();
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();
+    testMessage31MalformedInputs();
     testOptionalRealChunk();
     std::cout << "core tests passed\n";
 }

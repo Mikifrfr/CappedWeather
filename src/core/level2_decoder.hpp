@@ -33,6 +33,8 @@ struct DecodedChunk {
     std::string radarId;
     std::vector<DecodedRay> rays;
     std::size_t messageCount = 0;
+    std::size_t rejectedMessages = 0;
+    std::size_t rejectedBlocks = 0;
 };
 
 std::optional<double> nativeValue(ProductKind kind, std::uint8_t encoded);

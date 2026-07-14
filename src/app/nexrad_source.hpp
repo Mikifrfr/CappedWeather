@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QQueue>
 #include <QSet>
 #include <QStringList>
 #include <QVector>
@@ -97,6 +98,7 @@ private:
     void requestVolumePage(VolumeListingContext context);
     void beginVolume(const QString& radarId, const QString& volumeId, QVector<PendingObject> objects);
     void requestObject(ObjectContext context);
+    void pumpObjectQueue();
     void finishRadar(const QString& radarId);
     static QString utcPrefix(const QString& radarId);
     static QUrl objectUrl(const QString& key);
@@ -106,10 +108,12 @@ private:
     QHash<QNetworkReply*, ListingContext> rootListingRequests_;
     QHash<QNetworkReply*, VolumeListingContext> volumeListingRequests_;
     QHash<QNetworkReply*, ObjectContext> objectRequests_;
+    QQueue<ObjectContext> queuedObjects_;
     QHash<QString, ActiveVolume> activeVolumes_;
     QSet<QString> activeRadars_;
     QSet<QString> cancelledRadars_;
     QHash<QString, QSet<QString>> downloadedVolumeIds_;
+    int activeObjectRequests_ = 0;
 };
 
 } // namespace cappedweather

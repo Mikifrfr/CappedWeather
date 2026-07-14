@@ -22,6 +22,7 @@ The core library and tests require only a C++20 compiler and CMake:
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
+cpack --config build/CPackConfig.cmake -C Release
 ```
 
 The optional live-data smoke test uses only real public NOAA/NWS responses:
@@ -50,8 +51,9 @@ cmake -S . -B build `
 ## Data sources
 
 - Real-time Level II chunks: `https://unidata-nexrad-level2-chunks.s3.amazonaws.com/`
-- Level II archive: `https://unidata-nexrad-level2.s3.amazonaws.com/`
 - Live official station catalog: `https://api.weather.gov/radar/stations`
+- Active warning GeoJSON and zone geometry: `https://api.weather.gov/alerts/active`
+- Preliminary storm reports: `https://www.spc.noaa.gov/climo/reports/`
 - Official NEXRAD data documentation: <https://www.ncei.noaa.gov/products/radar/next-generation-weather-radar>
 
 The application uses public HTTPS listing and download requests, with no cloud SDK. The official NWS station catalog is filtered to `WSR-88D` and `TDWR` stations; the embedded fallback contains the same real station classes and no generated stations.
@@ -61,13 +63,28 @@ The viewer exposes the decoded product fields and the elevation tilts present in
 ## Current viewer features
 
 - Six native Level II products with product-specific color scales and units.
+- Switchable 1x1, 1x2, 2x1, and 2x2 radar layouts. Every panel can use its own radar, product, tilt, and velocity mode; map navigation can remain linked.
+- Discrete native operational palettes for all six products, with improved legend labels.
+- Importable, persistent custom palettes using `native_value,#RRGGBB` lines, plus Capped and color-safe presets.
 - TDWR volumes expose their available base moments (reflectivity, radial velocity, and spectrum width); unavailable dual-polarization products are disabled automatically.
-- Searchable radar selection with persistent favorites, recent sites, zoom-aware station decluttering, station details, and national/recenter controls.
+- Searchable radar selection with persistent favorites, recent sites, optional manual-position chase mode, zoom-aware station decluttering, station details, and national/recenter controls.
 - Cursor sampling for value, range, azimuth, and elevation tilt, including below-threshold and range-folded gates.
-- Up to eight recent NOAA volumes in memory, with explicit live-follow mode, timestamped frame stepping, looping playback, 1x/2x/4x speeds, and repeated supplemental tilts retained separately.
+- Up to eight recent NOAA volumes per radar session in memory, with explicit live-follow mode, timestamped frame stepping, looping playback, 1x/2x/4x speeds, and repeated supplemental tilts retained separately.
 - Non-blocking chunk progress, retry/cancel controls, per-chunk automatic retries, partial-volume recovery, and visible completeness metadata.
-- Active NWS polygon warnings and current-day SPC tornado, hail, and wind reports, with filters, a symbol legend, and interactive details.
-- Multiple range rings, distance/bearing measurement, keyboard controls, radar opacity, below-threshold display, and three palette presets.
-- Cached, color-batched radar geometry so map panning reuses decoded gate paths instead of rebuilding every gate.
+- Bounded parallel chunk downloads, transfer timeouts, retry backoff, last-known-good overlay retention, and bounded memory/disk map caches.
+- Active NWS warnings, including zone-only alerts resolved to official zone geometry and polygons with holes. Details include onset, expiry, sender, description, and instructions.
+- Rolling 24-hour SPC tornado, hail, and wind reports with 12Z convective-day handling, absolute UTC time, age, filters, a symbol legend, and interactive details.
+- Native, dealiased, and storm-relative velocity with configurable Nyquist velocity and storm motion.
+- Great-circle range/bearing tools, standard-atmosphere beam height, scan coverage/gap diagnostics, and multi-tilt vertical cross-sections.
+- PNG snapshots, animated GIF timelines, and cross-section CSV export.
+- Cached, color-batched radar geometry built off the UI thread; decoded frames are shared across panels instead of copied.
+- Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
+- Persistent operational settings for panels, products, palettes, overlays, opacity, playback, timeline depth, and window geometry.
 
-Only alerts carrying explicit GeoJSON polygon geometry are drawn. NWS alerts whose area is represented solely by forecast-zone identifiers remain available from NWS but are not approximated by this viewer.
+## Operator notes
+
+- `Measure` reports great-circle distance and bearing. `Cross-section` uses the same two-point gesture and opens a distance/height view across all available tilts.
+- The velocity controls apply to the active panel. Storm direction is the direction toward which the storm moves; speed and Nyquist are in m/s.
+- Custom palettes are discrete native-value thresholds. Example: `20,#02fd02` followed by `30,#008e00`.
+- `Timeline GIF` exports every currently loaded frame for the active radar. It intentionally does not retrieve an archive; load depth is controlled in Settings.
+- Network Settings provide request concurrency, retries, timeouts, cache limits, contact information, chase position, history depth, and panel-navigation linking.

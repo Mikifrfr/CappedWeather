@@ -14,6 +14,7 @@ namespace {
 constexpr std::size_t kTransferHeaderSize = 28;
 constexpr std::size_t kDataHeaderSize = 28;
 constexpr std::size_t kMaximumDataBlocks = 10;
+constexpr std::size_t kMaximumGatesPerMoment = 4096;
 
 constexpr std::size_t productIndex(const ProductKind kind) {
     return static_cast<std::size_t>(kind);
@@ -112,6 +113,7 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
         if (!radialLength.has_value() || !blockCount.has_value() || *radialLength < 64 ||
             *blockCount == 0 || *blockCount > kMaximumDataBlocks ||
             *radialLength > bytes.size() - pos) {
+            ++result.rejectedMessages;
             ++pos;
             continue;
         }
@@ -124,17 +126,27 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
         ray.azimuthResolutionDegrees = azimuthResolutionCode == 1 ? 0.5F : 1.0F;
         ray.elevationNumber = std::to_integer<std::uint8_t>(bytes[pos + 22]);
         ray.elevationDegrees = readFloat(bytes, pos + 24);
+        if (!std::isfinite(ray.azimuthDegrees) || ray.azimuthDegrees < 0.0F || ray.azimuthDegrees >= 360.0F ||
+            !std::isfinite(ray.elevationDegrees) || ray.elevationDegrees < -10.0F ||
+            ray.elevationDegrees > 90.0F || (azimuthResolutionCode != 1 && azimuthResolutionCode != 2) ||
+            ray.elevationNumber == 0 || pos + 32 + static_cast<std::size_t>(*blockCount) * 4 > radialEnd) {
+            ++result.rejectedMessages;
+            pos += static_cast<std::size_t>(*radialLength) + kTransferHeaderSize;
+            continue;
+        }
 
         bool hasField = false;
         for (std::size_t block = 0; block < *blockCount; ++block) {
             const auto pointer = readBigEndian32(bytes, pos + 32 + block * 4);
             if (!pointer.has_value() || *pointer > *radialLength - kDataHeaderSize) {
+                ++result.rejectedBlocks;
                 continue;
             }
             const auto blockOffset = pos + *pointer;
             const auto kind = kindForBlock(bytes, blockOffset);
             if (!kind.has_value() || blockOffset > radialEnd ||
                 radialEnd - blockOffset < kDataHeaderSize) {
+                ++result.rejectedBlocks;
                 continue;
             }
 
@@ -144,15 +156,18 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
             const auto wordBits = std::to_integer<std::uint8_t>(bytes[blockOffset + 19]);
             const auto scale = readFloat(bytes, blockOffset + 20);
             const auto offset = readFloat(bytes, blockOffset + 24);
-            if (!gates.has_value() || !firstGateRaw.has_value() || !spacing.has_value() ||
+            if (!gates.has_value() || *gates == 0 || *gates > kMaximumGatesPerMoment ||
+                !firstGateRaw.has_value() || !spacing.has_value() || *spacing == 0 || *spacing > 5000 ||
                 (wordBits != 8 && wordBits != 16) || !std::isfinite(scale) || scale <= 0.0F ||
                 !std::isfinite(offset)) {
+                ++result.rejectedBlocks;
                 continue;
             }
             const auto firstGate = static_cast<std::int16_t>(*firstGateRaw);
             const auto dataOffset = blockOffset + kDataHeaderSize;
             const auto bytesPerGate = static_cast<std::size_t>(wordBits / 8);
             if (dataOffset > radialEnd || radialEnd - dataOffset < *gates * bytesPerGate) {
+                ++result.rejectedBlocks;
                 continue;
             }
 
