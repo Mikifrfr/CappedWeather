@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDate>
+#include <QColor>
 #include <QHash>
 #include <QNetworkAccessManager>
 #include <QObject>
@@ -17,6 +18,14 @@ class QNetworkReply;
 
 namespace cappedweather {
 
+struct NwsAlertStyle {
+    QColor color;
+    int priority = 1000;
+};
+
+NwsAlertStyle nwsAlertStyle(const QString& event);
+int nwsOfficialAlertStyleCount();
+
 struct WarningPolygon {
     QPolygonF exterior; // longitude, latitude
     QVector<QPolygonF> holes;
@@ -31,6 +40,8 @@ struct WeatherWarning {
     QString instruction;
     QDateTime onset;
     QDateTime expires;
+    QColor alertColor;
+    int alertPriority = 1000;
     QVector<WarningPolygon> polygons;
     QStringList affectedZones;
 };

@@ -137,8 +137,19 @@ int main(int argc, char** argv) {
     QString parseError;
     const auto warnings = WeatherOverlaySource::parseAlerts(alerts, &parseError);
     if (!parseError.isEmpty() || warnings.size() != 1 || warnings.front().polygons.size() != 1 ||
-        warnings.front().polygons.front().holes.size() != 1 || warnings.front().senderName != QStringLiteral("NWS Norman")) {
+        warnings.front().polygons.front().holes.size() != 1 || warnings.front().senderName != QStringLiteral("NWS Norman") ||
+        warnings.front().alertPriority != 2 ||
+        warnings.front().alertColor.name(QColor::HexRgb).compare(QStringLiteral("#ff0000"), Qt::CaseInsensitive) != 0) {
         std::cerr << "NWS alert parsing failed\n";
+        return 1;
+    }
+    if (nwsOfficialAlertStyleCount() != 111 ||
+        nwsAlertStyle(QStringLiteral("winter weather advisory")).priority != 60 ||
+        nwsAlertStyle(QStringLiteral("Winter Weather Advisory")).color.name(QColor::HexRgb) !=
+            QStringLiteral("#7b68ee") ||
+        nwsAlertStyle(QStringLiteral("Air Quality Alert")).color.name(QColor::HexRgb) !=
+            QStringLiteral("#808080")) {
+        std::cerr << "NWS official alert color table is incomplete or incorrect\n";
         return 1;
     }
     const QByteArray zone = R"JSON({"type":"Feature","geometry":{"type":"MultiPolygon","coordinates":[

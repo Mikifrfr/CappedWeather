@@ -140,6 +140,8 @@ private:
     void ensureWeatherPaths() const;
     void invalidateWorldCaches(bool zoomChanged = false);
     bool overlayCacheCoversView() const;
+    void rebuildWeatherOverlay();
+    bool weatherOverlayCacheCoversView() const;
 
     std::vector<RadarSite> sites_;
     QHash<QString, std::size_t> siteIndexes_;
@@ -154,12 +156,19 @@ private:
     quint64 overlayGeneration_ = 0;
     bool overlayBuildPending_ = false;
     double maximumRangeMeters_ = 230000.0;
+    QImage weatherOverlayImage_;
+    QPointF weatherOverlayImageCenterWorld_;
+    QSize weatherOverlayImageLogicalSize_;
+    int weatherOverlayZoom_ = -1;
+    quint64 weatherOverlayImageGeneration_ = 0;
+    bool weatherOverlayBuildPending_ = false;
     QVector<WeatherWarning> warnings_;
     QVector<StormReport> stormReports_;
     struct CachedWarningPath {
         int warningIndex = -1;
         QColor color;
         QPainterPath path;
+        QRectF bounds;
     };
     mutable QVector<CachedWarningPath> warningPaths_;
     mutable QVector<QPointF> stormReportWorldPoints_;

@@ -11,6 +11,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace cappedweather {
@@ -23,6 +24,128 @@ constexpr auto kWindReportsUrl = "https://www.spc.noaa.gov/climo/reports/today_w
 constexpr auto kYesterdayTornadoReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_torn.csv";
 constexpr auto kYesterdayHailReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_hail.csv";
 constexpr auto kYesterdayWindReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_wind.csv";
+
+struct OfficialAlertStyle {
+    const char* event;
+    int priority;
+    const char* hex;
+};
+
+// NWS Hazards Map colors, last updated by NWS on 2025-03-10.
+// Source: https://www.weather.gov/help-map
+constexpr std::array kOfficialAlertStyles{
+    OfficialAlertStyle{"Tsunami Warning", 1, "#FD6347"},
+    OfficialAlertStyle{"Tornado Warning", 2, "#FF0000"},
+    OfficialAlertStyle{"Extreme Wind Warning", 3, "#FF8C00"},
+    OfficialAlertStyle{"Severe Thunderstorm Warning", 4, "#FFA500"},
+    OfficialAlertStyle{"Flash Flood Warning", 5, "#8B0000"},
+    OfficialAlertStyle{"Flash Flood Statement", 6, "#8B0000"},
+    OfficialAlertStyle{"Severe Weather Statement", 7, "#00FFFF"},
+    OfficialAlertStyle{"Shelter In Place Warning", 8, "#FA8072"},
+    OfficialAlertStyle{"Evacuation Immediate", 9, "#7FFF00"},
+    OfficialAlertStyle{"Civil Danger Warning", 10, "#FFB6C1"},
+    OfficialAlertStyle{"Nuclear Power Plant Warning", 11, "#4B0082"},
+    OfficialAlertStyle{"Radiological Hazard Warning", 12, "#4B0082"},
+    OfficialAlertStyle{"Hazardous Materials Warning", 13, "#4B0082"},
+    OfficialAlertStyle{"Fire Warning", 14, "#A0522D"},
+    OfficialAlertStyle{"Civil Emergency Message", 15, "#FFB6C1"},
+    OfficialAlertStyle{"Law Enforcement Warning", 16, "#C0C0C0"},
+    OfficialAlertStyle{"Storm Surge Warning", 17, "#B524F7"},
+    OfficialAlertStyle{"Hurricane Force Wind Warning", 18, "#CD5C5C"},
+    OfficialAlertStyle{"Hurricane Warning", 19, "#DC143C"},
+    OfficialAlertStyle{"Typhoon Warning", 20, "#DC143C"},
+    OfficialAlertStyle{"Special Marine Warning", 21, "#FFA500"},
+    OfficialAlertStyle{"Blizzard Warning", 22, "#FF4500"},
+    OfficialAlertStyle{"Snow Squall Warning", 23, "#C71585"},
+    OfficialAlertStyle{"Ice Storm Warning", 24, "#8B008B"},
+    OfficialAlertStyle{"Heavy Freezing Spray Warning", 25, "#00BFFF"},
+    OfficialAlertStyle{"Winter Storm Warning", 26, "#FF69B4"},
+    OfficialAlertStyle{"Lake Effect Snow Warning", 27, "#008B8B"},
+    OfficialAlertStyle{"Dust Storm Warning", 28, "#FFE4C4"},
+    OfficialAlertStyle{"Blowing Dust Warning", 29, "#FFE4C4"},
+    OfficialAlertStyle{"High Wind Warning", 30, "#DAA520"},
+    OfficialAlertStyle{"Tropical Storm Warning", 31, "#B22222"},
+    OfficialAlertStyle{"Storm Warning", 32, "#9400D3"},
+    OfficialAlertStyle{"Tsunami Advisory", 33, "#D2691E"},
+    OfficialAlertStyle{"Tsunami Watch", 34, "#FF00FF"},
+    OfficialAlertStyle{"Avalanche Warning", 35, "#1E90FF"},
+    OfficialAlertStyle{"Earthquake Warning", 36, "#8B4513"},
+    OfficialAlertStyle{"Volcano Warning", 37, "#2F4F4F"},
+    OfficialAlertStyle{"Ashfall Warning", 38, "#A9A9A9"},
+    OfficialAlertStyle{"Flood Warning", 39, "#00FF00"},
+    OfficialAlertStyle{"Coastal Flood Warning", 40, "#228B22"},
+    OfficialAlertStyle{"Lakeshore Flood Warning", 41, "#228B22"},
+    OfficialAlertStyle{"Ashfall Advisory", 42, "#696969"},
+    OfficialAlertStyle{"High Surf Warning", 43, "#228B22"},
+    OfficialAlertStyle{"Extreme Heat Warning", 44, "#C71585"},
+    OfficialAlertStyle{"Tornado Watch", 45, "#FFFF00"},
+    OfficialAlertStyle{"Severe Thunderstorm Watch", 46, "#DB7093"},
+    OfficialAlertStyle{"Flash Flood Watch", 47, "#2E8B57"},
+    OfficialAlertStyle{"Gale Warning", 48, "#DDA0DD"},
+    OfficialAlertStyle{"Flood Statement", 49, "#00FF00"},
+    OfficialAlertStyle{"Extreme Cold Warning", 50, "#0000FF"},
+    OfficialAlertStyle{"Freeze Warning", 51, "#483D8B"},
+    OfficialAlertStyle{"Red Flag Warning", 52, "#FF1493"},
+    OfficialAlertStyle{"Storm Surge Watch", 53, "#DB7FF7"},
+    OfficialAlertStyle{"Hurricane Watch", 54, "#FF00FF"},
+    OfficialAlertStyle{"Hurricane Force Wind Watch", 55, "#9932CC"},
+    OfficialAlertStyle{"Typhoon Watch", 56, "#FF00FF"},
+    OfficialAlertStyle{"Tropical Storm Watch", 57, "#F08080"},
+    OfficialAlertStyle{"Storm Watch", 58, "#FFE4B5"},
+    OfficialAlertStyle{"Tropical Cyclone Local Statement", 59, "#FFE4B5"},
+    OfficialAlertStyle{"Winter Weather Advisory", 60, "#7B68EE"},
+    OfficialAlertStyle{"Avalanche Advisory", 61, "#CD853F"},
+    OfficialAlertStyle{"Cold Weather Advisory", 62, "#AFEEEE"},
+    OfficialAlertStyle{"Heat Advisory", 63, "#FF7F50"},
+    OfficialAlertStyle{"Flood Advisory", 64, "#00FF7F"},
+    OfficialAlertStyle{"Coastal Flood Advisory", 65, "#7CFC00"},
+    OfficialAlertStyle{"Lakeshore Flood Advisory", 66, "#7CFC00"},
+    OfficialAlertStyle{"High Surf Advisory", 67, "#BA55D3"},
+    OfficialAlertStyle{"Dense Fog Advisory", 68, "#708090"},
+    OfficialAlertStyle{"Dense Smoke Advisory", 69, "#F0E68C"},
+    OfficialAlertStyle{"Small Craft Advisory", 70, "#D8BFD8"},
+    OfficialAlertStyle{"Brisk Wind Advisory", 71, "#D8BFD8"},
+    OfficialAlertStyle{"Hazardous Seas Warning", 72, "#D8BFD8"},
+    OfficialAlertStyle{"Dust Advisory", 73, "#BDB76B"},
+    OfficialAlertStyle{"Blowing Dust Advisory", 74, "#BDB76B"},
+    OfficialAlertStyle{"Lake Wind Advisory", 75, "#D2B48C"},
+    OfficialAlertStyle{"Wind Advisory", 76, "#D2B48C"},
+    OfficialAlertStyle{"Frost Advisory", 77, "#6495ED"},
+    OfficialAlertStyle{"Freezing Fog Advisory", 78, "#008080"},
+    OfficialAlertStyle{"Freezing Spray Advisory", 79, "#00BFFF"},
+    OfficialAlertStyle{"Low Water Advisory", 80, "#A52A2A"},
+    OfficialAlertStyle{"Local Area Emergency", 81, "#C0C0C0"},
+    OfficialAlertStyle{"Winter Storm Watch", 82, "#4682B4"},
+    OfficialAlertStyle{"Rip Current Statement", 83, "#40E0D0"},
+    OfficialAlertStyle{"Beach Hazards Statement", 84, "#40E0D0"},
+    OfficialAlertStyle{"Gale Watch", 85, "#FFC0CB"},
+    OfficialAlertStyle{"Avalanche Watch", 86, "#F4A460"},
+    OfficialAlertStyle{"Hazardous Seas Watch", 87, "#483D8B"},
+    OfficialAlertStyle{"Heavy Freezing Spray Watch", 88, "#BC8F8F"},
+    OfficialAlertStyle{"Flood Watch", 89, "#2E8B57"},
+    OfficialAlertStyle{"Coastal Flood Watch", 90, "#66CDAA"},
+    OfficialAlertStyle{"Lakeshore Flood Watch", 91, "#66CDAA"},
+    OfficialAlertStyle{"High Wind Watch", 92, "#B8860B"},
+    OfficialAlertStyle{"Extreme Heat Watch", 93, "#800000"},
+    OfficialAlertStyle{"Extreme Cold Watch", 94, "#5F9EA0"},
+    OfficialAlertStyle{"Freeze Watch", 95, "#00FFFF"},
+    OfficialAlertStyle{"Fire Weather Watch", 96, "#FFDEAD"},
+    OfficialAlertStyle{"Extreme Fire Danger", 97, "#E9967A"},
+    OfficialAlertStyle{"911 Telephone Outage", 98, "#C0C0C0"},
+    OfficialAlertStyle{"Coastal Flood Statement", 99, "#6B8E23"},
+    OfficialAlertStyle{"Lakeshore Flood Statement", 100, "#6B8E23"},
+    OfficialAlertStyle{"Special Weather Statement", 101, "#FFE4B5"},
+    OfficialAlertStyle{"Marine Weather Statement", 102, "#FFDAB9"},
+    OfficialAlertStyle{"Air Quality Alert", 103, "#808080"},
+    OfficialAlertStyle{"Air Stagnation Advisory", 104, "#808080"},
+    OfficialAlertStyle{"Hazardous Weather Outlook", 105, "#EEE8AA"},
+    OfficialAlertStyle{"Hydrologic Outlook", 106, "#90EE90"},
+    OfficialAlertStyle{"Short Term Forecast", 107, "#98FB98"},
+    OfficialAlertStyle{"Administrative Message", 108, "#C0C0C0"},
+    OfficialAlertStyle{"Test", 109, "#F0FFFF"},
+    OfficialAlertStyle{"Child Abduction Emergency", 110, "#FFFFFF"},
+    OfficialAlertStyle{"Blue Alert", 111, "#FFFFFF"},
+};
 
 QStringList csvFields(const QString& line) {
     QStringList fields;
@@ -108,6 +231,19 @@ QVector<WarningPolygon> parseZoneGeometryDocument(const QByteArray& data, QStrin
 }
 }
 
+NwsAlertStyle nwsAlertStyle(const QString& event) {
+    const auto normalized = event.trimmed();
+    for (const auto& style : kOfficialAlertStyles) {
+        if (normalized.compare(QString::fromLatin1(style.event), Qt::CaseInsensitive) == 0)
+            return {QColor(QString::fromLatin1(style.hex)), style.priority};
+    }
+    return {QColor(QStringLiteral("#F4D35E")), 1000};
+}
+
+int nwsOfficialAlertStyleCount() {
+    return static_cast<int>(kOfficialAlertStyles.size());
+}
+
 WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
     : QObject(parent) {
     connect(&network_, &QNetworkAccessManager::finished, this, &WeatherOverlaySource::requestFinished);
@@ -135,6 +271,9 @@ QVector<WeatherWarning> WeatherOverlaySource::parseAlerts(const QByteArray& data
         warning.instruction = properties.value(QStringLiteral("instruction")).toString();
         warning.onset = QDateTime::fromString(properties.value(QStringLiteral("onset")).toString(), Qt::ISODate);
         warning.expires = QDateTime::fromString(properties.value(QStringLiteral("expires")).toString(), Qt::ISODate);
+        const auto alertStyle = nwsAlertStyle(warning.event);
+        warning.alertColor = alertStyle.color;
+        warning.alertPriority = alertStyle.priority;
         for (const auto& zone : properties.value(QStringLiteral("affectedZones")).toArray()) {
             if (zone.isString()) warning.affectedZones.push_back(zone.toString());
         }

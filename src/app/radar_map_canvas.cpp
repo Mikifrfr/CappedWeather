@@ -421,27 +421,44 @@ void RadarMapCanvas::setWeatherOverlays(QVector<WeatherWarning> warnings,
     warnings_ = std::move(warnings);
     stormReports_ = std::move(reports);
     ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
     update();
 }
 
 void RadarMapCanvas::setWarningsVisible(const bool visible) {
+    if (warningsVisible_ == visible) return;
     warningsVisible_ = visible;
+    ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
     update();
 }
 
 void RadarMapCanvas::setStormReportsVisible(const bool visible) {
+    if (stormReportsVisible_ == visible) return;
     stormReportsVisible_ = visible;
+    ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
     update();
 }
 
 void RadarMapCanvas::setStormReportKindVisible(const StormReportKind kind, const bool visible) {
+    if (stormReportKindsVisible_.at(static_cast<std::size_t>(kind)) == visible) return;
     stormReportKindsVisible_.at(static_cast<std::size_t>(kind)) = visible;
+    ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
     update();
 }
 
 void RadarMapCanvas::setWarningFilter(const QString& filter) {
+    if (warningFilter_ == filter) return;
     warningFilter_ = filter;
     ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
     update();
 }
 
@@ -742,6 +759,8 @@ void RadarMapCanvas::invalidateWorldCaches(const bool zoomChanged) {
     if (zoomChanged) {
         siteWorldZoom_ = -1;
         warningPathsZoom_ = -1;
+        weatherOverlayImage_ = {};
+        weatherOverlayZoom_ = -1;
     }
 }
 
@@ -778,6 +797,180 @@ bool RadarMapCanvas::overlayCacheCoversView() const {
     const auto verticalMargin = (overlayImageLogicalSize_.height() - height()) / 2.0;
     return std::abs(dx) <= std::max(0.0, horizontalMargin - 24.0) &&
            std::abs(dy) <= std::max(0.0, verticalMargin - 24.0);
+}
+
+bool RadarMapCanvas::weatherOverlayCacheCoversView() const {
+    if (weatherOverlayImage_.isNull() || weatherOverlayZoom_ != zoom_ ||
+        weatherOverlayImageGeneration_ != weatherGeneration_ ||
+        weatherOverlayImageLogicalSize_.isEmpty()) return false;
+    const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+    const auto currentCenter = mapCenterWorld();
+    auto dx = currentCenter.x() - weatherOverlayImageCenterWorld_.x();
+    if (dx > world / 2.0) dx -= world;
+    if (dx < -world / 2.0) dx += world;
+    const auto dy = currentCenter.y() - weatherOverlayImageCenterWorld_.y();
+    const auto horizontalMargin = (weatherOverlayImageLogicalSize_.width() - width()) / 2.0;
+    const auto verticalMargin = (weatherOverlayImageLogicalSize_.height() - height()) / 2.0;
+    return std::abs(dx) <= std::max(0.0, horizontalMargin - 24.0) &&
+           std::abs(dy) <= std::max(0.0, verticalMargin - 24.0);
+}
+
+void RadarMapCanvas::rebuildWeatherOverlay() {
+    if (weatherOverlayBuildPending_ || width() <= 0 || height() <= 0 || weatherOverlayCacheCoversView())
+        return;
+
+    weatherOverlayBuildPending_ = true;
+    const auto generation = weatherGeneration_;
+    const auto targetZoom = zoom_;
+    const auto centerCoordinate = center_;
+    const auto viewportSize = size();
+    const auto devicePixelRatio = devicePixelRatioF();
+    const auto warnings = warnings_;
+    const auto reports = stormReports_;
+    const auto warningFilter = warningFilter_;
+    const auto warningsVisible = warningsVisible_;
+    const auto stormReportsVisible = stormReportsVisible_;
+    const auto reportKindsVisible = stormReportKindsVisible_;
+    const QPointer<RadarMapCanvas> guard(this);
+    QThreadPool::globalInstance()->start([
+        guard, generation, targetZoom, centerCoordinate, viewportSize, devicePixelRatio,
+        warnings, reports, warningFilter, warningsVisible, stormReportsVisible, reportKindsVisible
+    ] {
+        constexpr int kOverlayMargin = 256;
+        const auto worldPointAt = [targetZoom](const double latitude, const double longitude) {
+            const auto world = static_cast<double>(RadarMapCanvas::kTileSize * (1 << targetZoom));
+            const auto lat = qDegreesToRadians(std::clamp(latitude, -85.0511, 85.0511));
+            const auto sinLat = std::sin(lat);
+            return QPointF((longitude + 180.0) / 360.0 * world,
+                           (0.5 - std::log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * kPi)) * world);
+        };
+
+        QVector<CachedWarningPath> paths;
+        QVector<int> warningOrder;
+        warningOrder.reserve(warnings.size());
+        for (int warningIndex = 0; warningIndex < warnings.size(); ++warningIndex) {
+            const auto& warning = warnings.at(warningIndex);
+            if (!warningFilter.isEmpty() &&
+                !warning.event.contains(warningFilter, Qt::CaseInsensitive) &&
+                !warning.severity.contains(warningFilter, Qt::CaseInsensitive)) continue;
+            warningOrder.push_back(warningIndex);
+        }
+        std::sort(warningOrder.begin(), warningOrder.end(), [&warnings](const int left, const int right) {
+            const auto& leftWarning = warnings.at(left);
+            const auto& rightWarning = warnings.at(right);
+            if (leftWarning.alertPriority != rightWarning.alertPriority)
+                return leftWarning.alertPriority < rightWarning.alertPriority;
+            return left < right;
+        });
+
+        QHash<QRgb, QPainterPath> warningGroups;
+        QVector<QRgb> warningGroupOrder;
+        for (const auto warningIndex : warningOrder) {
+            const auto& warning = warnings.at(warningIndex);
+            const auto color = warning.alertColor.isValid()
+                                   ? warning.alertColor
+                                   : nwsAlertStyle(warning.event).color;
+            auto& group = warningGroups[color.rgba()];
+            if (group.isEmpty()) warningGroupOrder.push_back(color.rgba());
+            for (const auto& geographicPolygon : warning.polygons) {
+                QPainterPath path;
+                path.setFillRule(Qt::OddEvenFill);
+                QPolygonF exterior;
+                exterior.reserve(geographicPolygon.exterior.size());
+                for (const auto& coordinate : geographicPolygon.exterior)
+                    exterior.push_back(worldPointAt(coordinate.y(), coordinate.x()));
+                path.addPolygon(exterior);
+                for (const auto& geographicHole : geographicPolygon.holes) {
+                    QPolygonF hole;
+                    hole.reserve(geographicHole.size());
+                    for (const auto& coordinate : geographicHole)
+                        hole.push_back(worldPointAt(coordinate.y(), coordinate.x()));
+                    path.addPolygon(hole);
+                }
+                const auto bounds = path.boundingRect();
+                paths.push_back({warningIndex, color, path, bounds});
+                group.addPath(path);
+            }
+        }
+
+        QVector<QPointF> reportWorldPoints;
+        reportWorldPoints.reserve(reports.size());
+        std::array<QPainterPath, 3> reportGroups;
+        for (const auto& report : reports) {
+            const auto point = worldPointAt(report.coordinate.y(), report.coordinate.x());
+            reportWorldPoints.push_back(point);
+            const auto kindIndex = static_cast<std::size_t>(report.kind);
+            if (!stormReportsVisible || kindIndex >= reportKindsVisible.size() ||
+                !reportKindsVisible.at(kindIndex)) continue;
+            auto& group = reportGroups.at(kindIndex);
+            if (report.kind == StormReportKind::Tornado) {
+                group.addPolygon(QPolygonF{{point.x(), point.y() - 6.0},
+                                           {point.x() - 5.5, point.y() + 5.0},
+                                           {point.x() + 5.5, point.y() + 5.0}});
+            } else if (report.kind == StormReportKind::Hail) {
+                group.addEllipse(point, 5.0, 5.0);
+            } else {
+                group.addRect(QRectF(point.x() - 4.5, point.y() - 4.5, 9.0, 9.0));
+            }
+        }
+
+        const auto overlayLogicalSize = viewportSize + QSize(kOverlayMargin * 2, kOverlayMargin * 2);
+        const auto pixelSize = QSize(
+            std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.width() * devicePixelRatio))),
+            std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.height() * devicePixelRatio))));
+        QImage overlayImage(pixelSize, QImage::Format_ARGB32_Premultiplied);
+        overlayImage.setDevicePixelRatio(devicePixelRatio);
+        overlayImage.fill(Qt::transparent);
+        const auto overlayCenterWorld = worldPointAt(centerCoordinate.y(), centerCoordinate.x());
+        QPainter overlayPainter(&overlayImage);
+        overlayPainter.setRenderHint(QPainter::Antialiasing, true);
+        overlayPainter.setPen(Qt::NoPen);
+        overlayPainter.translate(overlayLogicalSize.width() / 2.0 - overlayCenterWorld.x(),
+                                 overlayLogicalSize.height() / 2.0 - overlayCenterWorld.y());
+        if (warningsVisible) {
+            for (const auto rgba : warningGroupOrder) {
+                const auto group = warningGroups.constFind(rgba);
+                if (group == warningGroups.cend()) continue;
+                const auto color = QColor::fromRgba(rgba);
+                auto fill = color;
+                fill.setAlpha(35);
+                overlayPainter.setPen(QPen(color, 2.0));
+                overlayPainter.setBrush(fill);
+                overlayPainter.drawPath(*group);
+            }
+        }
+        if (stormReportsVisible) {
+            const std::array reportColors{QColor("#ff3b4d"), QColor("#53d769"), QColor("#44a7ff")};
+            for (std::size_t kindIndex = 0; kindIndex < reportGroups.size(); ++kindIndex) {
+                if (!reportKindsVisible.at(kindIndex) || reportGroups.at(kindIndex).isEmpty()) continue;
+                overlayPainter.setPen(QPen(QColor(245, 248, 249), 1.0));
+                overlayPainter.setBrush(reportColors.at(kindIndex));
+                overlayPainter.drawPath(reportGroups.at(kindIndex));
+            }
+        }
+        overlayPainter.end();
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [
+            guard, generation, targetZoom, paths = std::move(paths),
+            reportWorldPoints = std::move(reportWorldPoints),
+            overlayImage = std::move(overlayImage), overlayLogicalSize, overlayCenterWorld
+        ]() mutable {
+            if (!guard) return;
+            guard->weatherOverlayBuildPending_ = false;
+            if (generation == guard->weatherGeneration_ && targetZoom == guard->zoom_) {
+                guard->warningPaths_ = std::move(paths);
+                guard->warningPathsZoom_ = targetZoom;
+                guard->warningPathsGeneration_ = generation;
+                guard->stormReportWorldPoints_ = std::move(reportWorldPoints);
+                guard->weatherOverlayImage_ = std::move(overlayImage);
+                guard->weatherOverlayImageLogicalSize_ = overlayLogicalSize;
+                guard->weatherOverlayImageCenterWorld_ = overlayCenterWorld;
+                guard->weatherOverlayZoom_ = targetZoom;
+                guard->weatherOverlayImageGeneration_ = generation;
+            }
+            guard->update();
+        }, Qt::QueuedConnection);
+    });
 }
 
 void RadarMapCanvas::rebuildOverlay() {
@@ -981,10 +1174,9 @@ void RadarMapCanvas::ensureWeatherPaths() const {
         if (!warningFilter_.isEmpty() &&
             !warning.event.contains(warningFilter_, Qt::CaseInsensitive) &&
             !warning.severity.contains(warningFilter_, Qt::CaseInsensitive)) continue;
-        QColor color("#f4d35e");
-        if (warning.event.contains(QStringLiteral("Tornado"), Qt::CaseInsensitive)) color = QColor("#ff3b4d");
-        else if (warning.event.contains(QStringLiteral("Severe Thunderstorm"), Qt::CaseInsensitive)) color = QColor("#ff9f43");
-        else if (warning.event.contains(QStringLiteral("Flash Flood"), Qt::CaseInsensitive)) color = QColor("#36d17c");
+        const auto color = warning.alertColor.isValid()
+                               ? warning.alertColor
+                               : nwsAlertStyle(warning.event).color;
         for (const auto& geographicPolygon : warning.polygons) {
             QPainterPath path;
             path.setFillRule(Qt::OddEvenFill);
@@ -1000,7 +1192,8 @@ void RadarMapCanvas::ensureWeatherPaths() const {
                     hole.push_back(worldPoint(coordinate.y(), coordinate.x()));
                 path.addPolygon(hole);
             }
-            warningPaths_.push_back({warningIndex, color, std::move(path)});
+            const auto bounds = path.boundingRect();
+            warningPaths_.push_back({warningIndex, color, std::move(path), bounds});
         }
     }
     warningPathsZoom_ = zoom_;
@@ -1008,47 +1201,22 @@ void RadarMapCanvas::ensureWeatherPaths() const {
 }
 
 void RadarMapCanvas::paintWeatherOverlays(QPainter& painter) {
-    ensureWeatherPaths();
-    if (warningsVisible_) {
-        painter.save();
-        const auto center = mapCenterWorld();
-        const QRectF visibleWorld(center.x() - width() / 2.0, center.y() - height() / 2.0,
-                                  width(), height());
-        painter.translate(width() / 2.0 - center.x(), height() / 2.0 - center.y());
-        for (const auto& cached : warningPaths_) {
-            if (!cached.path.boundingRect().intersects(visibleWorld)) continue;
-            painter.setPen(QPen(cached.color, 2.0));
-            auto fill = cached.color;
-            fill.setAlpha(35);
-            painter.setBrush(fill);
-            painter.drawPath(cached.path);
-        }
-        painter.restore();
-    }
+    if (!weatherOverlayCacheCoversView()) rebuildWeatherOverlay();
+    if (weatherOverlayImage_.isNull() || weatherOverlayImageGeneration_ != weatherGeneration_ ||
+        weatherOverlayZoom_ != zoom_) return;
 
-    if (stormReportsVisible_) {
-        painter.setPen(QPen(QColor(245, 248, 249), 1.0));
-        for (qsizetype reportIndex = 0; reportIndex < stormReports_.size(); ++reportIndex) {
-            const auto& report = stormReports_.at(reportIndex);
-            if (!stormReportKindsVisible_.at(static_cast<std::size_t>(report.kind))) continue;
-            const auto point = reportIndex < stormReportWorldPoints_.size()
-                                   ? screenPointFromWorld(stormReportWorldPoints_.at(reportIndex))
-                                   : screenPoint(report.coordinate.y(), report.coordinate.x());
-            if (!rect().adjusted(-10, -10, 10, 10).contains(point.toPoint())) continue;
-            if (report.kind == StormReportKind::Tornado) {
-                painter.setBrush(QColor("#ff3b4d"));
-                painter.drawPolygon(QPolygonF{{point.x(), point.y() - 6.0},
-                                               {point.x() - 5.5, point.y() + 5.0},
-                                               {point.x() + 5.5, point.y() + 5.0}});
-            } else if (report.kind == StormReportKind::Hail) {
-                painter.setBrush(QColor("#53d769"));
-                painter.drawEllipse(point, 5.0, 5.0);
-            } else {
-                painter.setBrush(QColor("#44a7ff"));
-                painter.drawRect(QRectF(point.x() - 4.5, point.y() - 4.5, 9.0, 9.0));
-            }
-        }
-    }
+    painter.save();
+    const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+    const auto currentCenter = mapCenterWorld();
+    auto dx = weatherOverlayImageCenterWorld_.x() - currentCenter.x();
+    if (dx > world / 2.0) dx -= world;
+    if (dx < -world / 2.0) dx += world;
+    const auto dy = weatherOverlayImageCenterWorld_.y() - currentCenter.y();
+    const QPointF topLeft(
+        std::round(width() / 2.0 - weatherOverlayImageLogicalSize_.width() / 2.0 + dx),
+        std::round(height() / 2.0 - weatherOverlayImageLogicalSize_.height() / 2.0 + dy));
+    painter.drawImage(QRectF(topLeft, weatherOverlayImageLogicalSize_), weatherOverlayImage_);
+    painter.restore();
 }
 
 void RadarMapCanvas::paintLegend(QPainter& painter) {
@@ -1111,17 +1279,7 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         const auto bodyStart = isWarning ? 3 : 1;
         const auto body = parts.mid(bodyStart).join(QLatin1Char('\n')).trimmed();
 
-        QColor accent("#80d3ff");
-        if (title.contains(QStringLiteral("Tornado"), Qt::CaseInsensitive) ||
-            severity.contains(QStringLiteral("Extreme"), Qt::CaseInsensitive)) {
-            accent = QColor("#ff4d5e");
-        } else if (title.contains(QStringLiteral("Severe Thunderstorm"), Qt::CaseInsensitive)) {
-            accent = QColor("#ffad4d");
-        } else if (title.contains(QStringLiteral("Flash Flood"), Qt::CaseInsensitive)) {
-            accent = QColor("#45d98a");
-        } else if (isWarning) {
-            accent = QColor("#f4d35e");
-        }
+        const auto accent = isWarning ? nwsAlertStyle(title).color : QColor("#80d3ff");
 
         const auto cardWidth = std::min(440.0, std::max(280.0, width() - 24.0));
         const auto maximumHeight = std::max(110.0, std::min(300.0, height() - 24.0));
@@ -1353,7 +1511,7 @@ QString RadarMapCanvas::overlayAt(const QPointF& point) const {
         const auto world = static_cast<double>(kTileSize * (1 << zoom_));
         worldPointAtCursor.setX(std::fmod(worldPointAtCursor.x() + world, world));
         for (const auto& cached : warningPaths_) {
-            if (!cached.path.boundingRect().contains(worldPointAtCursor) ||
+            if (!cached.bounds.contains(worldPointAtCursor) ||
                 !cached.path.contains(worldPointAtCursor)) continue;
             if (cached.warningIndex >= 0 && cached.warningIndex < warnings_.size()) {
                     const auto& warning = warnings_.at(cached.warningIndex);
