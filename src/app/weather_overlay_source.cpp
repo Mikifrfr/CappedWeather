@@ -240,17 +240,44 @@ void WeatherOverlaySource::request(const QUrl& url, RequestContext context, cons
     request.setTransferTimeout(std::clamp(QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(),
                                           5, 120) * 1000);
     if (!accept.isEmpty()) request.setRawHeader(QByteArrayLiteral("Accept"), accept);
+    if (context.kind != RequestKind::Zone) {
+        if (const auto etag = responseEtags_.value(url); !etag.isEmpty())
+            request.setRawHeader(QByteArrayLiteral("If-None-Match"), etag);
+        if (const auto modified = responseLastModified_.value(url); !modified.isEmpty())
+            request.setRawHeader(QByteArrayLiteral("If-Modified-Since"), modified);
+    }
     auto* reply = network_.get(request);
     requests_.insert(reply, std::move(context));
 }
 
 void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
     const auto context = requests_.take(reply);
-    if (reply->error() != QNetworkReply::NoError) {
+    const auto url = reply->request().url();
+    const auto statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    QByteArray data;
+    bool responseAvailable = false;
+    if (statusCode == 304 && context.kind != RequestKind::Zone && responseBodies_.contains(url)) {
+        data = responseBodies_.value(url);
+        responseAvailable = true;
+    } else if (reply->error() == QNetworkReply::NoError) {
+        data = reply->readAll();
+        responseAvailable = true;
+        if (context.kind != RequestKind::Zone) {
+            responseBodies_.insert(url, data);
+            if (const auto etag = reply->rawHeader(QByteArrayLiteral("ETag")); !etag.isEmpty())
+                responseEtags_.insert(url, etag);
+            if (const auto modified = reply->rawHeader(QByteArrayLiteral("Last-Modified")); !modified.isEmpty())
+                responseLastModified_.insert(url, modified);
+        }
+    }
+    if (!responseAvailable) {
         ++failures_;
-        if (firstError_.isEmpty()) firstError_ = reply->errorString();
+        if (firstError_.isEmpty()) {
+            firstError_ = statusCode == 304
+                              ? QStringLiteral("overlay cache revalidation returned no cached body")
+                              : reply->errorString();
+        }
     } else {
-        const auto data = reply->readAll();
         QString error;
         if (context.kind == RequestKind::Alerts) {
             auto parsed = parseAlerts(data, &error);

@@ -6,6 +6,8 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QNetworkDiskCache>
+#include <QApplication>
+#include <QCache>
 #include <QPointer>
 #include <QLineF>
 #include <QPainter>
@@ -17,19 +19,22 @@
 #include <QToolTip>
 #include <QStandardPaths>
 #include <QSettings>
+#include <QSet>
+#include <QShowEvent>
 #include <QtMath>
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <mutex>
 
 namespace cappedweather {
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
-int nextTileCacheId = 0;
 
 struct ColorStop {
     double position;
@@ -200,6 +205,131 @@ QColor productColor(const ProductKind product, const double normalized,
 int wrappedTileX(const int x, const int count) {
     return ((x % count) + count) % count;
 }
+
+struct SharedTileStore {
+    QNetworkAccessManager* network = nullptr;
+    QNetworkDiskCache* diskCache = nullptr;
+    QCache<QString, QImage> tiles;
+    QSet<QString> pendingKeys;
+    QHash<QNetworkReply*, QString> replies;
+    QHash<QString, QVector<QPointer<RadarMapCanvas>>> watchers;
+};
+
+void watchTile(SharedTileStore& store, const QString& key, RadarMapCanvas* canvas) {
+    auto& watchers = store.watchers[key];
+    const auto alreadyWatching = std::any_of(watchers.cbegin(), watchers.cend(),
+                                              [canvas](const auto& watcher) {
+                                                  return watcher == canvas;
+                                              });
+    if (!alreadyWatching) watchers.push_back(canvas);
+}
+
+SharedTileStore& tileStore() {
+    static auto* store = [] {
+        auto* result = new SharedTileStore;
+        const QSettings settings;
+        result->tiles.setMaxCost(std::clamp(
+            settings.value(QStringLiteral("cache/memoryMbPerPanel"), 32).toInt(), 8, 256) * 1024 * 1024);
+        result->network = new QNetworkAccessManager(qApp);
+        result->diskCache = new QNetworkDiskCache(result->network);
+        result->diskCache->setCacheDirectory(
+            QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/map-tiles/shared"));
+        result->diskCache->setMaximumCacheSize(std::clamp<qint64>(
+            settings.value(QStringLiteral("cache/diskMbPerPanel"), 64).toLongLong(), 16, 1024) * 1024LL * 1024LL);
+        result->network->setCache(result->diskCache);
+        QObject::connect(result->network, &QNetworkAccessManager::finished,
+                         result->network, [result](QNetworkReply* reply) {
+            const auto key = result->replies.take(reply);
+            result->pendingKeys.remove(key);
+            if (reply->error() == QNetworkReply::NoError) {
+                const auto image = QImage::fromData(reply->readAll(), "PNG");
+                if (!image.isNull()) {
+                    const auto cost = static_cast<int>(std::min<qsizetype>(
+                        image.sizeInBytes(), std::numeric_limits<int>::max()));
+                    result->tiles.insert(key, new QImage(image), std::max(1, cost));
+                }
+            }
+            reply->deleteLater();
+            const auto watchers = result->watchers.take(key);
+            for (const auto& canvas : watchers)
+                if (canvas && canvas->isVisible()) canvas->update();
+        });
+        return result;
+    }();
+    return *store;
+}
+
+struct VelocityCacheEntry {
+    std::weak_ptr<const DecodedChunk> chunk;
+    std::array<int, 4> parameters{};
+    std::weak_ptr<const ProcessedVelocity> processed;
+    std::shared_future<std::shared_ptr<const ProcessedVelocity>> pending;
+};
+
+std::mutex velocityCacheMutex;
+std::vector<VelocityCacheEntry> velocityCache;
+
+std::array<int, 4> velocityCacheParameters(const VelocityProcessingOptions& options) {
+    return {static_cast<int>(options.mode),
+            static_cast<int>(std::lround(options.nyquistVelocityMetersPerSecond * 10.0)),
+            static_cast<int>(std::lround(options.stormMotionDirectionDegrees * 10.0)),
+            static_cast<int>(std::lround(options.stormMotionSpeedMetersPerSecond * 10.0))};
+}
+
+bool sameOwner(const std::weak_ptr<const DecodedChunk>& cached,
+               const std::shared_ptr<const DecodedChunk>& chunk) {
+    const std::owner_less<void> less;
+    return !less(cached, chunk) && !less(chunk, cached);
+}
+
+std::shared_ptr<const ProcessedVelocity> sharedProcessedVelocity(
+    const std::shared_ptr<const DecodedChunk>& chunk, const VelocityProcessingOptions& options) {
+    const auto parameters = velocityCacheParameters(options);
+    std::shared_future<std::shared_ptr<const ProcessedVelocity>> pending;
+    std::shared_ptr<std::promise<std::shared_ptr<const ProcessedVelocity>>> producer;
+    {
+        const std::scoped_lock lock(velocityCacheMutex);
+        std::erase_if(velocityCache, [](const auto& entry) {
+            return entry.chunk.expired() && !entry.pending.valid();
+        });
+        const auto existing = std::find_if(velocityCache.begin(), velocityCache.end(),
+                                           [&chunk, &parameters](const auto& entry) {
+                                               return entry.parameters == parameters &&
+                                                      sameOwner(entry.chunk, chunk);
+                                           });
+        if (existing != velocityCache.end()) {
+            if (const auto processed = existing->processed.lock()) return processed;
+            if (existing->pending.valid()) pending = existing->pending;
+        }
+        if (!pending.valid()) {
+            producer = std::make_shared<std::promise<std::shared_ptr<const ProcessedVelocity>>>();
+            pending = producer->get_future().share();
+            if (existing != velocityCache.end()) existing->pending = pending;
+            else velocityCache.push_back({chunk, parameters, {}, pending});
+        }
+    }
+    if (!producer) return pending.get();
+    auto processed = std::make_shared<const ProcessedVelocity>(processVelocity(*chunk, options));
+    {
+        const std::scoped_lock lock(velocityCacheMutex);
+        const auto existing = std::find_if(velocityCache.begin(), velocityCache.end(),
+                                           [&chunk, &parameters](const auto& entry) {
+                                               return entry.parameters == parameters &&
+                                                      sameOwner(entry.chunk, chunk);
+                                           });
+        if (existing != velocityCache.end()) {
+            existing->processed = processed;
+            existing->pending = {};
+        }
+        if (velocityCache.size() > 64) {
+            std::erase_if(velocityCache, [](const auto& entry) {
+                return entry.chunk.expired() && !entry.pending.valid();
+            });
+        }
+    }
+    producer->set_value(processed);
+    return processed;
+}
 }
 
 RadarMapCanvas::RadarMapCanvas(QWidget* parent)
@@ -207,29 +337,30 @@ RadarMapCanvas::RadarMapCanvas(QWidget* parent)
     setObjectName(QStringLiteral("radarMap"));
     setMinimumSize(300, 220);
     setMouseTracking(true);
-    const QSettings settings;
-    tiles_.setMaxCost(std::clamp(settings.value(QStringLiteral("cache/memoryMbPerPanel"), 32).toInt(),
-                                 8, 256) * 1024 * 1024);
-    tileDiskCache_ = new QNetworkDiskCache(this);
-    tileDiskCache_->setCacheDirectory(QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
-                                      QStringLiteral("/map-tiles/panel-%1").arg(nextTileCacheId++));
-    tileDiskCache_->setMaximumCacheSize(std::clamp<qint64>(
-        settings.value(QStringLiteral("cache/diskMbPerPanel"), 64).toLongLong(), 16, 1024) * 1024LL * 1024LL);
-    network_.setCache(tileDiskCache_);
-    connect(&network_, &QNetworkAccessManager::finished, this, &RadarMapCanvas::tileFinished);
-    auto* loadingTimer = new QTimer(this);
-    loadingTimer->setInterval(50);
-    connect(loadingTimer, &QTimer::timeout, this, [this] {
-        if (!loading_) return;
+    loadingTimer_ = new QTimer(this);
+    loadingTimer_->setInterval(80);
+    connect(loadingTimer_, &QTimer::timeout, this, [this] {
         loadingAngle_ = (loadingAngle_ + 18) % 360;
-        update();
+        update(QRect(width() - 300, 58, 294, 52));
     });
-    loadingTimer->start();
+    probeTimer_ = new QTimer(this);
+    probeTimer_->setSingleShot(true);
+    probeTimer_->setInterval(16);
+    connect(probeTimer_, &QTimer::timeout, this, [this] {
+        hoverRadarId_ = radarAt(pendingProbePosition_);
+        updateProbe(pendingProbePosition_);
+    });
 }
+
+RadarMapCanvas::~RadarMapCanvas() = default;
 
 void RadarMapCanvas::setSites(std::vector<RadarSite> sites) {
     sites_ = std::move(sites);
-    invalidateOverlay();
+    siteIndexes_.clear();
+    for (std::size_t index = 0; index < sites_.size(); ++index)
+        siteIndexes_.insert(QString::fromStdString(sites_[index].id), index);
+    siteWorldZoom_ = -1;
+    invalidateOverlay(true);
     update();
 }
 
@@ -248,19 +379,23 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         }
         center_ = {site->longitude.value(), site->latitude.value()};
         zoom_ = 6;
+        invalidateWorldCaches(true);
     }
     update();
 }
 
 void RadarMapCanvas::setProduct(const ProductKind product) {
     product_ = product;
-    invalidateOverlay();
+    refreshVelocityProcessing();
+    rebuildProbeIndex();
+    invalidateOverlay(true);
     refreshScanDiagnostics();
     update();
 }
 
 void RadarMapCanvas::setElevationFilter(const std::optional<int> elevationNumber) {
     elevationFilter_ = elevationNumber;
+    rebuildProbeIndex();
     invalidateOverlay();
     refreshScanDiagnostics();
     update();
@@ -275,6 +410,7 @@ void RadarMapCanvas::setDecodedChunk(std::shared_ptr<const DecodedChunk> chunk, 
     dataTime_ = dataTime;
     invalidateOverlay();
     refreshVelocityProcessing();
+    rebuildProbeIndex();
     refreshScanDiagnostics();
     setLoading(false);
     update();
@@ -284,6 +420,7 @@ void RadarMapCanvas::setWeatherOverlays(QVector<WeatherWarning> warnings,
                                         QVector<StormReport> reports) {
     warnings_ = std::move(warnings);
     stormReports_ = std::move(reports);
+    ++weatherGeneration_;
     update();
 }
 
@@ -304,6 +441,7 @@ void RadarMapCanvas::setStormReportKindVisible(const StormReportKind kind, const
 
 void RadarMapCanvas::setWarningFilter(const QString& filter) {
     warningFilter_ = filter;
+    ++weatherGeneration_;
     update();
 }
 
@@ -345,8 +483,43 @@ void RadarMapCanvas::setVelocityProcessing(VelocityProcessingOptions options) {
 
 void RadarMapCanvas::refreshVelocityProcessing() {
     processedVelocity_.reset();
-    if (chunk_) processedVelocity_ = std::make_shared<const std::vector<std::vector<double>>>(
-        processVelocity(*chunk_, velocityOptions_));
+    const auto generation = ++velocityGeneration_;
+    velocityBuildPending_ = false;
+    if (!isVisible()) return;
+    if (!chunk_ || product_ != ProductKind::Velocity ||
+        velocityOptions_.mode == VelocityProcessingMode::Native) return;
+    velocityBuildPending_ = true;
+    const auto chunk = chunk_;
+    const auto options = velocityOptions_;
+    const QPointer<RadarMapCanvas> guard(this);
+    QThreadPool::globalInstance()->start([guard, generation, chunk, options] {
+        const auto processed = sharedProcessedVelocity(chunk, options);
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [guard, generation, processed] {
+            if (!guard || generation != guard->velocityGeneration_) return;
+            guard->processedVelocity_ = processed;
+            guard->velocityBuildPending_ = false;
+            guard->invalidateOverlay();
+            guard->update();
+        }, Qt::QueuedConnection);
+    });
+}
+
+void RadarMapCanvas::rebuildProbeIndex() {
+    probeRayIndex_.clear();
+    if (!chunk_) return;
+    probeRayIndex_.reserve(static_cast<qsizetype>(chunk_->rays.size()));
+    for (std::size_t rayIndex = 0; rayIndex < chunk_->rays.size(); ++rayIndex) {
+        const auto& ray = chunk_->rays[rayIndex];
+        if (elevationFilter_ && ray.elevationNumber != *elevationFilter_) continue;
+        if (!ray.has(product_)) continue;
+        auto azimuth = std::fmod(static_cast<double>(ray.azimuthDegrees), 360.0);
+        if (azimuth < 0.0) azimuth += 360.0;
+        probeRayIndex_.push_back({azimuth, rayIndex});
+    }
+    std::sort(probeRayIndex_.begin(), probeRayIndex_.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
 }
 
 void RadarMapCanvas::setMeasureMode(const bool enabled) {
@@ -402,12 +575,15 @@ void RadarMapCanvas::setLoading(const bool loading, const QString& message) {
     loading_ = loading;
     loadingMessage_ = message;
     if (loading) loadingAngle_ = 0;
+    if (loading && !loadingTimer_->isActive()) loadingTimer_->start();
+    else if (!loading) loadingTimer_->stop();
     update();
 }
 
 void RadarMapCanvas::showNationalView() {
     center_ = {-96.5, 38.5};
     zoom_ = 4;
+    invalidateWorldCaches(true);
     invalidateOverlay();
     update();
     emit viewChanged(center_, zoom_);
@@ -418,6 +594,7 @@ void RadarMapCanvas::recenterSelected() {
     if (!site || !site->latitude || !site->longitude) return;
     center_ = {*site->longitude, *site->latitude};
     zoom_ = 6;
+    invalidateWorldCaches(true);
     invalidateOverlay();
     update();
     emit viewChanged(center_, zoom_);
@@ -432,9 +609,11 @@ void RadarMapCanvas::zoomOut() {
 }
 
 void RadarMapCanvas::setView(const QPointF& center, const int zoom) {
+    const auto previousZoom = zoom_;
     center_ = {std::clamp(center.x(), -180.0, 180.0), std::clamp(center.y(), -85.0, 85.0)};
     zoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
-    invalidateOverlay();
+    invalidateWorldCaches(zoom_ != previousZoom);
+    if (zoom_ != previousZoom) invalidateOverlay(true);
     update();
 }
 
@@ -509,21 +688,31 @@ QPointF RadarMapCanvas::worldPoint(const double latitude, const double longitude
     return {x, y};
 }
 
-QPointF RadarMapCanvas::screenPoint(const double latitude, const double longitude) const {
+QPointF RadarMapCanvas::mapCenterWorld() const {
+    if (cachedWorldCenterZoom_ != zoom_ || cachedCenterCoordinate_ != center_) {
+        cachedWorldCenter_ = worldPoint(center_.y(), center_.x());
+        cachedCenterCoordinate_ = center_;
+        cachedWorldCenterZoom_ = zoom_;
+    }
+    return cachedWorldCenter_;
+}
+
+QPointF RadarMapCanvas::screenPointFromWorld(const QPointF& source) const {
     const auto world = static_cast<double>(kTileSize * (1 << zoom_));
-    const auto center = worldPoint(center_.y(), center_.x());
-    auto point = worldPoint(latitude, longitude);
-    auto dx = point.x() - center.x();
+    const auto center = mapCenterWorld();
+    auto dx = source.x() - center.x();
     if (dx > world / 2.0) dx -= world;
     if (dx < -world / 2.0) dx += world;
-    point.setX(width() / 2.0 + dx);
-    point.setY(height() / 2.0 + point.y() - center.y());
-    return point;
+    return {width() / 2.0 + dx, height() / 2.0 + source.y() - center.y()};
+}
+
+QPointF RadarMapCanvas::screenPoint(const double latitude, const double longitude) const {
+    return screenPointFromWorld(worldPoint(latitude, longitude));
 }
 
 QPointF RadarMapCanvas::geographicPoint(const QPointF& screen) const {
     const auto world = static_cast<double>(kTileSize * (1 << zoom_));
-    const auto center = worldPoint(center_.y(), center_.x());
+    const auto center = mapCenterWorld();
     auto x = center.x() + screen.x() - width() / 2.0;
     x = std::fmod(x + world, world);
     if (x < 0.0) x += world;
@@ -534,31 +723,65 @@ QPointF RadarMapCanvas::geographicPoint(const QPointF& screen) const {
 }
 
 QPoint RadarMapCanvas::radarScreenPoint(const QString& radarId) const {
-    for (const auto& site : sites_) {
-        if (QString::fromStdString(site.id) == radarId && site.latitude && site.longitude) {
-            return screenPoint(*site.latitude, *site.longitude).toPoint();
-        }
-    }
+    const auto found = siteIndexes_.constFind(radarId);
+    if (found == siteIndexes_.cend()) return {};
+    ensureSiteWorldPoints();
+    const auto index = *found;
+    if (index < static_cast<std::size_t>(siteWorldPoints_.size()) && !siteWorldPoints_.at(index).isNull())
+        return screenPointFromWorld(siteWorldPoints_.at(index)).toPoint();
     return {};
 }
 
 const RadarSite* RadarMapCanvas::selectedSite() const {
-    for (const auto& site : sites_) {
-        if (QString::fromStdString(site.id) == selectedRadar_) {
-            return &site;
-        }
-    }
-    return nullptr;
+    const auto found = siteIndexes_.constFind(selectedRadar_);
+    return found == siteIndexes_.cend() || *found >= sites_.size() ? nullptr : &sites_[*found];
 }
 
-void RadarMapCanvas::invalidateOverlay() {
+void RadarMapCanvas::invalidateWorldCaches(const bool zoomChanged) {
+    cachedWorldCenterZoom_ = -1;
+    if (zoomChanged) {
+        siteWorldZoom_ = -1;
+        warningPathsZoom_ = -1;
+    }
+}
+
+void RadarMapCanvas::ensureSiteWorldPoints() const {
+    if (siteWorldZoom_ == zoom_ && siteWorldPoints_.size() == static_cast<qsizetype>(sites_.size())) return;
+    siteWorldPoints_.clear();
+    siteWorldPoints_.reserve(static_cast<qsizetype>(sites_.size()));
+    for (const auto& site : sites_) {
+        siteWorldPoints_.push_back(site.latitude && site.longitude
+                                       ? worldPoint(*site.latitude, *site.longitude)
+                                       : QPointF{});
+    }
+    siteWorldZoom_ = zoom_;
+}
+
+void RadarMapCanvas::invalidateOverlay(const bool preserveForZoomTransition) {
     ++overlayGeneration_;
-    overlayPaths_.clear();
-    overlayZoom_ = -1;
+    if (!preserveForZoomTransition) {
+        overlayImage_ = {};
+        overlayImageLogicalSize_ = {};
+        overlayZoom_ = -1;
+    }
+}
+
+bool RadarMapCanvas::overlayCacheCoversView() const {
+    if (overlayImage_.isNull() || overlayZoom_ != zoom_ || overlayImageLogicalSize_.isEmpty()) return false;
+    const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+    const auto currentCenter = mapCenterWorld();
+    auto dx = currentCenter.x() - overlayImageCenterWorld_.x();
+    if (dx > world / 2.0) dx -= world;
+    if (dx < -world / 2.0) dx += world;
+    const auto dy = currentCenter.y() - overlayImageCenterWorld_.y();
+    const auto horizontalMargin = (overlayImageLogicalSize_.width() - width()) / 2.0;
+    const auto verticalMargin = (overlayImageLogicalSize_.height() - height()) / 2.0;
+    return std::abs(dx) <= std::max(0.0, horizontalMargin - 24.0) &&
+           std::abs(dy) <= std::max(0.0, verticalMargin - 24.0);
 }
 
 void RadarMapCanvas::rebuildOverlay() {
-    if (overlayBuildPending_) return;
+    if (overlayBuildPending_ || velocityBuildPending_ || width() <= 0 || height() <= 0) return;
     const auto* site = selectedSite();
     if (!site || !site->latitude || !site->longitude || !chunk_) {
         overlayZoom_ = zoom_;
@@ -577,12 +800,18 @@ void RadarMapCanvas::rebuildOverlay() {
     const auto opacity = radarOpacity_;
     const auto chunk = chunk_;
     const auto processedVelocity = processedVelocity_;
+    const auto viewportSize = size();
+    const auto devicePixelRatio = devicePixelRatioF();
+    const auto centerCoordinate = center_;
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start([
         guard, generation, targetZoom, baseLatitude, baseLongitude, product, elevation,
-        belowThresholdVisible, palette, customPalette, opacity, chunk, processedVelocity
+        belowThresholdVisible, palette, customPalette, opacity, chunk, processedVelocity,
+        viewportSize, devicePixelRatio, centerCoordinate
     ] {
+        constexpr int kOverlayMargin = 256;
         QHash<QRgb, QPainterPath> paths;
+        double maximumRangeMeters = 0.0;
         const auto& descriptor = productDescriptor(product);
         const auto worldPointAt = [targetZoom](const double latitude, const double longitude) {
             const auto world = static_cast<double>(RadarMapCanvas::kTileSize * (1 << targetZoom));
@@ -600,6 +829,10 @@ void RadarMapCanvas::rebuildOverlay() {
             const auto firstGateMeters = ray.firstGateByProduct.at(productIndex);
             const auto gateSpacingMeters = ray.gateSpacingByProduct.at(productIndex);
             if (gateSpacingMeters == 0) continue;
+            maximumRangeMeters = std::max(
+                maximumRangeMeters,
+                static_cast<double>(firstGateMeters) +
+                    static_cast<double>(values.size()) * gateSpacingMeters);
             const auto halfAzimuth = std::clamp(
                 static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
             const auto halfRange = static_cast<double>(gateSpacingMeters) * 0.5;
@@ -646,12 +879,37 @@ void RadarMapCanvas::rebuildOverlay() {
                 paths[color.rgba()].addPolygon(polygon);
             }
         }
+        const auto overlayLogicalSize = viewportSize + QSize(kOverlayMargin * 2, kOverlayMargin * 2);
+        const auto pixelSize = QSize(
+            std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.width() * devicePixelRatio))),
+            std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.height() * devicePixelRatio))));
+        QImage overlayImage(pixelSize, QImage::Format_ARGB32_Premultiplied);
+        overlayImage.setDevicePixelRatio(devicePixelRatio);
+        overlayImage.fill(Qt::transparent);
+        const auto overlayCenterWorld = worldPointAt(centerCoordinate.y(), centerCoordinate.x());
+        QPainter overlayPainter(&overlayImage);
+        overlayPainter.setPen(Qt::NoPen);
+        overlayPainter.translate(overlayLogicalSize.width() / 2.0 - overlayCenterWorld.x(),
+                                 overlayLogicalSize.height() / 2.0 - overlayCenterWorld.y());
+        for (auto it = paths.cbegin(); it != paths.cend(); ++it) {
+            overlayPainter.setBrush(QColor::fromRgba(it.key()));
+            overlayPainter.drawPath(it.value());
+        }
+        overlayPainter.end();
         if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, generation, targetZoom, paths = std::move(paths)]() mutable {
+        QMetaObject::invokeMethod(guard, [guard, generation, targetZoom,
+                                          overlayImage = std::move(overlayImage),
+                                          overlayLogicalSize, overlayCenterWorld,
+                                          maximumRangeMeters]() mutable {
             if (!guard) return;
             guard->overlayBuildPending_ = false;
             if (generation == guard->overlayGeneration_ && targetZoom == guard->zoom_) {
-                guard->overlayPaths_ = std::move(paths);
+                guard->overlayImage_ = std::move(overlayImage);
+                guard->overlayImageLogicalSize_ = overlayLogicalSize;
+                guard->overlayImageCenterWorld_ = overlayCenterWorld;
+                guard->maximumRangeMeters_ = maximumRangeMeters > 0.0
+                                                  ? maximumRangeMeters
+                                                  : 230000.0;
                 guard->overlayZoom_ = targetZoom;
             }
             guard->update();
@@ -665,17 +923,24 @@ void RadarMapCanvas::paintRadarOverlay(QPainter& painter) {
         return;
     }
 
-    if (overlayZoom_ != zoom_) rebuildOverlay();
+    if (!overlayCacheCoversView()) rebuildOverlay();
     if (!chunk_) return;
     painter.save();
-    if (!overlayPaths_.empty()) {
-        const auto mapCenter = worldPoint(center_.y(), center_.x());
-        painter.translate(width() / 2.0 - mapCenter.x(), height() / 2.0 - mapCenter.y());
-        painter.setPen(Qt::NoPen);
-        for (auto it = overlayPaths_.cbegin(); it != overlayPaths_.cend(); ++it) {
-            painter.setBrush(QColor::fromRgba(it.key()));
-            painter.drawPath(it.value());
-        }
+    if (!overlayImage_.isNull()) {
+        const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+        const auto currentCenter = mapCenterWorld();
+        const auto zoomScale = std::ldexp(1.0, zoom_ - overlayZoom_);
+        const auto cachedCenterAtCurrentZoom = overlayImageCenterWorld_ * zoomScale;
+        auto dx = cachedCenterAtCurrentZoom.x() - currentCenter.x();
+        if (dx > world / 2.0) dx -= world;
+        if (dx < -world / 2.0) dx += world;
+        const auto dy = cachedCenterAtCurrentZoom.y() - currentCenter.y();
+        const QSizeF scaledSize(overlayImageLogicalSize_.width() * zoomScale,
+                                overlayImageLogicalSize_.height() * zoomScale);
+        const QPointF topLeft(
+            std::round(width() / 2.0 - scaledSize.width() / 2.0 + dx),
+            std::round(height() / 2.0 - scaledSize.height() / 2.0 + dy));
+        painter.drawImage(QRectF(topLeft, scaledSize), overlayImage_);
     }
     painter.restore();
 
@@ -683,18 +948,7 @@ void RadarMapCanvas::paintRadarOverlay(QPainter& painter) {
     painter.setPen(QPen(QColor(255, 255, 255, 150), 1));
     painter.setBrush(Qt::NoBrush);
     const auto center = screenPoint(*site->latitude, *site->longitude);
-    double maximumRangeMeters = 0.0;
-    const auto productIndex = static_cast<std::size_t>(product_);
-    for (const auto& ray : chunk_->rays) {
-        if (elevationFilter_.has_value() && ray.elevationNumber != *elevationFilter_) continue;
-        if (!ray.has(product_)) continue;
-        maximumRangeMeters = std::max(
-            maximumRangeMeters,
-            static_cast<double>(ray.firstGateByProduct.at(productIndex)) +
-                static_cast<double>(ray.fields.at(productIndex).size()) *
-                    ray.gateSpacingByProduct.at(productIndex));
-    }
-    if (maximumRangeMeters <= 0.0) maximumRangeMeters = 230000.0;
+    const auto maximumRangeMeters = maximumRangeMeters_;
     painter.setFont(QFont(QStringLiteral("Segoe UI"), 7));
     std::vector<double> ringRanges{25000.0, 50000.0, 100000.0, maximumRangeMeters};
     std::sort(ringRanges.begin(), ringRanges.end());
@@ -715,46 +969,71 @@ void RadarMapCanvas::paintRadarOverlay(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::ensureWeatherPaths() const {
+    if (warningPathsZoom_ == zoom_ && warningPathsGeneration_ == weatherGeneration_) return;
+    warningPaths_.clear();
+    stormReportWorldPoints_.clear();
+    stormReportWorldPoints_.reserve(stormReports_.size());
+    for (const auto& report : stormReports_)
+        stormReportWorldPoints_.push_back(worldPoint(report.coordinate.y(), report.coordinate.x()));
+    for (int warningIndex = 0; warningIndex < warnings_.size(); ++warningIndex) {
+        const auto& warning = warnings_.at(warningIndex);
+        if (!warningFilter_.isEmpty() &&
+            !warning.event.contains(warningFilter_, Qt::CaseInsensitive) &&
+            !warning.severity.contains(warningFilter_, Qt::CaseInsensitive)) continue;
+        QColor color("#f4d35e");
+        if (warning.event.contains(QStringLiteral("Tornado"), Qt::CaseInsensitive)) color = QColor("#ff3b4d");
+        else if (warning.event.contains(QStringLiteral("Severe Thunderstorm"), Qt::CaseInsensitive)) color = QColor("#ff9f43");
+        else if (warning.event.contains(QStringLiteral("Flash Flood"), Qt::CaseInsensitive)) color = QColor("#36d17c");
+        for (const auto& geographicPolygon : warning.polygons) {
+            QPainterPath path;
+            path.setFillRule(Qt::OddEvenFill);
+            QPolygonF exterior;
+            exterior.reserve(geographicPolygon.exterior.size());
+            for (const auto& coordinate : geographicPolygon.exterior)
+                exterior.push_back(worldPoint(coordinate.y(), coordinate.x()));
+            path.addPolygon(exterior);
+            for (const auto& geographicHole : geographicPolygon.holes) {
+                QPolygonF hole;
+                hole.reserve(geographicHole.size());
+                for (const auto& coordinate : geographicHole)
+                    hole.push_back(worldPoint(coordinate.y(), coordinate.x()));
+                path.addPolygon(hole);
+            }
+            warningPaths_.push_back({warningIndex, color, std::move(path)});
+        }
+    }
+    warningPathsZoom_ = zoom_;
+    warningPathsGeneration_ = weatherGeneration_;
+}
+
 void RadarMapCanvas::paintWeatherOverlays(QPainter& painter) {
+    ensureWeatherPaths();
     if (warningsVisible_) {
-        for (const auto& warning : warnings_) {
-            if (!warningFilter_.isEmpty() &&
-                !warning.event.contains(warningFilter_, Qt::CaseInsensitive) &&
-                !warning.severity.contains(warningFilter_, Qt::CaseInsensitive)) continue;
-            QColor color("#f4d35e");
-            if (warning.event.contains(QStringLiteral("Tornado"), Qt::CaseInsensitive)) color = QColor("#ff3b4d");
-            else if (warning.event.contains(QStringLiteral("Severe Thunderstorm"), Qt::CaseInsensitive)) color = QColor("#ff9f43");
-            else if (warning.event.contains(QStringLiteral("Flash Flood"), Qt::CaseInsensitive)) color = QColor("#36d17c");
-            painter.setPen(QPen(color, 2.0));
-            auto fill = color;
+        painter.save();
+        const auto center = mapCenterWorld();
+        const QRectF visibleWorld(center.x() - width() / 2.0, center.y() - height() / 2.0,
+                                  width(), height());
+        painter.translate(width() / 2.0 - center.x(), height() / 2.0 - center.y());
+        for (const auto& cached : warningPaths_) {
+            if (!cached.path.boundingRect().intersects(visibleWorld)) continue;
+            painter.setPen(QPen(cached.color, 2.0));
+            auto fill = cached.color;
             fill.setAlpha(35);
             painter.setBrush(fill);
-            for (const auto& geographicPolygon : warning.polygons) {
-                QPainterPath path;
-                path.setFillRule(Qt::OddEvenFill);
-                QPolygonF exterior;
-                exterior.reserve(geographicPolygon.exterior.size());
-                for (const auto& coordinate : geographicPolygon.exterior) {
-                    exterior.push_back(screenPoint(coordinate.y(), coordinate.x()));
-                }
-                path.addPolygon(exterior);
-                for (const auto& geographicHole : geographicPolygon.holes) {
-                    QPolygonF hole;
-                    hole.reserve(geographicHole.size());
-                    for (const auto& coordinate : geographicHole)
-                        hole.push_back(screenPoint(coordinate.y(), coordinate.x()));
-                    path.addPolygon(hole);
-                }
-                painter.drawPath(path);
-            }
+            painter.drawPath(cached.path);
         }
+        painter.restore();
     }
 
     if (stormReportsVisible_) {
         painter.setPen(QPen(QColor(245, 248, 249), 1.0));
-        for (const auto& report : stormReports_) {
+        for (qsizetype reportIndex = 0; reportIndex < stormReports_.size(); ++reportIndex) {
+            const auto& report = stormReports_.at(reportIndex);
             if (!stormReportKindsVisible_.at(static_cast<std::size_t>(report.kind))) continue;
-            const auto point = screenPoint(report.coordinate.y(), report.coordinate.x());
+            const auto point = reportIndex < stormReportWorldPoints_.size()
+                                   ? screenPointFromWorld(stormReportWorldPoints_.at(reportIndex))
+                                   : screenPoint(report.coordinate.y(), report.coordinate.x());
             if (!rect().adjusted(-10, -10, 10, 10).contains(point.toPoint())) continue;
             if (report.kind == StormReportKind::Tornado) {
                 painter.setBrush(QColor("#ff3b4d"));
@@ -823,6 +1102,94 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
 
 void RadarMapCanvas::paintProbe(QPainter& painter) {
     if (probeText_.isEmpty()) return;
+    if (!pinnedInfo_.isEmpty()) {
+        const auto parts = probeText_.split(QLatin1Char('\n'));
+        const auto isWarning = parts.size() >= 7;
+        const auto title = parts.value(0).trimmed();
+        const auto severity = isWarning ? parts.value(1).trimmed() : QString{};
+        const auto headline = isWarning ? parts.value(2).trimmed() : QString{};
+        const auto bodyStart = isWarning ? 3 : 1;
+        const auto body = parts.mid(bodyStart).join(QLatin1Char('\n')).trimmed();
+
+        QColor accent("#80d3ff");
+        if (title.contains(QStringLiteral("Tornado"), Qt::CaseInsensitive) ||
+            severity.contains(QStringLiteral("Extreme"), Qt::CaseInsensitive)) {
+            accent = QColor("#ff4d5e");
+        } else if (title.contains(QStringLiteral("Severe Thunderstorm"), Qt::CaseInsensitive)) {
+            accent = QColor("#ffad4d");
+        } else if (title.contains(QStringLiteral("Flash Flood"), Qt::CaseInsensitive)) {
+            accent = QColor("#45d98a");
+        } else if (isWarning) {
+            accent = QColor("#f4d35e");
+        }
+
+        const auto cardWidth = std::min(440.0, std::max(280.0, width() - 24.0));
+        const auto maximumHeight = std::max(110.0, std::min(300.0, height() - 24.0));
+        const auto headlineHeight = headline.isEmpty() ? 0.0 : 34.0;
+        const auto cardHeight = std::min(maximumHeight, isWarning ? 290.0 : 150.0);
+        const auto x = std::max(12.0, width() - cardWidth - 12.0);
+        const auto y = std::clamp(64.0, 12.0, std::max(12.0, height() - cardHeight - 12.0));
+        pinnedInfoCardRect_ = QRectF(x, y, cardWidth, cardHeight);
+
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 75));
+        painter.drawRoundedRect(pinnedInfoCardRect_.translated(3.0, 4.0), 8.0, 8.0);
+        painter.setPen(QPen(QColor(188, 202, 210, 150), 1.0));
+        painter.setBrush(QColor(8, 15, 20, 246));
+        painter.drawRoundedRect(pinnedInfoCardRect_, 8.0, 8.0);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(accent);
+        painter.drawRoundedRect(QRectF(x, y, 5.0, cardHeight), 3.0, 3.0);
+
+        painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
+        painter.setPen(QColor("#f5f8fa"));
+        painter.drawText(QRectF(x + 16.0, y + 10.0, cardWidth - 54.0, 21.0),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(title, Qt::ElideRight,
+                                                          static_cast<int>(cardWidth - 54.0)));
+
+        const QRectF closeRect(x + cardWidth - 34.0, y + 7.0, 25.0, 25.0);
+        painter.setPen(QColor("#aebbc2"));
+        painter.setFont(QFont(QStringLiteral("Segoe UI"), 11, QFont::DemiBold));
+        painter.drawText(closeRect, Qt::AlignCenter, QStringLiteral("×"));
+
+        auto contentTop = y + 38.0;
+        if (isWarning) {
+            const auto badgeWidth = std::min(150.0,
+                painter.fontMetrics().horizontalAdvance(severity.toUpper()) + 18.0);
+            const QRectF badge(x + 16.0, contentTop, badgeWidth, 22.0);
+            auto badgeFill = accent;
+            badgeFill.setAlpha(45);
+            painter.setPen(QPen(accent, 1.0));
+            painter.setBrush(badgeFill);
+            painter.drawRoundedRect(badge, 5.0, 5.0);
+            painter.setPen(accent.lighter(125));
+            painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+            painter.drawText(badge, Qt::AlignCenter, severity.toUpper());
+            contentTop += 29.0;
+        }
+
+        if (!headline.isEmpty()) {
+            painter.setPen(QColor("#e5edf1"));
+            painter.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+            painter.drawText(QRectF(x + 16.0, contentTop, cardWidth - 32.0, headlineHeight),
+                             Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, headline);
+            contentTop += headlineHeight + 3.0;
+        }
+
+        const QRectF bodyRect(x + 16.0, contentTop, cardWidth - 32.0,
+                              y + cardHeight - contentTop - 12.0);
+        painter.setClipRect(bodyRect);
+        painter.setPen(QColor("#cbd6dc"));
+        painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
+        painter.drawText(bodyRect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, body);
+        painter.restore();
+        return;
+    }
+
+    pinnedInfoCardRect_ = {};
     const auto metrics = painter.fontMetrics();
     const auto textWidth = metrics.horizontalAdvance(probeText_);
     auto x = probePosition_.x() + 14.0;
@@ -887,7 +1254,7 @@ QString RadarMapCanvas::tileKey(const int x, const int y) const {
 }
 
 void RadarMapCanvas::requestVisibleTiles() {
-    const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+    auto& store = tileStore();
     const auto center = worldPoint(center_.y(), center_.x());
     const auto left = center.x() - width() / 2.0;
     const auto top = center.y() - height() / 2.0;
@@ -902,9 +1269,9 @@ void RadarMapCanvas::requestVisibleTiles() {
         for (int tileX = firstX; tileX <= lastX; ++tileX) {
             const auto wrappedX = wrappedTileX(tileX, tileCount);
             const auto key = tileKey(wrappedX, tileY);
-            if (tiles_.contains(key) || pendingTiles_.values().contains(key)) {
-                continue;
-            }
+            if (store.tiles.contains(key)) continue;
+            watchTile(store, key, this);
+            if (store.pendingKeys.contains(key)) continue;
             const auto url = QUrl(QStringLiteral("https://tile.openstreetmap.org/%1/%2/%3.png")
                                       .arg(zoom_).arg(wrappedX).arg(tileY));
             QNetworkRequest request(url);
@@ -915,25 +1282,11 @@ void RadarMapCanvas::requestVisibleTiles() {
                                                       .arg(contact));
             request.setTransferTimeout(std::clamp(QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(),
                                                   5, 120) * 1000);
-            pendingTiles_.insert(network_.get(request), key);
+            store.pendingKeys.insert(key);
+            auto* reply = store.network->get(request);
+            store.replies.insert(reply, key);
         }
     }
-    Q_UNUSED(world);
-}
-
-void RadarMapCanvas::tileFinished(QNetworkReply* reply) {
-    const auto key = pendingTiles_.take(reply);
-    if (reply->error() != QNetworkReply::NoError) {
-    } else {
-        const auto image = QImage::fromData(reply->readAll(), "PNG");
-        if (!image.isNull()) {
-            const auto cost = static_cast<int>(std::min<qsizetype>(image.sizeInBytes(),
-                                                                   std::numeric_limits<int>::max()));
-            tiles_.insert(key, new QImage(image), std::max(1, cost));
-        }
-    }
-    reply->deleteLater();
-    update();
 }
 
 void RadarMapCanvas::panBy(const QPointF& delta) {
@@ -946,14 +1299,19 @@ void RadarMapCanvas::panBy(const QPointF& delta) {
     const auto n = kPi - 2.0 * kPi * normalizedY / world;
     const auto latitude = qRadiansToDegrees(std::atan(std::sinh(n)));
     center_ = {longitude, latitude};
+    invalidateWorldCaches(false);
     update();
     emit viewChanged(center_, zoom_);
 }
 
 QString RadarMapCanvas::radarAt(const QPointF& point) const {
-    for (const auto& site : sites_) {
+    ensureSiteWorldPoints();
+    for (std::size_t siteIndex = 0; siteIndex < sites_.size(); ++siteIndex) {
+        const auto& site = sites_[siteIndex];
         if (!site.latitude || !site.longitude) continue;
-        const auto marker = screenPoint(*site.latitude, *site.longitude);
+        const auto marker = siteIndex < static_cast<std::size_t>(siteWorldPoints_.size())
+                                ? screenPointFromWorld(siteWorldPoints_.at(static_cast<qsizetype>(siteIndex)))
+                                : screenPoint(*site.latitude, *site.longitude);
         const auto id = QString::fromStdString(site.id);
         const auto compact = zoom_ <= 4 && id != selectedRadar_;
         const QRectF pill = compact ? QRectF(marker.x() - 7.0, marker.y() - 7.0, 14.0, 14.0)
@@ -964,10 +1322,15 @@ QString RadarMapCanvas::radarAt(const QPointF& point) const {
 }
 
 QString RadarMapCanvas::overlayAt(const QPointF& point) const {
+    ensureWeatherPaths();
     if (stormReportsVisible_) {
-        for (const auto& report : stormReports_) {
+        for (qsizetype reportIndex = 0; reportIndex < stormReports_.size(); ++reportIndex) {
+            const auto& report = stormReports_.at(reportIndex);
             if (!stormReportKindsVisible_.at(static_cast<std::size_t>(report.kind))) continue;
-            if (QLineF(screenPoint(report.coordinate.y(), report.coordinate.x()), point).length() > 9.0) continue;
+            const auto reportPoint = reportIndex < stormReportWorldPoints_.size()
+                                         ? screenPointFromWorld(stormReportWorldPoints_.at(reportIndex))
+                                         : screenPoint(report.coordinate.y(), report.coordinate.x());
+            if (QLineF(reportPoint, point).length() > 9.0) continue;
             const auto kind = report.kind == StormReportKind::Tornado ? QStringLiteral("Tornado")
                               : report.kind == StormReportKind::Hail ? QStringLiteral("Hail")
                                                                     : QStringLiteral("Wind");
@@ -984,32 +1347,25 @@ QString RadarMapCanvas::overlayAt(const QPointF& point) const {
         }
     }
     if (warningsVisible_) {
-        for (const auto& warning : warnings_) {
-            if (!warningFilter_.isEmpty() &&
-                !warning.event.contains(warningFilter_, Qt::CaseInsensitive) &&
-                !warning.severity.contains(warningFilter_, Qt::CaseInsensitive)) continue;
-            for (const auto& geographicPolygon : warning.polygons) {
-                QPainterPath path;
-                path.setFillRule(Qt::OddEvenFill);
-                QPolygonF exterior;
-                for (const auto& coordinate : geographicPolygon.exterior) {
-                    exterior.push_back(screenPoint(coordinate.y(), coordinate.x()));
-                }
-                path.addPolygon(exterior);
-                for (const auto& geographicHole : geographicPolygon.holes) {
-                    QPolygonF hole;
-                    for (const auto& coordinate : geographicHole)
-                        hole.push_back(screenPoint(coordinate.y(), coordinate.x()));
-                    path.addPolygon(hole);
-                }
-                if (path.contains(point)) {
-                    const auto timing = QStringLiteral("Onset %1 | Expires %2")
-                                            .arg(warning.onset.isValid() ? warning.onset.toString(Qt::ISODate) : QStringLiteral("unknown"),
-                                                 warning.expires.isValid() ? warning.expires.toString(Qt::ISODate) : QStringLiteral("unknown"));
-                    return QStringLiteral("%1 | %2\n%3\n%4 | %5\n%6\n%7")
-                        .arg(warning.event, warning.severity, warning.headline, timing,
+        const auto center = mapCenterWorld();
+        auto worldPointAtCursor = QPointF(center.x() + point.x() - width() / 2.0,
+                                          center.y() + point.y() - height() / 2.0);
+        const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+        worldPointAtCursor.setX(std::fmod(worldPointAtCursor.x() + world, world));
+        for (const auto& cached : warningPaths_) {
+            if (!cached.path.boundingRect().contains(worldPointAtCursor) ||
+                !cached.path.contains(worldPointAtCursor)) continue;
+            if (cached.warningIndex >= 0 && cached.warningIndex < warnings_.size()) {
+                    const auto& warning = warnings_.at(cached.warningIndex);
+                    const auto onset = warning.onset.isValid()
+                                           ? warning.onset.toLocalTime().toString(QStringLiteral("MMM d, HH:mm"))
+                                           : QStringLiteral("unknown");
+                    const auto expires = warning.expires.isValid()
+                                             ? warning.expires.toLocalTime().toString(QStringLiteral("MMM d, HH:mm"))
+                                             : QStringLiteral("unknown");
+                    return QStringLiteral("%1\n%2\n%3\nValid (local): %4 – %5\nSource: %6\n\nDetails: %7\n\nInstructions: %8")
+                        .arg(warning.event, warning.severity, warning.headline, onset, expires,
                              warning.senderName, warning.description, warning.instruction);
-                }
             }
         }
     }
@@ -1036,21 +1392,29 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
     const auto groundRangeMeters = location.distanceMeters;
     const auto azimuth = location.bearingDegrees;
 
-    const DecodedRay* nearestRay = nullptr;
-    std::size_t nearestRayIndex = 0;
-    auto nearestDifference = 360.0;
-    for (std::size_t rayIndex = 0; rayIndex < chunk_->rays.size(); ++rayIndex) {
-        const auto& ray = chunk_->rays[rayIndex];
-        if (elevationFilter_.has_value() && ray.elevationNumber != *elevationFilter_) continue;
-        if (!ray.has(product_)) continue;
-        auto difference = std::abs(static_cast<double>(ray.azimuthDegrees) - azimuth);
-        difference = std::min(difference, 360.0 - difference);
-        if (difference < nearestDifference) {
-            nearestDifference = difference;
-            nearestRay = &ray;
-            nearestRayIndex = rayIndex;
-        }
+    if (probeRayIndex_.empty()) {
+        update();
+        return;
     }
+    const auto candidate = std::lower_bound(
+        probeRayIndex_.cbegin(), probeRayIndex_.cend(), azimuth,
+        [](const auto& indexedRay, const double target) { return indexedRay.first < target; });
+    const auto circularDifference = [azimuth](const double candidateAzimuth) {
+        const auto direct = std::abs(candidateAzimuth - azimuth);
+        return std::min(direct, 360.0 - direct);
+    };
+    auto nearest = candidate == probeRayIndex_.cend() ? probeRayIndex_.cbegin() : candidate;
+    auto nearestDifference = circularDifference(nearest->first);
+    const auto previous = candidate == probeRayIndex_.cbegin()
+                              ? std::prev(probeRayIndex_.cend())
+                              : std::prev(candidate);
+    const auto previousDifference = circularDifference(previous->first);
+    if (previousDifference < nearestDifference) {
+        nearest = previous;
+        nearestDifference = previousDifference;
+    }
+    const auto nearestRayIndex = nearest->second;
+    const auto* nearestRay = &chunk_->rays.at(nearestRayIndex);
     if (!nearestRay || nearestDifference > std::max(1.5, nearestRay->azimuthResolutionDegrees * 1.5)) {
         update();
         return;
@@ -1127,11 +1491,12 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     const auto lastY = std::min((1 << zoom_) - 1,
                                 static_cast<int>(std::floor((top + height()) / kTileSize)));
     const auto tileCount = 1 << zoom_;
+    const auto& store = tileStore();
     for (int tileY = firstY; tileY <= lastY; ++tileY) {
         for (int tileX = firstX; tileX <= lastX; ++tileX) {
             const auto key = tileKey(wrappedTileX(tileX, tileCount), tileY);
             const QRectF target(tileX * kTileSize - left, tileY * kTileSize - top, kTileSize, kTileSize);
-            if (const auto* tile = tiles_.object(key)) {
+            if (const auto* tile = store.tiles.object(key)) {
                 painter.drawImage(target, *tile);
             } else {
                 painter.fillRect(target, QColor(28, 36, 41));
@@ -1146,9 +1511,13 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
 
     painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
     QSet<QString> occupiedMarkerCells;
-    for (const auto& site : sites_) {
+    ensureSiteWorldPoints();
+    for (std::size_t siteIndex = 0; siteIndex < sites_.size(); ++siteIndex) {
+        const auto& site = sites_[siteIndex];
         if (!site.latitude || !site.longitude) continue;
-        const auto point = screenPoint(*site.latitude, *site.longitude);
+        const auto point = siteIndex < static_cast<std::size_t>(siteWorldPoints_.size())
+                               ? screenPointFromWorld(siteWorldPoints_.at(static_cast<qsizetype>(siteIndex)))
+                               : screenPoint(*site.latitude, *site.longitude);
         if (!rect().adjusted(-50, -30, 50, 30).contains(point.toPoint())) continue;
         const auto id = QString::fromStdString(site.id);
         const auto isTdwr = site.owner == "TDWR";
@@ -1268,8 +1637,8 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
-    hoverRadarId_ = radarAt(event->position());
-    updateProbe(event->position());
+    pendingProbePosition_ = event->position();
+    if (!probeTimer_->isActive()) probeTimer_->start();
     event->accept();
     return;
 }
@@ -1285,12 +1654,24 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && dragging_) {
         dragging_ = false;
         if (!dragged_) {
+            if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position())) {
+                const QRectF closeRect(pinnedInfoCardRect_.right() - 34.0,
+                                       pinnedInfoCardRect_.top() + 7.0, 25.0, 25.0);
+                if (closeRect.contains(event->position())) {
+                    pinnedInfo_.clear();
+                    probeText_.clear();
+                    pinnedInfoCardRect_ = {};
+                    update();
+                    event->accept();
+                    return;
+                }
+            }
             const auto radarId = radarAt(event->pos());
             if (!radarId.isEmpty()) {
                 pinnedInfo_.clear();
                 emit radarClicked(radarId);
             } else {
-                pinnedInfo_ = overlayAt(event->position()).replace(QLatin1Char('\n'), QStringLiteral(" | "));
+                pinnedInfo_ = overlayAt(event->position());
                 probePosition_ = event->position();
                 probeText_ = pinnedInfo_;
                 update();
@@ -1321,7 +1702,8 @@ void RadarMapCanvas::setZoomAt(const int zoom, const QPointF& cursor) {
     const auto longitude = newCenter.x() / newWorld * 360.0 - 180.0;
     const auto n = kPi - 2.0 * kPi * newCenter.y() / newWorld;
     center_ = {longitude, qRadiansToDegrees(std::atan(std::sinh(n)))};
-    invalidateOverlay();
+    invalidateWorldCaches(true);
+    invalidateOverlay(true);
     update();
     emit viewChanged(center_, zoom_);
 }
@@ -1331,6 +1713,16 @@ void RadarMapCanvas::leaveEvent(QEvent* event) {
     if (pinnedInfo_.isEmpty()) probeText_.clear();
     update();
     QWidget::leaveEvent(event);
+}
+
+void RadarMapCanvas::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    rebuildProbeIndex();
+    refreshScanDiagnostics();
+    if (chunk_ && product_ == ProductKind::Velocity &&
+        velocityOptions_.mode != VelocityProcessingMode::Native && !processedVelocity_)
+        refreshVelocityProcessing();
+    update();
 }
 
 } // namespace cappedweather

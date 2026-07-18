@@ -16,11 +16,11 @@ double closestFold(double value, const double reference, const double interval) 
 }
 }
 
-std::vector<std::vector<double>> processVelocity(const DecodedChunk& chunk,
-                                                 const VelocityProcessingOptions options) {
+ProcessedVelocity processVelocity(const DecodedChunk& chunk,
+                                  const VelocityProcessingOptions options) {
     const auto velocityIndex = static_cast<std::size_t>(ProductKind::Velocity);
-    const auto missing = std::numeric_limits<double>::quiet_NaN();
-    std::vector<std::vector<double>> result(chunk.rays.size());
+    const auto missing = std::numeric_limits<float>::quiet_NaN();
+    ProcessedVelocity result(chunk.rays.size());
     for (std::size_t rayIndex = 0; rayIndex < chunk.rays.size(); ++rayIndex) {
         const auto& ray = chunk.rays[rayIndex];
         if (!ray.has(ProductKind::Velocity)) continue;
@@ -36,7 +36,7 @@ std::vector<std::vector<double>> processVelocity(const DecodedChunk& chunk,
             if (options.mode != VelocityProcessingMode::Native && std::isfinite(previous)) {
                 value = closestFold(value, previous, options.nyquistVelocityMetersPerSecond * 2.0);
             }
-            values[gate] = value;
+            values[gate] = static_cast<float>(value);
             previous = value;
         }
     }
@@ -58,8 +58,8 @@ std::vector<std::vector<double>> processVelocity(const DecodedChunk& chunk,
             const auto& previous = result[previousIndex];
             const auto commonGates = std::min(current.size(), previous.size());
             for (std::size_t gate = 0; gate < commonGates; ++gate) {
-                current[gate] = closestFold(current[gate], previous[gate],
-                                            options.nyquistVelocityMetersPerSecond * 2.0);
+                current[gate] = static_cast<float>(closestFold(
+                    current[gate], previous[gate], options.nyquistVelocityMetersPerSecond * 2.0));
             }
         }
     }
@@ -70,7 +70,7 @@ std::vector<std::vector<double>> processVelocity(const DecodedChunk& chunk,
                                 options.stormMotionDirectionDegrees) * kPi / 180.0;
             const auto radialStormMotion = options.stormMotionSpeedMetersPerSecond * std::cos(angle);
             for (auto& value : result[rayIndex]) {
-                if (std::isfinite(value)) value -= radialStormMotion;
+                if (std::isfinite(value)) value = static_cast<float>(value - radialStormMotion);
             }
         }
     }

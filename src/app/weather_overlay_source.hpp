@@ -2,11 +2,13 @@
 
 #include <QDateTime>
 #include <QDate>
+#include <QHash>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QPointF>
 #include <QPolygonF>
 #include <QString>
+#include <QUrl>
 #include <QVector>
 
 #include <array>
@@ -96,6 +98,9 @@ private:
     std::array<QVector<StormReport>, 6> reportSets_;
     QHash<QString, QVector<int>> zoneWarningIndexes_;
     QHash<QString, QVector<WarningPolygon>> zoneCache_;
+    QHash<QUrl, QByteArray> responseBodies_;
+    QHash<QUrl, QByteArray> responseEtags_;
+    QHash<QUrl, QByteArray> responseLastModified_;
     int totalRequests_ = 0;
     int pending_ = 0;
     int failures_ = 0;

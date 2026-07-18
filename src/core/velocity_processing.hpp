@@ -21,7 +21,8 @@ struct VelocityProcessingOptions {
 
 // Output is aligned with DecodedChunk::rays and each ray's native velocity gates.
 // Missing and range-folded gates are represented by NaN.
-std::vector<std::vector<double>> processVelocity(const DecodedChunk& chunk,
-                                                 VelocityProcessingOptions options);
+using ProcessedVelocity = std::vector<std::vector<float>>;
+
+ProcessedVelocity processVelocity(const DecodedChunk& chunk, VelocityProcessingOptions options);
 
 } // namespace cappedweather

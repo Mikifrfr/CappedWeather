@@ -47,7 +47,7 @@ void CrossSectionWidget::buildCells() {
     if (transectLengthMeters_ < 100.0) return;
     const auto velocity = product_ == ProductKind::Velocity
                               ? processVelocity(*chunk_, velocityOptions_)
-                              : std::vector<std::vector<double>>{};
+                              : ProcessedVelocity{};
     const auto productIndex = static_cast<std::size_t>(product_);
     constexpr int kSamples = 180;
     for (int sample = 0; sample < kSamples; ++sample) {

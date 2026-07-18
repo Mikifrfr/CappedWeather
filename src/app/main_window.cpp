@@ -40,6 +40,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QScreen>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QStandardItemModel>
 #include <QSpinBox>
@@ -186,7 +187,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(source_, &NexradSource::catalogReceived, this, &MainWindow::catalogReceived);
     connect(source_, &NexradSource::volumeStarted, this, &MainWindow::volumeStarted);
     connect(source_, &NexradSource::volumeProgress, this, &MainWindow::volumeProgress);
-    connect(source_, &NexradSource::chunkDecompressed, this, &MainWindow::chunkDecompressed);
+    connect(source_, &NexradSource::chunkDecoded, this, &MainWindow::chunkDecoded);
     connect(source_, &NexradSource::volumeReady, this, &MainWindow::volumeReady);
     connect(overlaySource_, &WeatherOverlaySource::overlaysReady, this,
             [this](QVector<WeatherWarning> warnings, QVector<StormReport> reports, const QDateTime&) {
@@ -246,22 +247,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     for (auto* panel : maps_) panel->setSites(model_->sites());
     if (model_->rowCount() > 0) {
-        const auto primaryRadar = !panelRadarIds_.value(0).isEmpty()
-                                      ? panelRadarIds_.value(0)
-                                      : settings.value(QStringLiteral("lastRadar")).toString();
+        const auto primaryRadar = settings.value(
+            QStringLiteral("lastRadar"), settings.value(QStringLiteral("panels/radar0"))).toString();
         auto row = chaseMode_ ? -1 : model_->rowForRadar(primaryRadar);
         if (row < 0) row = 0;
         radarSelected(model_->index(row, 0));
         if (chaseMode_) selectNearestChaseRadar();
-        const auto fallbackRadar = map_->radarId();
-        for (int panel = 1; panel < maps_.size(); ++panel) {
-            const auto radar = panelRadarIds_.value(panel).isEmpty() ? fallbackRadar : panelRadarIds_.value(panel);
-            const auto panelRow = model_->rowForRadar(radar);
-            if (panelRow < 0) continue;
-            activateMap(maps_.at(panel));
-            radarSelected(model_->index(panelRow, 0));
-        }
-        activateMap(maps_.front());
     }
     source_->requestCatalog();
     refreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/radarRefreshSeconds"), 60).toInt(),
@@ -296,40 +287,59 @@ void MainWindow::buildUi() {
     rootLayout->setContentsMargins(10, 10, 10, 10);
     rootLayout->setSpacing(10);
 
-    auto* controls = new QHBoxLayout();
+    auto* controls = new QVBoxLayout();
     controls->setSpacing(6);
+    auto* radarControls = new QHBoxLayout();
+    radarControls->setSpacing(6);
+    controls->addLayout(radarControls);
 
     stationCombo_ = new QComboBox(root);
     stationCombo_->setObjectName(QStringLiteral("stationCombo"));
     stationCombo_->setEditable(true);
     stationCombo_->setInsertPolicy(QComboBox::NoInsert);
     stationCombo_->setMinimumWidth(230);
+    stationCombo_->setMaximumWidth(360);
+    stationCombo_->setMinimumContentsLength(24);
+    stationCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     stationCombo_->lineEdit()->setPlaceholderText(QStringLiteral("Find radar, city, or state…"));
-    controls->addWidget(stationCombo_);
+    radarControls->addWidget(stationCombo_);
     favoriteButton_ = new QToolButton(root);
     favoriteButton_->setObjectName(QStringLiteral("favoriteRadarButton"));
     favoriteButton_->setText(QStringLiteral("☆"));
     favoriteButton_->setCheckable(true);
     favoriteButton_->setToolTip(QStringLiteral("Favorite selected radar"));
-    controls->addWidget(favoriteButton_);
+    radarControls->addWidget(favoriteButton_);
 
     productCombo_ = new QComboBox(root);
     productCombo_->setObjectName(QStringLiteral("productCombo"));
     for (const auto& product : productDescriptors()) {
         productCombo_->addItem(QString::fromUtf8(product.label.data()), static_cast<int>(product.kind));
     }
-    controls->addWidget(productCombo_, 0);
+    productCombo_->setMaximumWidth(220);
+    productCombo_->setMinimumContentsLength(16);
+    productCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    radarControls->addWidget(productCombo_);
 
     tiltCombo_ = new QComboBox(root);
     tiltCombo_->setObjectName(QStringLiteral("tiltCombo"));
     tiltCombo_->addItem(QStringLiteral("Latest available tilt"));
     tiltCombo_->setEnabled(false);
-    controls->addWidget(tiltCombo_, 0);
+    tiltCombo_->setMinimumContentsLength(18);
+    tiltCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    tiltCombo_->setMaximumWidth(240);
+    radarControls->addWidget(tiltCombo_);
+    radarControls->addStretch(1);
+
+    auto* contextControls = new QHBoxLayout();
+    contextControls->setSpacing(6);
+    controls->addLayout(contextControls);
 
     stationSummaryLabel_ = new QLabel(QStringLiteral("Select a radar"), root);
     stationSummaryLabel_->setObjectName(QStringLiteral("section"));
     stationSummaryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    controls->addWidget(stationSummaryLabel_, 1);
+    stationSummaryLabel_->setMinimumWidth(0);
+    stationSummaryLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    contextControls->addWidget(stationSummaryLabel_, 1);
 
     statusLabel_ = new QLabel(root);
     statusLabel_->setObjectName(QStringLiteral("section"));
@@ -337,11 +347,11 @@ void MainWindow::buildUi() {
     warningsCheck_ = new QCheckBox(QStringLiteral("Warnings"), root);
     warningsCheck_->setObjectName(QStringLiteral("warningsCheck"));
     warningsCheck_->setChecked(true);
-    controls->addWidget(warningsCheck_);
+    contextControls->addWidget(warningsCheck_);
     reportsCheck_ = new QCheckBox(QStringLiteral("Storm reports"), root);
     reportsCheck_->setObjectName(QStringLiteral("reportsCheck"));
     reportsCheck_->setChecked(true);
-    controls->addWidget(reportsCheck_);
+    contextControls->addWidget(reportsCheck_);
     rootLayout->addLayout(controls);
 
     auto* mapHost = new QWidget(root);
@@ -363,13 +373,16 @@ void MainWindow::buildUi() {
     map_->setActivePanel(true);
     setPanelLayout(0);
 
-    auto* viewControls = new QHBoxLayout();
+    auto* viewControls = new QVBoxLayout();
     viewControls->setSpacing(6);
-    const auto addMapButton = [root, viewControls](const QString& text, const QString& tip) {
+    auto* navigationControls = new QHBoxLayout();
+    navigationControls->setSpacing(6);
+    viewControls->addLayout(navigationControls);
+    const auto addMapButton = [root, navigationControls](const QString& text, const QString& tip) {
         auto* button = new QToolButton(root);
         button->setText(text);
         button->setToolTip(tip);
-        viewControls->addWidget(button);
+        navigationControls->addWidget(button);
         return button;
     };
     auto* nationalButton = addMapButton(QStringLiteral("Home"), QStringLiteral("National view"));
@@ -397,14 +410,17 @@ void MainWindow::buildUi() {
     auto* settingsButton = addMapButton(QStringLiteral("Settings"),
                                         QStringLiteral("Operational and chase settings"));
     connect(settingsButton, &QToolButton::clicked, this, &MainWindow::showSettingsDialog);
+    navigationControls->addStretch(1);
 
-    viewControls->addSpacing(8);
+    auto* overlayControls = new QHBoxLayout();
+    overlayControls->setSpacing(6);
+    viewControls->addLayout(overlayControls);
     warningFilterCombo_ = new QComboBox(root);
     warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
                                    QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
                                    QStringLiteral("Extreme")});
     warningFilterCombo_->setToolTip(QStringLiteral("Filter visible warning polygons"));
-    viewControls->addWidget(warningFilterCombo_);
+    overlayControls->addWidget(warningFilterCombo_);
     connect(warningFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
         for (auto* panel : maps_)
             panel->setWarningFilter(index == 0 ? QString{} : warningFilterCombo_->itemText(index));
@@ -413,9 +429,9 @@ void MainWindow::buildUi() {
     hailCheck_ = new QCheckBox(QStringLiteral("Hail"), root);
     windCheck_ = new QCheckBox(QStringLiteral("Wind"), root);
     for (auto* check : {tornadoCheck_, hailCheck_, windCheck_}) check->setChecked(true);
-    viewControls->addWidget(tornadoCheck_);
-    viewControls->addWidget(hailCheck_);
-    viewControls->addWidget(windCheck_);
+    overlayControls->addWidget(tornadoCheck_);
+    overlayControls->addWidget(hailCheck_);
+    overlayControls->addWidget(windCheck_);
     connect(tornadoCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Tornado, visible);
     });
@@ -426,31 +442,34 @@ void MainWindow::buildUi() {
         for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Wind, visible);
     });
 
-    viewControls->addStretch(1);
+    overlayControls->addStretch(1);
+    auto* velocityControls = new QHBoxLayout();
+    velocityControls->setSpacing(6);
+    viewControls->addLayout(velocityControls);
     velocityModeCombo_ = new QComboBox(root);
     velocityModeCombo_->setObjectName(QStringLiteral("velocityModeCombo"));
     velocityModeCombo_->addItems({QStringLiteral("Native velocity"), QStringLiteral("Dealiased velocity"),
                                   QStringLiteral("Storm-relative velocity")});
     velocityModeCombo_->setToolTip(QStringLiteral("Velocity processing for the active panel"));
-    viewControls->addWidget(velocityModeCombo_);
+    velocityControls->addWidget(velocityModeCombo_);
     nyquistSpin_ = new QDoubleSpinBox(root);
     nyquistSpin_->setRange(1.0, 80.0);
     nyquistSpin_->setValue(25.0);
     nyquistSpin_->setSuffix(QStringLiteral(" m/s Nyq"));
     nyquistSpin_->setDecimals(1);
     nyquistSpin_->setToolTip(QStringLiteral("Nyquist velocity used by optional dealiasing"));
-    viewControls->addWidget(nyquistSpin_);
+    velocityControls->addWidget(nyquistSpin_);
     stormDirectionSpin_ = new QDoubleSpinBox(root);
     stormDirectionSpin_->setRange(0.0, 359.9);
     stormDirectionSpin_->setSuffix(QStringLiteral(" deg motion"));
     stormDirectionSpin_->setDecimals(1);
     stormDirectionSpin_->setToolTip(QStringLiteral("Direction toward which the storm is moving"));
-    viewControls->addWidget(stormDirectionSpin_);
+    velocityControls->addWidget(stormDirectionSpin_);
     stormSpeedSpin_ = new QDoubleSpinBox(root);
     stormSpeedSpin_->setRange(0.0, 80.0);
     stormSpeedSpin_->setSuffix(QStringLiteral(" m/s storm"));
     stormSpeedSpin_->setDecimals(1);
-    viewControls->addWidget(stormSpeedSpin_);
+    velocityControls->addWidget(stormSpeedSpin_);
     const auto applyVelocitySettings = [this] {
         map_->setVelocityProcessing({
             static_cast<VelocityProcessingMode>(velocityModeCombo_->currentIndex()),
@@ -466,18 +485,22 @@ void MainWindow::buildUi() {
             [applyVelocitySettings](double) { applyVelocitySettings(); });
     connect(stormSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
             [applyVelocitySettings](double) { applyVelocitySettings(); });
+    velocityControls->addStretch(1);
+    auto* displayControls = new QHBoxLayout();
+    displayControls->setSpacing(6);
+    viewControls->addLayout(displayControls);
     panelLayoutCombo_ = new QComboBox(root);
     panelLayoutCombo_->setObjectName(QStringLiteral("panelLayoutCombo"));
     panelLayoutCombo_->addItems({QStringLiteral("1x1"), QStringLiteral("1x2"),
                                  QStringLiteral("2x1"), QStringLiteral("2x2")});
     panelLayoutCombo_->setToolTip(QStringLiteral("Radar panel layout"));
-    viewControls->addWidget(panelLayoutCombo_);
+    displayControls->addWidget(panelLayoutCombo_);
     connect(panelLayoutCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::setPanelLayout);
     paletteCombo_ = new QComboBox(root);
     paletteCombo_->addItems({QStringLiteral("Capped palette"), QStringLiteral("Native operational palette"),
                              QStringLiteral("Color-safe palette"), QStringLiteral("Custom palette")});
-    viewControls->addWidget(paletteCombo_);
+    displayControls->addWidget(paletteCombo_);
     connect(paletteCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
         for (auto* panel : maps_) panel->setPalette(static_cast<RadarMapCanvas::PaletteKind>(index));
     });
@@ -485,30 +508,36 @@ void MainWindow::buildUi() {
     paletteButton->setText(QStringLiteral("Palette..."));
     paletteButton->setToolTip(QStringLiteral("Import a value,color palette text file"));
     connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
-    viewControls->addWidget(paletteButton);
+    displayControls->addWidget(paletteButton);
     auto* snapshotButton = new QToolButton(root);
     snapshotButton->setText(QStringLiteral("Snapshot"));
     connect(snapshotButton, &QToolButton::clicked, this, &MainWindow::exportSnapshot);
-    viewControls->addWidget(snapshotButton);
+    displayControls->addWidget(snapshotButton);
     auto* timelineButton = new QToolButton(root);
     timelineButton->setText(QStringLiteral("Timeline GIF"));
     timelineButton->setToolTip(QStringLiteral("Export loaded volume frames as an animated GIF"));
     connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
-    viewControls->addWidget(timelineButton);
+    displayControls->addWidget(timelineButton);
+    displayControls->addStretch(1);
+    auto* renderControls = new QHBoxLayout();
+    renderControls->setSpacing(6);
+    viewControls->addLayout(renderControls);
     radarOpacitySlider_ = new QSlider(Qt::Horizontal, root);
     radarOpacitySlider_->setRange(20, 100);
     radarOpacitySlider_->setValue(80);
     radarOpacitySlider_->setFixedWidth(90);
     radarOpacitySlider_->setToolTip(QStringLiteral("Radar opacity"));
-    viewControls->addWidget(radarOpacitySlider_);
+    renderControls->addWidget(radarOpacitySlider_);
     connect(radarOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
         for (auto* panel : maps_) panel->setRadarOpacity(opacity);
     });
     belowThresholdCheck_ = new QCheckBox(QStringLiteral("Below threshold"), root);
-    viewControls->addWidget(belowThresholdCheck_);
+    belowThresholdCheck_->setObjectName(QStringLiteral("belowThresholdCheck"));
+    renderControls->addWidget(belowThresholdCheck_);
     connect(belowThresholdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setBelowThresholdVisible(visible);
     });
+    renderControls->addStretch(1);
     rootLayout->addLayout(viewControls);
 
     rootLayout->addWidget(mapHost, 1);
@@ -559,6 +588,8 @@ void MainWindow::buildUi() {
     unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"), root);
     unifiedStatusLabel_->setObjectName(QStringLiteral("section"));
     unifiedStatusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    unifiedStatusLabel_->setMinimumWidth(0);
+    unifiedStatusLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     statusRow->addWidget(unifiedStatusLabel_, 1);
     loadingProgress_ = new QProgressBar(root);
     loadingProgress_->setTextVisible(false);
@@ -624,10 +655,12 @@ void MainWindow::updateStationSummary() {
         return;
     }
     const auto& site = model_->siteAt(row);
-    stationSummaryLabel_->setText(QStringLiteral("%1 · %2 · %3 m")
-                                      .arg(QString::fromStdString(site.name),
-                                           QString::fromStdString(site.owner))
-                                      .arg(site.antennaElevationMeters, 0, 'f', 0));
+    const auto summary = QStringLiteral("%1 · %2 · %3 m")
+                             .arg(QString::fromStdString(site.name),
+                                  QString::fromStdString(site.owner))
+                             .arg(site.antennaElevationMeters, 0, 'f', 0);
+    stationSummaryLabel_->setText(summary);
+    stationSummaryLabel_->setToolTip(summary);
     const QSignalBlocker blocker(favoriteButton_);
     const auto favorite = favoriteRadarIds_.contains(selectedRadarId_);
     favoriteButton_->setChecked(favorite);
@@ -636,8 +669,10 @@ void MainWindow::updateStationSummary() {
 
 void MainWindow::updateUnifiedStatus() {
     if (!unifiedStatusLabel_) return;
-    unifiedStatusLabel_->setText(QStringLiteral("Radar: %1    |    Overlays: %2")
-                                     .arg(radarStatus_, overlayStatus_));
+    const auto status = QStringLiteral("Radar: %1    |    Overlays: %2")
+                            .arg(radarStatus_, overlayStatus_);
+    unifiedStatusLabel_->setText(status);
+    unifiedStatusLabel_->setToolTip(status);
 }
 
 QString MainWindow::selectedRadarId() const {
@@ -677,14 +712,16 @@ void MainWindow::radarSelected(const QModelIndex& index) {
         return;
     }
     const auto radarId = index.data(RadarListModel::RadarIdRole).toString();
-    if (radarId == map_->radarId()) {
+    if (radarId == selectedRadarId_ &&
+        std::all_of(maps_.cbegin(), maps_.cend(), [&radarId](const RadarMapCanvas* panel) {
+            return panel->radarId() == radarId;
+        })) {
         map_->recenterSelected();
         return;
     }
     selectedRadarId_ = radarId;
-    const auto activePanel = panelIndex(map_);
     while (panelRadarIds_.size() < maps_.size()) panelRadarIds_.push_back({});
-    if (activePanel >= 0) panelRadarIds_[activePanel] = radarId;
+    for (auto& panelRadarId : panelRadarIds_) panelRadarId = radarId;
     const auto existed = radarSessions_.contains(radarId);
     const auto session = sessionFor(radarId);
     recentRadarIds_.removeAll(radarId);
@@ -693,16 +730,19 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     QSettings settings;
     settings.setValue(QStringLiteral("recentRadars"), recentRadarIds_);
     settings.setValue(QStringLiteral("lastRadar"), radarId);
-    if (activePanel >= 0) settings.setValue(QStringLiteral("panels/radar%1").arg(activePanel), radarId);
+    for (int panel = 0; panel < maps_.size(); ++panel)
+        settings.setValue(QStringLiteral("panels/radar%1").arg(panel), radarId);
     rebuildStationPicker();
     stopAnimation();
     session->followLatest = true;
     liveButton_->setChecked(true);
     updateProductAvailability();
     updatePlaybackControls();
-    map_->setSelectedRadar(radarId);
-    map_->setLoading(session->history.empty(), QStringLiteral("Loading %1 radar data").arg(radarId));
-    map_->setVolumeQuality(0, 0, 0);
+    for (auto* panel : maps_) {
+        panel->setSelectedRadar(radarId);
+        panel->setLoading(session->history.empty(), QStringLiteral("Loading %1 radar data").arg(radarId));
+        panel->setVolumeQuality(0, 0, 0);
+    }
     loadingProgress_->setRange(0, 0);
     loadingProgress_->show();
     cancelButton_->show();
@@ -723,13 +763,9 @@ void MainWindow::radarSelected(const QModelIndex& index) {
 }
 
 void MainWindow::requestSelectedRadar() {
-    QSet<QString> requested;
-    for (const auto& radarId : panelRadarIds_) {
-        if (radarId.isEmpty() || requested.contains(radarId)) continue;
-        requested.insert(radarId);
-        if (const auto session = sessionFor(radarId)) session->requestActive = true;
-        source_->requestLatest(radarId);
-    }
+    if (selectedRadarId_.isEmpty()) return;
+    if (const auto session = sessionFor(selectedRadarId_)) session->requestActive = true;
+    source_->requestLatest(selectedRadarId_);
 }
 
 void MainWindow::sourceStatusChanged(const QString& radarId, const QString& status) {
@@ -873,21 +909,11 @@ void MainWindow::volumeProgress(const QString& radarId, const QString& volumeId,
     updateUnifiedStatus();
 }
 
-void MainWindow::chunkDecompressed(const QString& radarId, const QString& volumeId, const QString&,
-                                   const QByteArray& data, const QDateTime&) {
+void MainWindow::chunkDecoded(const QString& radarId, const QString& volumeId, const QString&,
+                              DecodedChunk decoded, const QDateTime&) {
     const auto session = sessionFor(radarId, false);
     if (!session || volumeId != session->pendingVolumeId) return;
-    ++session->pendingDecodeTasks;
-    const QPointer<MainWindow> guard(this);
-    QThreadPool::globalInstance()->start([guard, radarId, volumeId, data] {
-        const auto* raw = reinterpret_cast<const std::byte*>(data.constData());
-        auto decoded = decodeMessage31Chunk(
-            std::span<const std::byte>(raw, static_cast<std::size_t>(data.size())), radarId.toStdString());
-        if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, radarId, volumeId, decoded = std::move(decoded)]() mutable {
-            if (guard) guard->acceptDecodedChunk(radarId, volumeId, std::move(decoded));
-        }, Qt::QueuedConnection);
-    });
+    acceptDecodedChunk(radarId, volumeId, std::move(decoded));
 }
 
 void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, const int chunkCount,
@@ -1225,8 +1251,10 @@ void MainWindow::restoreSettings() {
             std::clamp(settings.value(QStringLiteral("panels/stormDirection%1").arg(panel), 0.0).toDouble(), 0.0, 359.9),
             std::clamp(settings.value(QStringLiteral("panels/stormSpeed%1").arg(panel), 0.0).toDouble(), 0.0, 80.0),
         });
-        panelRadarIds_[panel] = settings.value(QStringLiteral("panels/radar%1").arg(panel)).toString();
     }
+    const auto sharedRadar = settings.value(
+        QStringLiteral("lastRadar"), settings.value(QStringLiteral("panels/radar0"))).toString();
+    for (auto& panelRadarId : panelRadarIds_) panelRadarId = sharedRadar;
 
     QVector<RadarMapCanvas::PaletteStop> customStops;
     for (const auto& encoded : settings.value(QStringLiteral("view/customPalette")).toStringList()) {
@@ -1455,9 +1483,9 @@ void MainWindow::setPanelLayout(const int layoutIndex) {
         add(0, 0, 0, 2, 2);
     }
     mapGrid_->setRowStretch(0, 1);
-    mapGrid_->setRowStretch(1, 1);
+    mapGrid_->setRowStretch(1, layoutIndex == 1 ? 0 : 1);
     mapGrid_->setColumnStretch(0, 1);
-    mapGrid_->setColumnStretch(1, 1);
+    mapGrid_->setColumnStretch(1, layoutIndex == 2 ? 0 : 1);
     if (panelLayoutCombo_ && map_->isHidden()) activateMap(maps_.front());
     if (panelLayoutCombo_) saveSettings();
 }

@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
     auto* playButton = window.findChild<QToolButton*>(QStringLiteral("playButton"));
     auto* warningsCheck = window.findChild<QCheckBox*>(QStringLiteral("warningsCheck"));
     auto* reportsCheck = window.findChild<QCheckBox*>(QStringLiteral("reportsCheck"));
+    auto* belowThresholdCheck = window.findChild<QCheckBox*>(QStringLiteral("belowThresholdCheck"));
     auto* stationCombo = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
     auto* liveButton = window.findChild<QToolButton*>(QStringLiteral("liveButton"));
     auto* panelLayout = window.findChild<QComboBox*>(QStringLiteral("panelLayoutCombo"));
@@ -46,10 +47,22 @@ int main(int argc, char** argv) {
     auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
     if (!map || !secondMap || !products || !frameSlider || !playButton || !warningsCheck || !reportsCheck ||
+        !belowThresholdCheck ||
         !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
         !model || model->rowCount() < 200 || !panelLayout || panelLayout->count() != 4 ||
         radarPanels.size() != 4) {
         std::cerr << "UI smoke setup failed\n";
+        return 1;
+    }
+
+    window.resize(1024, 700);
+    application.processEvents();
+    const auto belowThresholdBottomRight = belowThresholdCheck->mapTo(
+        window.centralWidget(), belowThresholdCheck->rect().bottomRight());
+    if (window.width() > 1024 || !window.centralWidget()->rect().contains(belowThresholdBottomRight)) {
+        std::cerr << "Responsive controls overflow at 1024 px: window=" << window.width()
+                  << " controlRight=" << belowThresholdBottomRight.x()
+                  << " contentRight=" << window.centralWidget()->rect().right() << '\n';
         return 1;
     }
 
@@ -61,23 +74,32 @@ int main(int argc, char** argv) {
         std::cerr << "2x2 panel layout did not expose four radar canvases\n";
         return 1;
     }
-    panelLayout->setCurrentIndex(0);
+    panelLayout->setCurrentIndex(1);
     application.processEvents();
+
+    const auto* mapHost = map->parentWidget();
+    if (!mapHost || std::abs(map->geometry().bottom() - mapHost->rect().bottom()) > 5 ||
+        std::abs(secondMap->geometry().bottom() - mapHost->rect().bottom()) > 5) {
+        std::cerr << "1x2 panel layout did not use the full available map height\n";
+        return 1;
+    }
 
     secondMap->activated();
     const auto secondRadarIndex = stationCombo->findData(QStringLiteral("KTLX"));
     if (secondRadarIndex < 0) {
-        std::cerr << "Independent panel radar was not available in the station picker\n";
+        std::cerr << "Shared panel radar was not available in the station picker\n";
         return 1;
     }
     stationCombo->setCurrentIndex(secondRadarIndex);
     stationCombo->activated(secondRadarIndex);
     application.processEvents();
-    if (secondMap->radarId() != QStringLiteral("KTLX") || map->radarId() == QStringLiteral("KTLX")) {
-        std::cerr << "Radar selection was not independent per panel\n";
+    if (secondMap->radarId() != QStringLiteral("KTLX") || map->radarId() != QStringLiteral("KTLX")) {
+        std::cerr << "Radar selection was not synchronized across panels\n";
         return 1;
     }
     map->activated();
+    panelLayout->setCurrentIndex(0);
+    application.processEvents();
 
     map->setSites({{"TATL", "Atlanta", "TDWR", 33.6470, -84.2620, 327.7}});
     map->setView({-84.2620, 33.6470}, 6);
@@ -147,6 +169,22 @@ int main(int argc, char** argv) {
     map->setWeatherOverlays(warnings, stormReports);
     if (map->warningCount() != 1 || map->stormReportCount() != 1) {
         std::cerr << "Weather overlays did not reach the map\n";
+        return 1;
+    }
+    map->setSites({{"OUTSIDE", "Outside", "WSR-88D", 0.0, 0.0, 0.0}});
+    map->setView({-97.2, 35.2}, 6);
+    application.processEvents();
+    QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, map->rect().center());
+    application.processEvents();
+    if (!map->probeText().contains(QLatin1Char('\n')) ||
+        !map->probeText().contains(QStringLiteral("Instructions: Take shelter now"))) {
+        std::cerr << "Warning detail card lost structured alert text\n";
+        return 1;
+    }
+    QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, QPoint(8, map->height() - 8));
+    application.processEvents();
+    if (!map->probeText().isEmpty()) {
+        std::cerr << "Warning detail card did not dismiss after clicking outside it\n";
         return 1;
     }
     map->setCustomPalette({{-10.0, QColor("#001122")}, {40.0, QColor("#ffcc00")}});

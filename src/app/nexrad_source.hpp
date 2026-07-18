@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/level2_decoder.hpp"
+
 #include <QObject>
 #include <QDateTime>
 #include <QHash>
@@ -8,6 +10,7 @@
 #include <QQueue>
 #include <QSet>
 #include <QStringList>
+#include <QThreadPool>
 #include <QVector>
 #include <QUrl>
 
@@ -32,7 +35,8 @@ signals:
     void volumeStarted(QString radarId, QString volumeId, int chunkCount);
     void volumeProgress(QString radarId, QString volumeId, int completed, int total,
                         int decoded, int failed);
-    void chunkDecompressed(QString radarId, QString volumeId, QString key, QByteArray data, QDateTime receivedAt);
+    void chunkDecoded(QString radarId, QString volumeId, QString key, cappedweather::DecodedChunk decoded,
+                      QDateTime receivedAt);
     void volumeReady(QString radarId, QString volumeId, int chunkCount, int failedChunks,
                      QDateTime receivedAt);
     void catalogReceived(QByteArray data);
@@ -98,6 +102,8 @@ private:
     void requestVolumePage(VolumeListingContext context);
     void beginVolume(const QString& radarId, const QString& volumeId, QVector<PendingObject> objects);
     void requestObject(ObjectContext context);
+    void completeObject(ObjectContext context, QDateTime receivedAt,
+                        std::optional<DecodedChunk> decoded, QString failure);
     void pumpObjectQueue();
     void finishRadar(const QString& radarId);
     static QString utcPrefix(const QString& radarId);
@@ -113,7 +119,9 @@ private:
     QSet<QString> activeRadars_;
     QSet<QString> cancelledRadars_;
     QHash<QString, QSet<QString>> downloadedVolumeIds_;
+    QThreadPool processingPool_;
     int activeObjectRequests_ = 0;
+    int pendingProcessingTasks_ = 0;
 };
 
 } // namespace cappedweather

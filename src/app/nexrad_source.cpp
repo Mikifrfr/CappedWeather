@@ -4,12 +4,15 @@
 
 #include <QDateTime>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QSettings>
 #include <QTimer>
 #include <QUrlQuery>
 #include <QXmlStreamReader>
 
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <utility>
 
 #ifdef CAPPEDWEATHER_HAS_BZIP2
@@ -58,29 +61,40 @@ std::optional<QByteArray> decompressChunk(const QByteArray& input, QString& erro
         return std::nullopt;
     }
 
-    QByteArray compressed = input.mid(4);
-    int capacity = 1 << 20;
-    if (compressed.size() > capacity / 8) {
-        capacity = static_cast<int>(compressed.size() * 8);
+    bz_stream stream{};
+    stream.next_in = const_cast<char*>(input.constData() + 4);
+    stream.avail_in = static_cast<unsigned int>(input.size() - 4);
+    const auto initialized = BZ2_bzDecompressInit(&stream, 0, 0);
+    if (initialized != BZ_OK) {
+        error = QStringLiteral("bzip2 initialization failed (%1)").arg(initialized);
+        return std::nullopt;
     }
-    for (int attempt = 0; attempt < 7; ++attempt) {
-        QByteArray output(capacity, Qt::Uninitialized);
-        unsigned int outputLength = static_cast<unsigned int>(output.size());
-        unsigned int inputLength = static_cast<unsigned int>(compressed.size());
-        const int result = BZ2_bzBuffToBuffDecompress(output.data(), &outputLength,
-                                                       compressed.data(), inputLength, 0, 0);
-        if (result == BZ_OK) {
-            output.resize(static_cast<qsizetype>(outputLength));
-            return output;
-        }
-        if (result != BZ_OUTBUFF_FULL) {
-            error = QStringLiteral("bzip2 decompression failed (%1)").arg(result);
+
+    constexpr qsizetype kOutputBlockSize = 256 * 1024;
+    constexpr qsizetype kMaximumOutputSize = 64 * 1024 * 1024;
+    std::array<char, kOutputBlockSize> block{};
+    QByteArray output;
+    output.reserve(std::min<qsizetype>(kMaximumOutputSize,
+                                       std::max<qsizetype>(1 << 20, input.size() * 6)));
+    int result = BZ_OK;
+    while (result == BZ_OK) {
+        stream.next_out = block.data();
+        stream.avail_out = static_cast<unsigned int>(block.size());
+        result = BZ2_bzDecompress(&stream);
+        const auto produced = static_cast<qsizetype>(block.size() - stream.avail_out);
+        if (produced > 0) output.append(block.data(), produced);
+        if (output.size() > kMaximumOutputSize) {
+            BZ2_bzDecompressEnd(&stream);
+            error = QStringLiteral("bzip2 output exceeded the 64 MB safety limit");
             return std::nullopt;
         }
-        capacity *= 2;
     }
-    error = QStringLiteral("bzip2 output exceeded the safety limit");
-    return std::nullopt;
+    BZ2_bzDecompressEnd(&stream);
+    if (result != BZ_STREAM_END) {
+        error = QStringLiteral("bzip2 decompression failed (%1)").arg(result);
+        return std::nullopt;
+    }
+    return output;
 }
 #endif
 
@@ -150,6 +164,7 @@ QStringList newestFirstVolumePrefixes(const QStringList& prefixes) {
 
 NexradSource::NexradSource(QObject* parent)
     : QObject(parent) {
+    processingPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount() / 2, 1, 4));
     connect(&network_, &QNetworkAccessManager::finished, this, [this](QNetworkReply* reply) {
         if (catalogRequests_.contains(reply)) {
             catalogFinished(reply);
@@ -457,7 +472,9 @@ void NexradSource::requestObject(ObjectContext context) {
 }
 
 void NexradSource::pumpObjectQueue() {
-    while (activeObjectRequests_ < maximumConcurrentObjects() && !queuedObjects_.isEmpty()) {
+    const auto processingCapacity = std::max(2, processingPool_.maxThreadCount() * 2);
+    while (activeObjectRequests_ < maximumConcurrentObjects() &&
+           pendingProcessingTasks_ < processingCapacity && !queuedObjects_.isEmpty()) {
         auto context = queuedObjects_.dequeue();
         if (!cancelledRadars_.contains(context.object.radarId)) requestObject(std::move(context));
     }
@@ -467,37 +484,69 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
     auto context = objectRequests_.take(reply);
     activeObjectRequests_ = std::max(0, activeObjectRequests_ - 1);
     const auto radarId = context.object.radarId;
-    auto active = activeVolumes_.find(radarId);
-    if (active == activeVolumes_.end()) {
+    if (!activeVolumes_.contains(radarId)) {
         reply->deleteLater();
+        pumpObjectQueue();
         return;
     }
 
     const auto receivedAt = QDateTime::currentDateTimeUtc();
-    QString failure;
-    bool decoded = false;
     if (reply->error() != QNetworkReply::NoError) {
-        failure = reply->errorString();
-    } else {
-        const auto data = reply->readAll();
+        const auto failure = reply->errorString();
+        reply->deleteLater();
+        completeObject(std::move(context), receivedAt, std::nullopt, failure);
+        pumpObjectQueue();
+        return;
+    }
+
+    auto data = reply->readAll();
+    reply->deleteLater();
+    ++pendingProcessingTasks_;
+    const QPointer<NexradSource> guard(this);
+    processingPool_.start([guard, context = std::move(context), data = std::move(data), receivedAt]() mutable {
+        QString failure;
+        std::optional<DecodedChunk> decoded;
 #ifdef CAPPEDWEATHER_HAS_BZIP2
-        QString decompressionError;
-        if (const auto decompressed = decompressChunk(data, decompressionError); decompressed.has_value()) {
-            decoded = true;
-            ++active->decodedChunks;
-            emit chunkDecompressed(radarId, context.volumeId, context.object.key, *decompressed, receivedAt);
+        if (const auto decompressed = decompressChunk(data, failure); decompressed.has_value()) {
+            const auto* raw = reinterpret_cast<const std::byte*>(decompressed->constData());
+            decoded = decodeMessage31Chunk(
+                std::span<const std::byte>(raw, static_cast<std::size_t>(decompressed->size())),
+                context.object.radarId.toStdString());
         } else {
-            failure = decompressionError;
+            decoded.reset();
         }
 #else
         Q_UNUSED(data);
         failure = QStringLiteral("bzip2 support unavailable");
 #endif
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [guard, context = std::move(context), receivedAt,
+                                          decoded = std::move(decoded), failure = std::move(failure)]() mutable {
+            if (!guard) return;
+            guard->pendingProcessingTasks_ = std::max(0, guard->pendingProcessingTasks_ - 1);
+            guard->completeObject(std::move(context), receivedAt, std::move(decoded),
+                                  std::move(failure));
+            guard->pumpObjectQueue();
+        }, Qt::QueuedConnection);
+    });
+}
+
+void NexradSource::completeObject(ObjectContext context, const QDateTime receivedAt,
+                                  std::optional<DecodedChunk> decoded, QString failure) {
+    const auto radarId = context.object.radarId;
+    auto active = activeVolumes_.find(radarId);
+    if (active == activeVolumes_.end() || cancelledRadars_.contains(radarId)) return;
+
+    const auto decodedSuccessfully = decoded.has_value() && !decoded->rays.empty();
+    if (decodedSuccessfully) {
+        ++active->decodedChunks;
+        emit chunkDecoded(radarId, context.volumeId, context.object.key, std::move(*decoded), receivedAt);
+    } else if (failure.isEmpty()) {
+        failure = QStringLiteral("Level II chunk contained no decodable radial messages");
     }
-    reply->deleteLater();
 
     const auto attempts = maximumAttempts();
-    if (!decoded && context.attempt + 1 < attempts && !cancelledRadars_.contains(radarId)) {
+    if (!decodedSuccessfully && context.attempt + 1 < attempts && !cancelledRadars_.contains(radarId)) {
         ++context.attempt;
         emit statusChanged(radarId, QStringLiteral("retrying volume chunk (%1/%2)")
                                         .arg(context.attempt + 1).arg(attempts));
@@ -509,7 +558,7 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
         pumpObjectQueue();
         return;
     }
-    if (!decoded) {
+    if (!decodedSuccessfully) {
         ++active->failedChunks;
         if (active->firstError.isEmpty()) active->firstError = failure;
     }

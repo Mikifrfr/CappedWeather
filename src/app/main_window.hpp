@@ -53,8 +53,8 @@ private slots:
     void volumeStarted(const QString& radarId, const QString& volumeId, int chunkCount);
     void volumeProgress(const QString& radarId, const QString& volumeId, int completed,
                         int total, int decoded, int failed);
-    void chunkDecompressed(const QString& radarId, const QString& volumeId, const QString& key,
-                           const QByteArray& data, const QDateTime& receivedAt);
+    void chunkDecoded(const QString& radarId, const QString& volumeId, const QString& key,
+                      DecodedChunk decoded, const QDateTime& receivedAt);
     void volumeReady(const QString& radarId, const QString& volumeId, int chunkCount,
                      int failedChunks, const QDateTime& receivedAt);
     void showFrame(int index);

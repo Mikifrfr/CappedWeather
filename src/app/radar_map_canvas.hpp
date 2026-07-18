@@ -7,11 +7,9 @@
 #include "app/weather_overlay_source.hpp"
 
 #include <QColor>
-#include <QCache>
 #include <QDateTime>
 #include <QHash>
 #include <QImage>
-#include <QNetworkAccessManager>
 #include <QPainterPath>
 #include <QPointF>
 #include <QWidget>
@@ -23,10 +21,10 @@
 
 class QMouseEvent;
 class QEvent;
-class QNetworkReply;
-class QNetworkDiskCache;
 class QPaintEvent;
 class QPainter;
+class QShowEvent;
+class QTimer;
 class QWheelEvent;
 
 namespace cappedweather {
@@ -48,6 +46,7 @@ public:
     };
 
     explicit RadarMapCanvas(QWidget* parent = nullptr);
+    ~RadarMapCanvas() override;
 
     void setSites(std::vector<RadarSite> sites);
     void setSelectedRadar(const QString& radarId);
@@ -106,9 +105,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void leaveEvent(QEvent* event) override;
-
-private slots:
-    void tileFinished(QNetworkReply* reply);
+    void showEvent(QShowEvent* event) override;
 
 private:
     static constexpr int kTileSize = 256;
@@ -116,10 +113,12 @@ private:
     static constexpr int kMaxZoom = 19;
 
     QPointF worldPoint(double latitude, double longitude) const;
+    QPointF mapCenterWorld() const;
+    QPointF screenPointFromWorld(const QPointF& world) const;
     QPointF screenPoint(double latitude, double longitude) const;
     QPointF geographicPoint(const QPointF& screen) const;
     void rebuildOverlay();
-    void invalidateOverlay();
+    void invalidateOverlay(bool preserveForZoomTransition = false);
     void paintRadarOverlay(QPainter& painter);
     void paintWeatherOverlays(QPainter& painter);
     void paintLegend(QPainter& painter);
@@ -136,22 +135,42 @@ private:
     void setZoomAt(int zoom, const QPointF& cursor);
     void refreshScanDiagnostics();
     void refreshVelocityProcessing();
+    void rebuildProbeIndex();
+    void ensureSiteWorldPoints() const;
+    void ensureWeatherPaths() const;
+    void invalidateWorldCaches(bool zoomChanged = false);
+    bool overlayCacheCoversView() const;
 
-    QNetworkAccessManager network_;
-    QCache<QString, QImage> tiles_;
-    QNetworkDiskCache* tileDiskCache_ = nullptr;
-    QHash<QNetworkReply*, QString> pendingTiles_;
     std::vector<RadarSite> sites_;
+    QHash<QString, std::size_t> siteIndexes_;
     QString selectedRadar_;
     ProductKind product_ = ProductKind::Reflectivity;
     std::optional<int> elevationFilter_;
     std::shared_ptr<const DecodedChunk> chunk_;
-    QHash<QRgb, QPainterPath> overlayPaths_;
+    QImage overlayImage_;
+    QPointF overlayImageCenterWorld_;
+    QSize overlayImageLogicalSize_;
     int overlayZoom_ = -1;
     quint64 overlayGeneration_ = 0;
     bool overlayBuildPending_ = false;
+    double maximumRangeMeters_ = 230000.0;
     QVector<WeatherWarning> warnings_;
     QVector<StormReport> stormReports_;
+    struct CachedWarningPath {
+        int warningIndex = -1;
+        QColor color;
+        QPainterPath path;
+    };
+    mutable QVector<CachedWarningPath> warningPaths_;
+    mutable QVector<QPointF> stormReportWorldPoints_;
+    mutable int warningPathsZoom_ = -1;
+    mutable quint64 warningPathsGeneration_ = 0;
+    quint64 weatherGeneration_ = 1;
+    mutable QVector<QPointF> siteWorldPoints_;
+    mutable int siteWorldZoom_ = -1;
+    mutable QPointF cachedWorldCenter_;
+    mutable QPointF cachedCenterCoordinate_;
+    mutable int cachedWorldCenterZoom_ = -1;
     QDateTime dataTime_;
     QString loadingMessage_;
     QString qualityText_;
@@ -159,6 +178,7 @@ private:
     QString warningFilter_;
     QString hoverRadarId_;
     QString pinnedInfo_;
+    QRectF pinnedInfoCardRect_;
     QPointF center_{-96.5, 38.5}; // longitude, latitude
     int zoom_ = 4;
     QPoint lastMousePosition_;
@@ -176,8 +196,14 @@ private:
     bool crossSectionMode_ = false;
     bool activePanel_ = false;
     VelocityProcessingOptions velocityOptions_;
-    std::shared_ptr<const std::vector<std::vector<double>>> processedVelocity_;
+    std::shared_ptr<const ProcessedVelocity> processedVelocity_;
+    quint64 velocityGeneration_ = 0;
+    bool velocityBuildPending_ = false;
+    QVector<std::pair<double, std::size_t>> probeRayIndex_;
     int loadingAngle_ = 0;
+    QTimer* loadingTimer_ = nullptr;
+    QTimer* probeTimer_ = nullptr;
+    QPointF pendingProbePosition_;
     QPointF probePosition_;
     QString probeText_;
     std::optional<QPointF> measureStart_;
