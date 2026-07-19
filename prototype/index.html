@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CappedWeather — Console Concept v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <div id="workbench">
+
+    <!-- ══════════ LEFT RAIL ══════════ -->
+    <aside id="rail-left">
+      <div class="rl-head">
+        <div class="rl-station-row">
+          <span class="station-id">KEWX</span>
+        </div>
+        <div class="station-meta">Austin/San Antonio · WSR-88D · 204 m</div>
+        <div class="scan-meta">VCP 212 · tilt 1 · scan 1/2 · 0.5°</div>
+      </div>
+
+      <div class="rail-scroll">
+
+        <section class="rail-section">
+          <div class="section-head" data-collapse="sec-station">STATION <span class="chev">▾</span></div>
+          <div class="section-body" id="sec-station">
+            <div class="search-box">
+              <input type="text" placeholder="Search 155 radars…" spellcheck="false">
+              <kbd>/</kbd>
+            </div>
+            <div class="station-list" id="stationList"></div>
+          </div>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-head" data-collapse="sec-product">PRODUCT <span class="chev">▾</span></div>
+          <div class="section-body" id="sec-product">
+            <div class="product-list" id="productList"></div>
+          </div>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-head" data-collapse="sec-tilt">TILT <span class="chev">▾</span></div>
+          <div class="section-body" id="sec-tilt">
+            <div class="tilt-strip" id="tiltStrip"></div>
+            <div class="caption">tilt 1 · scan 1/2 · 0.5° cut</div>
+          </div>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-head" data-collapse="sec-overlay">OVERLAYS <span class="chev">▾</span></div>
+          <div class="section-body" id="sec-overlay">
+            <label class="row-check"><input type="checkbox" id="ovWarnings" checked><span class="box"></span>Warnings <span class="row-count" id="warnCount">3</span></label>
+            <label class="row-check"><input type="checkbox" id="ovReports" checked><span class="box"></span>Storm reports <span class="row-count">5</span></label>
+            <label class="row-check"><input type="checkbox" id="ovRings" checked><span class="box"></span>Range rings</label>
+            <div class="slider-row">
+              <span class="slider-label">Echo</span>
+              <input type="range" id="opacitySlider" min="20" max="100" value="85">
+              <span class="slider-val" id="opacityVal">85%</span>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label">Map</span>
+              <input type="range" id="mapSlider" min="0" max="100" value="70">
+              <span class="slider-val" id="mapVal">70%</span>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label">Palette</span>
+              <select id="paletteSelect">
+                <option>Operational</option>
+                <option>Capped</option>
+                <option>Color-safe</option>
+                <option>Custom…</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-head" data-collapse="sec-panels">PANELS <span class="chev">▾</span></div>
+          <div class="section-body" id="sec-panels">
+            <div class="panel-grid" id="panelGrid">
+              <button class="pg-cell active">1×1</button>
+              <button class="pg-cell">1×2</button>
+              <button class="pg-cell">2×1</button>
+              <button class="pg-cell">2×2</button>
+            </div>
+            <div class="caption">multi-panel linking on</div>
+          </div>
+        </section>
+
+      </div>
+
+      <div class="rl-foot">
+        <button class="flat-btn" id="settingsBtn">Settings</button>
+        <button class="flat-btn" id="aboutBtn">About</button>
+      </div>
+      <button class="rail-toggle" id="leftToggle" title="Collapse panel">‹</button>
+    </aside>
+
+    <!-- ══════════ MAP ══════════ -->
+    <main id="mapwrap">
+      <canvas id="map"></canvas>
+
+      <!-- color table -->
+      <div class="hud legend" id="legend">
+        <div class="legend-head">
+          <span id="legendTitle">Reflectivity</span>
+          <span class="legend-unit" id="legendUnit">dBZ</span>
+        </div>
+        <canvas id="legendBar" width="228" height="9"></canvas>
+        <div class="legend-ticks" id="legendTicks"></div>
+        <div class="legend-reports" id="legendReports">
+          <span><i class="glyph tor">▲</i>Tornado</span>
+          <span><i class="glyph hail">●</i>Hail</span>
+          <span><i class="glyph wind">■</i>Wind</span>
+        </div>
+      </div>
+
+      <!-- probe readout -->
+      <div class="hud probe" id="probe"></div>
+
+      <!-- zoom cluster -->
+      <div class="hud zoom-cluster">
+        <button class="zoom-btn" id="zoomIn">+</button>
+        <button class="zoom-btn" id="zoomOut">−</button>
+        <div class="zoom-level" id="zoomLevel">8.0</div>
+      </div>
+
+      <!-- scale + attribution -->
+      <div class="scale-bar" id="scaleBar"><div class="scale-line" id="scaleLine"></div><span id="scaleText">50 km</span></div>
+      <div class="attribution">© OpenStreetMap contributors · CARTO</div>
+
+      <button class="rail-toggle right" id="rightToggle" title="Alerts panel">›</button>
+    </main>
+
+    <!-- ══════════ RIGHT RAIL ══════════ -->
+    <aside id="rail-right">
+      <div class="rail-tabs">
+        <button class="rail-tab active" data-rtab="alerts">Alerts <span class="tab-count">3</span></button>
+        <button class="rail-tab" data-rtab="reports">Reports <span class="tab-count">5</span></button>
+      </div>
+      <div class="rail-scroll">
+        <div id="rtab-alerts" class="rtab-page"></div>
+        <div id="rtab-reports" class="rtab-page hidden"></div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ══════════ TIMELINE DOCK ══════════ -->
+  <footer id="dock">
+    <div class="dock-tabs">
+      <button class="dock-tab active" data-dtab="frames">Frames</button>
+      <button class="dock-tab" data-dtab="xsect">Cross-section</button>
+      <button class="dock-tab" data-dtab="measure">Measure</button>
+      <button class="dock-tab" data-dtab="log">Log</button>
+      <div class="dock-spacer"></div>
+      <button class="dock-collapse" id="dockCollapse">▾</button>
+    </div>
+
+    <div class="dock-body" id="dockBody">
+
+      <div class="dtab-page" id="dtab-frames">
+        <button class="play-btn" id="playBtn" title="Play / pause (Space)">
+          <svg id="playIcon" viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M4 2l9 6-9 6z"/></svg>
+        </button>
+        <div class="timeline" id="timeline"></div>
+        <div class="frame-label" id="frameLabel">F 8/8 · 19:26:14 UTC</div>
+        <div class="speed-strip" id="speedStrip">
+          <button class="spd active">1×</button><button class="spd">2×</button><button class="spd">4×</button>
+        </div>
+      </div>
+
+      <div class="dtab-page hidden" id="dtab-xsect">
+        <canvas id="xsect" width="900" height="120"></canvas>
+        <div class="dock-hint">KEWX → hook appendage, azimuth 060° · drag a line on the map to redefine</div>
+      </div>
+
+      <div class="dtab-page hidden" id="dtab-measure">
+        <div class="measure-readout">123.4 km · 056.7°</div>
+        <div class="dock-hint">press M, then drag two points on the map · Esc clears</div>
+      </div>
+
+      <div class="dtab-page hidden" id="dtab-log">
+        <div class="log-scroll" id="logScroll"></div>
+      </div>
+
+    </div>
+  </footer>
+
+  <!-- ══════════ STATUS BAR ══════════ -->
+  <div id="statusbar">
+    <span id="dataChip">8 520 rays · NOAA 19:26:14 UTC · 71/71 chunks</span>
+    <span class="sb-right"><span id="cursorPos">—</span><span class="sb-sep">·</span><span id="clock">19:26:14</span> UTC</span>
+  </div>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

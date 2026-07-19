@@ -9,6 +9,7 @@
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 
+#include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -17,9 +18,12 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QEventLoop>
+#include <QFont>
+#include <QFrame>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -33,6 +37,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QPointer>
@@ -40,6 +45,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QScreen>
+#include <QScrollArea>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QStandardItemModel>
@@ -274,87 +280,92 @@ MainWindow::MainWindow(QWidget* parent)
 
 void MainWindow::buildUi() {
     setWindowTitle(QStringLiteral("CappedWeather - Level II Radar"));
-    setStyleSheet(QStringLiteral(
-        "QMainWindow, QWidget { background: #0e1216; color: #d7dce0; }"
-        "QComboBox, QToolButton, QLineEdit { background: #171d22; border: 1px solid #36424a; padding: 5px; }"
-        "QToolButton:checked { background: #174f69; border-color: #80d3ff; }"
-        "QLabel#section { color: #9aabb5; font-size: 11px; font-weight: 600; }"
-        "QProgressBar { border: 1px solid #36424a; background: #171d22; height: 8px; }"
-        "QProgressBar::chunk { background: #40a9d5; }"));
 
-    auto* root = new QWidget(this);
-    auto* rootLayout = new QVBoxLayout(root);
-    rootLayout->setContentsMargins(10, 10, 10, 10);
-    rootLayout->setSpacing(10);
+    QFont uiFont = QGuiApplication::font();
+    uiFont.setFamilies({QStringLiteral("IBM Plex Sans"), QStringLiteral("Segoe UI"),
+                        QStringLiteral("Noto Sans"), QStringLiteral("DejaVu Sans")});
+    QGuiApplication::setFont(uiFont);
+    QFont monoFont = uiFont;
+    monoFont.setFamilies({QStringLiteral("IBM Plex Mono"), QStringLiteral("Cascadia Mono"),
+                          QStringLiteral("Consolas"), QStringLiteral("monospace")});
 
-    auto* controls = new QVBoxLayout();
-    controls->setSpacing(6);
-    auto* radarControls = new QHBoxLayout();
-    radarControls->setSpacing(6);
-    controls->addLayout(radarControls);
+    QPalette palette;
+    palette.setColor(QPalette::Window, QColor(QStringLiteral("#1a1b1e")));
+    palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#d4d6d9")));
+    palette.setColor(QPalette::Base, QColor(QStringLiteral("#131416")));
+    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#1a1b1e")));
+    palette.setColor(QPalette::Text, QColor(QStringLiteral("#d4d6d9")));
+    palette.setColor(QPalette::Button, QColor(QStringLiteral("#212328")));
+    palette.setColor(QPalette::ButtonText, QColor(QStringLiteral("#d4d6d9")));
+    palette.setColor(QPalette::ToolTipBase, QColor(QStringLiteral("#1a1b1e")));
+    palette.setColor(QPalette::ToolTipText, QColor(QStringLiteral("#d4d6d9")));
+    palette.setColor(QPalette::Highlight, QColor(126, 166, 201, 76));
+    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#d4d6d9")));
+    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#5d636b")));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#5d636b")));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#5d636b")));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#5d636b")));
+    QGuiApplication::setPalette(palette);
 
-    stationCombo_ = new QComboBox(root);
-    stationCombo_->setObjectName(QStringLiteral("stationCombo"));
-    stationCombo_->setEditable(true);
-    stationCombo_->setInsertPolicy(QComboBox::NoInsert);
-    stationCombo_->setMinimumWidth(230);
-    stationCombo_->setMaximumWidth(360);
-    stationCombo_->setMinimumContentsLength(24);
-    stationCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    stationCombo_->lineEdit()->setPlaceholderText(QStringLiteral("Find radar, city, or state…"));
-    radarControls->addWidget(stationCombo_);
-    favoriteButton_ = new QToolButton(root);
-    favoriteButton_->setObjectName(QStringLiteral("favoriteRadarButton"));
-    favoriteButton_->setText(QStringLiteral("☆"));
-    favoriteButton_->setCheckable(true);
-    favoriteButton_->setToolTip(QStringLiteral("Favorite selected radar"));
-    radarControls->addWidget(favoriteButton_);
+    qApp->setStyleSheet(QStringLiteral(R"QSS(
+QMainWindow { background: #131416; color: #d4d6d9; }
+QDialog, QMessageBox, QFileDialog { background: #1a1b1e; color: #d4d6d9; }
+QMainWindow::separator { background: #1a1b1e; width: 3px; height: 3px; }
+QMainWindow::separator:hover { background: #34373d; }
+QDockWidget { background: #1a1b1e; color: #9298a0; }
+QDockWidget::title { background: #1a1b1e; color: #9298a0; border-bottom: 1px solid #2b2d33; padding: 7px 12px 6px; font-size: 10px; font-weight: 600; }
+QWidget#dockBody { background: #1a1b1e; }
+QWidget#mapHost { background: #131416; }
+QScrollArea { background: #1a1b1e; border: none; }
+QLabel { color: #d4d6d9; background: transparent; }
+QLabel#section { color: #9298a0; font-size: 11px; }
+QLabel#dockSection { color: #5d636b; font-size: 10px; font-weight: 600; padding-top: 4px; }
+QComboBox, QLineEdit, QDoubleSpinBox, QSpinBox { background: #131416; color: #d4d6d9; border: 1px solid #2b2d33; border-radius: 0px; padding: 4px 6px; selection-background-color: rgba(126, 166, 201, 76); selection-color: #d4d6d9; }
+QComboBox:focus, QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus { border-color: #7ea6c9; }
+QComboBox:disabled, QLineEdit:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled { color: #5d636b; border-color: #232529; background: #17181a; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QLineEdit { background: transparent; border: none; padding: 0px; }
+QComboBox QAbstractItemView { background: #1a1b1e; color: #d4d6d9; border: 1px solid #2b2d33; outline: none; selection-background-color: rgba(126, 166, 201, 26); selection-color: #d4d6d9; }
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button, QSpinBox::up-button, QSpinBox::down-button { background: #17181a; border-left: 1px solid #2b2d33; width: 16px; }
+QToolButton, QPushButton { background: #212328; color: #d4d6d9; border: 1px solid #2b2d33; border-radius: 0px; padding: 5px 4px; }
+QToolButton:hover, QPushButton:hover { background: #282b31; border-color: #34373d; }
+QToolButton:pressed, QPushButton:pressed { background: #131416; }
+QToolButton:checked, QPushButton:checked { background: rgba(126, 166, 201, 26); border-color: #7ea6c9; color: #7ea6c9; }
+QToolButton:disabled, QPushButton:disabled { color: #5d636b; background: #1a1b1e; border-color: #232529; }
+QToolButton#liveButton:checked { background: rgba(111, 191, 90, 26); border-color: #6fbf5a; color: #6fbf5a; }
+QCheckBox { color: #d4d6d9; background: transparent; spacing: 6px; }
+QCheckBox:disabled { color: #5d636b; }
+QCheckBox::indicator { width: 12px; height: 12px; border: 1px solid #5d636b; background: transparent; }
+QCheckBox::indicator:hover { border-color: #9298a0; }
+QCheckBox::indicator:checked { border-color: #7ea6c9; background: #7ea6c9; }
+QCheckBox::indicator:disabled { border-color: #232529; }
+QSlider::groove:horizontal { background: #34373d; height: 2px; }
+QSlider::sub-page:horizontal { background: #34373d; }
+QSlider::add-page:horizontal { background: #34373d; }
+QSlider::handle:horizontal { width: 12px; height: 12px; margin: -6px 0px; border-radius: 6px; background: #1a1b1e; border: 2px solid #7ea6c9; }
+QProgressBar { background: #232529; border: none; max-height: 4px; }
+QProgressBar::chunk { background: #7ea6c9; }
+QStatusBar { background: #1a1b1e; color: #9298a0; border-top: 1px solid #2b2d33; }
+QStatusBar::item { border: none; }
+QStatusBar QLabel { color: #9298a0; background: transparent; font-size: 10px; }
+QStatusBar QToolButton { padding: 2px 8px; }
+QToolTip { background: #1a1b1e; color: #d4d6d9; border: 1px solid #2b2d33; padding: 4px 6px; }
+QMenu { background: #1a1b1e; color: #d4d6d9; border: 1px solid #2b2d33; }
+QMenu::item:selected { background: rgba(126, 166, 201, 26); }
+QScrollBar:vertical { background: transparent; width: 5px; margin: 0px; }
+QScrollBar::handle:vertical { background: #34373d; min-height: 24px; }
+QScrollBar::handle:vertical:hover { background: #44484f; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; border: none; background: none; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+QScrollBar:horizontal { background: transparent; height: 5px; margin: 0px; }
+QScrollBar::handle:horizontal { background: #34373d; min-width: 24px; }
+QScrollBar::handle:horizontal:hover { background: #44484f; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; border: none; background: none; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+)QSS"));
 
-    productCombo_ = new QComboBox(root);
-    productCombo_->setObjectName(QStringLiteral("productCombo"));
-    for (const auto& product : productDescriptors()) {
-        productCombo_->addItem(QString::fromUtf8(product.label.data()), static_cast<int>(product.kind));
-    }
-    productCombo_->setMaximumWidth(220);
-    productCombo_->setMinimumContentsLength(16);
-    productCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    radarControls->addWidget(productCombo_);
-
-    tiltCombo_ = new QComboBox(root);
-    tiltCombo_->setObjectName(QStringLiteral("tiltCombo"));
-    tiltCombo_->addItem(QStringLiteral("Latest available tilt"));
-    tiltCombo_->setEnabled(false);
-    tiltCombo_->setMinimumContentsLength(18);
-    tiltCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    tiltCombo_->setMaximumWidth(240);
-    radarControls->addWidget(tiltCombo_);
-    radarControls->addStretch(1);
-
-    auto* contextControls = new QHBoxLayout();
-    contextControls->setSpacing(6);
-    controls->addLayout(contextControls);
-
-    stationSummaryLabel_ = new QLabel(QStringLiteral("Select a radar"), root);
-    stationSummaryLabel_->setObjectName(QStringLiteral("section"));
-    stationSummaryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    stationSummaryLabel_->setMinimumWidth(0);
-    stationSummaryLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    contextControls->addWidget(stationSummaryLabel_, 1);
-
-    statusLabel_ = new QLabel(root);
-    statusLabel_->setObjectName(QStringLiteral("section"));
-    statusLabel_->hide();
-    warningsCheck_ = new QCheckBox(QStringLiteral("Warnings"), root);
-    warningsCheck_->setObjectName(QStringLiteral("warningsCheck"));
-    warningsCheck_->setChecked(true);
-    contextControls->addWidget(warningsCheck_);
-    reportsCheck_ = new QCheckBox(QStringLiteral("Storm reports"), root);
-    reportsCheck_->setObjectName(QStringLiteral("reportsCheck"));
-    reportsCheck_->setChecked(true);
-    contextControls->addWidget(reportsCheck_);
-    rootLayout->addLayout(controls);
-
-    auto* mapHost = new QWidget(root);
+    auto* mapHost = new QWidget(this);
+    mapHost->setObjectName(QStringLiteral("mapHost"));
     mapGrid_ = new QGridLayout(mapHost);
     mapGrid_->setContentsMargins(0, 0, 0, 0);
     mapGrid_->setSpacing(4);
@@ -372,17 +383,218 @@ void MainWindow::buildUi() {
     map_ = maps_.front();
     map_->setActivePanel(true);
     setPanelLayout(0);
+    setCentralWidget(mapHost);
 
-    auto* viewControls = new QVBoxLayout();
-    viewControls->setSpacing(6);
-    auto* navigationControls = new QHBoxLayout();
-    navigationControls->setSpacing(6);
-    viewControls->addLayout(navigationControls);
-    const auto addMapButton = [root, navigationControls](const QString& text, const QString& tip) {
-        auto* button = new QToolButton(root);
+    auto* controlDock = new QDockWidget(QStringLiteral("RADAR"), this);
+    controlDock->setObjectName(QStringLiteral("controlDock"));
+    controlDock->setFeatures(QDockWidget::DockWidgetMovable);
+    auto* controlScroll = new QScrollArea(controlDock);
+    controlScroll->setWidgetResizable(true);
+    controlScroll->setFrameShape(QFrame::NoFrame);
+    controlScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* controlBody = new QWidget(controlScroll);
+    controlBody->setObjectName(QStringLiteral("dockBody"));
+    auto* controlLayout = new QVBoxLayout(controlBody);
+    controlLayout->setContentsMargins(12, 8, 12, 12);
+    controlLayout->setSpacing(4);
+    const auto addSection = [controlBody, controlLayout](const QString& title) {
+        auto* header = new QLabel(title, controlBody);
+        header->setObjectName(QStringLiteral("dockSection"));
+        controlLayout->addWidget(header);
+    };
+
+    addSection(QStringLiteral("STATION"));
+    auto* stationRow = new QHBoxLayout();
+    stationRow->setSpacing(4);
+    stationCombo_ = new QComboBox(controlBody);
+    stationCombo_->setObjectName(QStringLiteral("stationCombo"));
+    stationCombo_->setEditable(true);
+    stationCombo_->setInsertPolicy(QComboBox::NoInsert);
+    stationCombo_->setMinimumContentsLength(24);
+    stationCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    stationCombo_->lineEdit()->setPlaceholderText(QStringLiteral("Find radar, city, or state…"));
+    stationCombo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    stationRow->addWidget(stationCombo_, 1);
+    favoriteButton_ = new QToolButton(controlBody);
+    favoriteButton_->setObjectName(QStringLiteral("favoriteRadarButton"));
+    favoriteButton_->setText(QStringLiteral("☆"));
+    favoriteButton_->setCheckable(true);
+    favoriteButton_->setToolTip(QStringLiteral("Favorite selected radar"));
+    stationRow->addWidget(favoriteButton_);
+    controlLayout->addLayout(stationRow);
+    stationSummaryLabel_ = new QLabel(QStringLiteral("Select a radar"), controlBody);
+    stationSummaryLabel_->setObjectName(QStringLiteral("section"));
+    stationSummaryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    stationSummaryLabel_->setMinimumWidth(0);
+    stationSummaryLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    controlLayout->addWidget(stationSummaryLabel_);
+    statusLabel_ = new QLabel(controlBody);
+    statusLabel_->setObjectName(QStringLiteral("section"));
+    statusLabel_->hide();
+    controlLayout->addSpacing(10);
+
+    addSection(QStringLiteral("PRODUCT"));
+    productCombo_ = new QComboBox(controlBody);
+    productCombo_->setObjectName(QStringLiteral("productCombo"));
+    for (const auto& product : productDescriptors()) {
+        productCombo_->addItem(QString::fromUtf8(product.label.data()), static_cast<int>(product.kind));
+    }
+    productCombo_->setMinimumContentsLength(16);
+    productCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    controlLayout->addWidget(productCombo_);
+    controlLayout->addSpacing(10);
+
+    addSection(QStringLiteral("TILT"));
+    tiltCombo_ = new QComboBox(controlBody);
+    tiltCombo_->setObjectName(QStringLiteral("tiltCombo"));
+    tiltCombo_->addItem(QStringLiteral("Latest available tilt"));
+    tiltCombo_->setEnabled(false);
+    tiltCombo_->setMinimumContentsLength(18);
+    tiltCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    controlLayout->addWidget(tiltCombo_);
+    controlLayout->addSpacing(10);
+
+    addSection(QStringLiteral("OVERLAYS"));
+    warningsCheck_ = new QCheckBox(QStringLiteral("Warnings"), controlBody);
+    warningsCheck_->setObjectName(QStringLiteral("warningsCheck"));
+    warningsCheck_->setChecked(true);
+    controlLayout->addWidget(warningsCheck_);
+    reportsCheck_ = new QCheckBox(QStringLiteral("Storm reports"), controlBody);
+    reportsCheck_->setObjectName(QStringLiteral("reportsCheck"));
+    reportsCheck_->setChecked(true);
+    controlLayout->addWidget(reportsCheck_);
+    warningFilterCombo_ = new QComboBox(controlBody);
+    warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
+                                   QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
+                                   QStringLiteral("Extreme")});
+    warningFilterCombo_->setToolTip(QStringLiteral("Filter visible warning polygons"));
+    controlLayout->addWidget(warningFilterCombo_);
+    connect(warningFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+        for (auto* panel : maps_)
+            panel->setWarningFilter(index == 0 ? QString{} : warningFilterCombo_->itemText(index));
+    });
+    auto* reportKindRow = new QHBoxLayout();
+    reportKindRow->setSpacing(8);
+    tornadoCheck_ = new QCheckBox(QStringLiteral("Tornado"), controlBody);
+    hailCheck_ = new QCheckBox(QStringLiteral("Hail"), controlBody);
+    windCheck_ = new QCheckBox(QStringLiteral("Wind"), controlBody);
+    for (auto* check : {tornadoCheck_, hailCheck_, windCheck_}) check->setChecked(true);
+    reportKindRow->addWidget(tornadoCheck_);
+    reportKindRow->addWidget(hailCheck_);
+    reportKindRow->addWidget(windCheck_);
+    reportKindRow->addStretch(1);
+    controlLayout->addLayout(reportKindRow);
+    connect(tornadoCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Tornado, visible);
+    });
+    connect(hailCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Hail, visible);
+    });
+    connect(windCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Wind, visible);
+    });
+    auto* opacityRow = new QHBoxLayout();
+    opacityRow->setSpacing(8);
+    auto* opacityLabel = new QLabel(QStringLiteral("Echo opacity"), controlBody);
+    opacityLabel->setObjectName(QStringLiteral("section"));
+    opacityRow->addWidget(opacityLabel);
+    radarOpacitySlider_ = new QSlider(Qt::Horizontal, controlBody);
+    radarOpacitySlider_->setRange(20, 100);
+    radarOpacitySlider_->setValue(80);
+    radarOpacitySlider_->setToolTip(QStringLiteral("Radar opacity"));
+    opacityRow->addWidget(radarOpacitySlider_, 1);
+    controlLayout->addLayout(opacityRow);
+    connect(radarOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
+        for (auto* panel : maps_) panel->setRadarOpacity(opacity);
+    });
+    auto* paletteRow = new QHBoxLayout();
+    paletteRow->setSpacing(4);
+    paletteCombo_ = new QComboBox(controlBody);
+    paletteCombo_->addItems({QStringLiteral("Capped palette"), QStringLiteral("Native operational palette"),
+                             QStringLiteral("Color-safe palette"), QStringLiteral("Custom palette")});
+    paletteRow->addWidget(paletteCombo_, 1);
+    connect(paletteCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+        for (auto* panel : maps_) panel->setPalette(static_cast<RadarMapCanvas::PaletteKind>(index));
+    });
+    auto* paletteButton = new QToolButton(controlBody);
+    paletteButton->setText(QStringLiteral("Palette..."));
+    paletteButton->setToolTip(QStringLiteral("Import a value,color palette text file"));
+    connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
+    paletteRow->addWidget(paletteButton);
+    controlLayout->addLayout(paletteRow);
+    belowThresholdCheck_ = new QCheckBox(QStringLiteral("Below threshold"), controlBody);
+    belowThresholdCheck_->setObjectName(QStringLiteral("belowThresholdCheck"));
+    controlLayout->addWidget(belowThresholdCheck_);
+    connect(belowThresholdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setBelowThresholdVisible(visible);
+    });
+    controlLayout->addSpacing(10);
+
+    addSection(QStringLiteral("VELOCITY"));
+    velocityModeCombo_ = new QComboBox(controlBody);
+    velocityModeCombo_->setObjectName(QStringLiteral("velocityModeCombo"));
+    velocityModeCombo_->addItems({QStringLiteral("Native velocity"), QStringLiteral("Dealiased velocity"),
+                                  QStringLiteral("Storm-relative velocity")});
+    velocityModeCombo_->setToolTip(QStringLiteral("Velocity processing for the active panel"));
+    controlLayout->addWidget(velocityModeCombo_);
+    nyquistSpin_ = new QDoubleSpinBox(controlBody);
+    nyquistSpin_->setRange(1.0, 80.0);
+    nyquistSpin_->setValue(25.0);
+    nyquistSpin_->setSuffix(QStringLiteral(" m/s Nyq"));
+    nyquistSpin_->setDecimals(1);
+    nyquistSpin_->setToolTip(QStringLiteral("Nyquist velocity used by optional dealiasing"));
+    controlLayout->addWidget(nyquistSpin_);
+    stormDirectionSpin_ = new QDoubleSpinBox(controlBody);
+    stormDirectionSpin_->setRange(0.0, 359.9);
+    stormDirectionSpin_->setSuffix(QStringLiteral(" deg motion"));
+    stormDirectionSpin_->setDecimals(1);
+    stormDirectionSpin_->setToolTip(QStringLiteral("Direction toward which the storm is moving"));
+    controlLayout->addWidget(stormDirectionSpin_);
+    stormSpeedSpin_ = new QDoubleSpinBox(controlBody);
+    stormSpeedSpin_->setRange(0.0, 80.0);
+    stormSpeedSpin_->setSuffix(QStringLiteral(" m/s storm"));
+    stormSpeedSpin_->setDecimals(1);
+    controlLayout->addWidget(stormSpeedSpin_);
+    const auto applyVelocitySettings = [this] {
+        map_->setVelocityProcessing({
+            static_cast<VelocityProcessingMode>(velocityModeCombo_->currentIndex()),
+            nyquistSpin_->value(), stormDirectionSpin_->value(), stormSpeedSpin_->value(),
+        });
+        updateVelocityControls();
+    };
+    connect(velocityModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [applyVelocitySettings](int) { applyVelocitySettings(); });
+    connect(nyquistSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [applyVelocitySettings](double) { applyVelocitySettings(); });
+    connect(stormDirectionSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [applyVelocitySettings](double) { applyVelocitySettings(); });
+    connect(stormSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [applyVelocitySettings](double) { applyVelocitySettings(); });
+    controlLayout->addSpacing(10);
+
+    addSection(QStringLiteral("PANELS"));
+    panelLayoutCombo_ = new QComboBox(controlBody);
+    panelLayoutCombo_->setObjectName(QStringLiteral("panelLayoutCombo"));
+    panelLayoutCombo_->addItems({QStringLiteral("1x1"), QStringLiteral("1x2"),
+                                 QStringLiteral("2x1"), QStringLiteral("2x2")});
+    panelLayoutCombo_->setToolTip(QStringLiteral("Radar panel layout"));
+    controlLayout->addWidget(panelLayoutCombo_);
+    connect(panelLayoutCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::setPanelLayout);
+    controlLayout->addSpacing(10);
+
+    addSection(QStringLiteral("NAVIGATION"));
+    auto* navigationGrid = new QGridLayout();
+    navigationGrid->setSpacing(4);
+    int navigationPosition = 0;
+    const auto addMapButton = [controlBody, navigationGrid,
+                               &navigationPosition](const QString& text, const QString& tip) {
+        auto* button = new QToolButton(controlBody);
         button->setText(text);
         button->setToolTip(tip);
-        navigationControls->addWidget(button);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        navigationGrid->addWidget(button, navigationPosition / 3, navigationPosition % 3);
+        ++navigationPosition;
         return button;
     };
     auto* nationalButton = addMapButton(QStringLiteral("Home"), QStringLiteral("National view"));
@@ -410,203 +622,95 @@ void MainWindow::buildUi() {
     auto* settingsButton = addMapButton(QStringLiteral("Settings"),
                                         QStringLiteral("Operational and chase settings"));
     connect(settingsButton, &QToolButton::clicked, this, &MainWindow::showSettingsDialog);
-    navigationControls->addStretch(1);
+    controlLayout->addLayout(navigationGrid);
+    controlLayout->addStretch(1);
+    controlScroll->setWidget(controlBody);
+    controlDock->setWidget(controlScroll);
+    addDockWidget(Qt::LeftDockWidgetArea, controlDock);
 
-    auto* overlayControls = new QHBoxLayout();
-    overlayControls->setSpacing(6);
-    viewControls->addLayout(overlayControls);
-    warningFilterCombo_ = new QComboBox(root);
-    warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
-                                   QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
-                                   QStringLiteral("Extreme")});
-    warningFilterCombo_->setToolTip(QStringLiteral("Filter visible warning polygons"));
-    overlayControls->addWidget(warningFilterCombo_);
-    connect(warningFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
-        for (auto* panel : maps_)
-            panel->setWarningFilter(index == 0 ? QString{} : warningFilterCombo_->itemText(index));
-    });
-    tornadoCheck_ = new QCheckBox(QStringLiteral("Tornado"), root);
-    hailCheck_ = new QCheckBox(QStringLiteral("Hail"), root);
-    windCheck_ = new QCheckBox(QStringLiteral("Wind"), root);
-    for (auto* check : {tornadoCheck_, hailCheck_, windCheck_}) check->setChecked(true);
-    overlayControls->addWidget(tornadoCheck_);
-    overlayControls->addWidget(hailCheck_);
-    overlayControls->addWidget(windCheck_);
-    connect(tornadoCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Tornado, visible);
-    });
-    connect(hailCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Hail, visible);
-    });
-    connect(windCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setStormReportKindVisible(StormReportKind::Wind, visible);
-    });
-
-    overlayControls->addStretch(1);
-    auto* velocityControls = new QHBoxLayout();
-    velocityControls->setSpacing(6);
-    viewControls->addLayout(velocityControls);
-    velocityModeCombo_ = new QComboBox(root);
-    velocityModeCombo_->setObjectName(QStringLiteral("velocityModeCombo"));
-    velocityModeCombo_->addItems({QStringLiteral("Native velocity"), QStringLiteral("Dealiased velocity"),
-                                  QStringLiteral("Storm-relative velocity")});
-    velocityModeCombo_->setToolTip(QStringLiteral("Velocity processing for the active panel"));
-    velocityControls->addWidget(velocityModeCombo_);
-    nyquistSpin_ = new QDoubleSpinBox(root);
-    nyquistSpin_->setRange(1.0, 80.0);
-    nyquistSpin_->setValue(25.0);
-    nyquistSpin_->setSuffix(QStringLiteral(" m/s Nyq"));
-    nyquistSpin_->setDecimals(1);
-    nyquistSpin_->setToolTip(QStringLiteral("Nyquist velocity used by optional dealiasing"));
-    velocityControls->addWidget(nyquistSpin_);
-    stormDirectionSpin_ = new QDoubleSpinBox(root);
-    stormDirectionSpin_->setRange(0.0, 359.9);
-    stormDirectionSpin_->setSuffix(QStringLiteral(" deg motion"));
-    stormDirectionSpin_->setDecimals(1);
-    stormDirectionSpin_->setToolTip(QStringLiteral("Direction toward which the storm is moving"));
-    velocityControls->addWidget(stormDirectionSpin_);
-    stormSpeedSpin_ = new QDoubleSpinBox(root);
-    stormSpeedSpin_->setRange(0.0, 80.0);
-    stormSpeedSpin_->setSuffix(QStringLiteral(" m/s storm"));
-    stormSpeedSpin_->setDecimals(1);
-    velocityControls->addWidget(stormSpeedSpin_);
-    const auto applyVelocitySettings = [this] {
-        map_->setVelocityProcessing({
-            static_cast<VelocityProcessingMode>(velocityModeCombo_->currentIndex()),
-            nyquistSpin_->value(), stormDirectionSpin_->value(), stormSpeedSpin_->value(),
-        });
-        updateVelocityControls();
-    };
-    connect(velocityModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [applyVelocitySettings](int) { applyVelocitySettings(); });
-    connect(nyquistSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [applyVelocitySettings](double) { applyVelocitySettings(); });
-    connect(stormDirectionSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [applyVelocitySettings](double) { applyVelocitySettings(); });
-    connect(stormSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [applyVelocitySettings](double) { applyVelocitySettings(); });
-    velocityControls->addStretch(1);
-    auto* displayControls = new QHBoxLayout();
-    displayControls->setSpacing(6);
-    viewControls->addLayout(displayControls);
-    panelLayoutCombo_ = new QComboBox(root);
-    panelLayoutCombo_->setObjectName(QStringLiteral("panelLayoutCombo"));
-    panelLayoutCombo_->addItems({QStringLiteral("1x1"), QStringLiteral("1x2"),
-                                 QStringLiteral("2x1"), QStringLiteral("2x2")});
-    panelLayoutCombo_->setToolTip(QStringLiteral("Radar panel layout"));
-    displayControls->addWidget(panelLayoutCombo_);
-    connect(panelLayoutCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &MainWindow::setPanelLayout);
-    paletteCombo_ = new QComboBox(root);
-    paletteCombo_->addItems({QStringLiteral("Capped palette"), QStringLiteral("Native operational palette"),
-                             QStringLiteral("Color-safe palette"), QStringLiteral("Custom palette")});
-    displayControls->addWidget(paletteCombo_);
-    connect(paletteCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
-        for (auto* panel : maps_) panel->setPalette(static_cast<RadarMapCanvas::PaletteKind>(index));
-    });
-    auto* paletteButton = new QToolButton(root);
-    paletteButton->setText(QStringLiteral("Palette..."));
-    paletteButton->setToolTip(QStringLiteral("Import a value,color palette text file"));
-    connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
-    displayControls->addWidget(paletteButton);
-    auto* snapshotButton = new QToolButton(root);
-    snapshotButton->setText(QStringLiteral("Snapshot"));
-    connect(snapshotButton, &QToolButton::clicked, this, &MainWindow::exportSnapshot);
-    displayControls->addWidget(snapshotButton);
-    auto* timelineButton = new QToolButton(root);
-    timelineButton->setText(QStringLiteral("Timeline GIF"));
-    timelineButton->setToolTip(QStringLiteral("Export loaded volume frames as an animated GIF"));
-    connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
-    displayControls->addWidget(timelineButton);
-    displayControls->addStretch(1);
-    auto* renderControls = new QHBoxLayout();
-    renderControls->setSpacing(6);
-    viewControls->addLayout(renderControls);
-    radarOpacitySlider_ = new QSlider(Qt::Horizontal, root);
-    radarOpacitySlider_->setRange(20, 100);
-    radarOpacitySlider_->setValue(80);
-    radarOpacitySlider_->setFixedWidth(90);
-    radarOpacitySlider_->setToolTip(QStringLiteral("Radar opacity"));
-    renderControls->addWidget(radarOpacitySlider_);
-    connect(radarOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
-        for (auto* panel : maps_) panel->setRadarOpacity(opacity);
-    });
-    belowThresholdCheck_ = new QCheckBox(QStringLiteral("Below threshold"), root);
-    belowThresholdCheck_->setObjectName(QStringLiteral("belowThresholdCheck"));
-    renderControls->addWidget(belowThresholdCheck_);
-    connect(belowThresholdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setBelowThresholdVisible(visible);
-    });
-    renderControls->addStretch(1);
-    rootLayout->addLayout(viewControls);
-
-    rootLayout->addWidget(mapHost, 1);
-
-    auto* playback = new QHBoxLayout();
-    playback->setSpacing(6);
-    previousButton_ = new QToolButton(root);
+    auto* playbackDock = new QDockWidget(QStringLiteral("PLAYBACK"), this);
+    playbackDock->setObjectName(QStringLiteral("playbackDock"));
+    playbackDock->setFeatures(QDockWidget::DockWidgetMovable);
+    auto* playbackBody = new QWidget(playbackDock);
+    playbackBody->setObjectName(QStringLiteral("dockBody"));
+    auto* playback = new QHBoxLayout(playbackBody);
+    playback->setContentsMargins(8, 6, 8, 7);
+    playback->setSpacing(4);
+    previousButton_ = new QToolButton(playbackBody);
     previousButton_->setObjectName(QStringLiteral("previousFrameButton"));
     previousButton_->setText(QStringLiteral("Previous"));
     playback->addWidget(previousButton_);
-    playButton_ = new QToolButton(root);
+    playButton_ = new QToolButton(playbackBody);
     playButton_->setObjectName(QStringLiteral("playButton"));
     playButton_->setText(QStringLiteral("Play"));
     playButton_->setCheckable(true);
     playback->addWidget(playButton_);
-    nextButton_ = new QToolButton(root);
+    nextButton_ = new QToolButton(playbackBody);
     nextButton_->setObjectName(QStringLiteral("nextFrameButton"));
     nextButton_->setText(QStringLiteral("Next"));
     playback->addWidget(nextButton_);
-    liveButton_ = new QToolButton(root);
+    liveButton_ = new QToolButton(playbackBody);
     liveButton_->setObjectName(QStringLiteral("liveButton"));
     liveButton_->setText(QStringLiteral("LIVE"));
     liveButton_->setCheckable(true);
     liveButton_->setChecked(true);
     liveButton_->setToolTip(QStringLiteral("Follow the newest complete volume (L)"));
     playback->addWidget(liveButton_);
-    frameSlider_ = new QSlider(Qt::Horizontal, root);
+    frameSlider_ = new QSlider(Qt::Horizontal, playbackBody);
     frameSlider_->setObjectName(QStringLiteral("frameSlider"));
     frameSlider_->setRange(0, 0);
     frameSlider_->installEventFilter(this);
     playback->addWidget(frameSlider_, 1);
-    frameLabel_ = new QLabel(QStringLiteral("No volume history"), root);
+    frameLabel_ = new QLabel(QStringLiteral("No volume history"), playbackBody);
     frameLabel_->setMinimumWidth(185);
+    frameLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    frameLabel_->setFont(monoFont);
     playback->addWidget(frameLabel_);
-    speedCombo_ = new QComboBox(root);
+    speedCombo_ = new QComboBox(playbackBody);
     speedCombo_->setObjectName(QStringLiteral("speedCombo"));
     speedCombo_->addItem(QStringLiteral("1x"), 1000);
     speedCombo_->addItem(QStringLiteral("2x"), 500);
     speedCombo_->addItem(QStringLiteral("4x"), 250);
     speedCombo_->setCurrentIndex(1);
     playback->addWidget(speedCombo_);
-    overlayStatusLabel_ = new QLabel(root);
+    auto* snapshotButton = new QToolButton(playbackBody);
+    snapshotButton->setText(QStringLiteral("Snapshot"));
+    connect(snapshotButton, &QToolButton::clicked, this, &MainWindow::exportSnapshot);
+    playback->addWidget(snapshotButton);
+    auto* timelineButton = new QToolButton(playbackBody);
+    timelineButton->setText(QStringLiteral("Timeline GIF"));
+    timelineButton->setToolTip(QStringLiteral("Export loaded volume frames as an animated GIF"));
+    connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
+    playback->addWidget(timelineButton);
+    overlayStatusLabel_ = new QLabel(playbackBody);
     overlayStatusLabel_->setObjectName(QStringLiteral("section"));
     overlayStatusLabel_->hide();
-    rootLayout->addLayout(playback);
+    playbackDock->setWidget(playbackBody);
+    addDockWidget(Qt::BottomDockWidgetArea, playbackDock);
+    resizeDocks({controlDock}, {272}, Qt::Horizontal);
 
-    auto* statusRow = new QHBoxLayout();
-    unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"), root);
+    auto* status = statusBar();
+    unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"));
     unifiedStatusLabel_->setObjectName(QStringLiteral("section"));
     unifiedStatusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     unifiedStatusLabel_->setMinimumWidth(0);
     unifiedStatusLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    statusRow->addWidget(unifiedStatusLabel_, 1);
-    loadingProgress_ = new QProgressBar(root);
+    unifiedStatusLabel_->setFont(monoFont);
+    status->addWidget(unifiedStatusLabel_, 1);
+    loadingProgress_ = new QProgressBar();
     loadingProgress_->setTextVisible(false);
     loadingProgress_->setFixedWidth(130);
     loadingProgress_->hide();
-    statusRow->addWidget(loadingProgress_);
-    retryButton_ = new QToolButton(root);
+    status->addPermanentWidget(loadingProgress_);
+    retryButton_ = new QToolButton();
     retryButton_->setText(QStringLiteral("Retry"));
     retryButton_->hide();
-    statusRow->addWidget(retryButton_);
-    cancelButton_ = new QToolButton(root);
+    status->addPermanentWidget(retryButton_);
+    cancelButton_ = new QToolButton();
     cancelButton_->setText(QStringLiteral("Cancel"));
     cancelButton_->hide();
-    statusRow->addWidget(cancelButton_);
-    rootLayout->addLayout(statusRow);
+    status->addPermanentWidget(cancelButton_);
 
-    setCentralWidget(root);
     updateUnifiedStatus();
     updatePlaybackControls();
 }

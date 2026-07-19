@@ -58,11 +58,11 @@ int main(int argc, char** argv) {
     window.resize(1024, 700);
     application.processEvents();
     const auto belowThresholdBottomRight = belowThresholdCheck->mapTo(
-        window.centralWidget(), belowThresholdCheck->rect().bottomRight());
-    if (window.width() > 1024 || !window.centralWidget()->rect().contains(belowThresholdBottomRight)) {
+        &window, belowThresholdCheck->rect().bottomRight());
+    if (window.width() > 1024 || !window.rect().contains(belowThresholdBottomRight)) {
         std::cerr << "Responsive controls overflow at 1024 px: window=" << window.width()
                   << " controlRight=" << belowThresholdBottomRight.x()
-                  << " contentRight=" << window.centralWidget()->rect().right() << '\n';
+                  << " contentRight=" << window.rect().right() << '\n';
         return 1;
     }
 

@@ -1,0 +1,9 @@
+{
+  "name": "cappedweather-console-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UI redesign prototype for CappedWeather — dark console layout",
+  "scripts": {
+    "dev": "node server.js"
+  }
+}

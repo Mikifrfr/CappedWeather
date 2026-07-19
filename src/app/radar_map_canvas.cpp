@@ -36,6 +36,15 @@ namespace cappedweather {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 
+QFont hudFont(const int pointSize, const QFont::Weight weight = QFont::Normal) {
+    QFont font;
+    font.setFamilies({QStringLiteral("IBM Plex Sans"), QStringLiteral("Segoe UI"),
+                      QStringLiteral("Noto Sans"), QStringLiteral("DejaVu Sans")});
+    font.setPointSize(pointSize);
+    font.setWeight(weight);
+    return font;
+}
+
 struct ColorStop {
     double position;
     QColor color;
@@ -1140,7 +1149,7 @@ void RadarMapCanvas::paintRadarOverlay(QPainter& painter) {
     painter.setBrush(Qt::NoBrush);
     const auto center = screenPoint(*site->latitude, *site->longitude);
     const auto maximumRangeMeters = maximumRangeMeters_;
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 7));
+    painter.setFont(hudFont(7));
     std::vector<double> ringRanges{25000.0, 50000.0, 100000.0, maximumRangeMeters};
     std::sort(ringRanges.begin(), ringRanges.end());
     ringRanges.erase(std::unique(ringRanges.begin(), ringRanges.end(), [](double left, double right) {
@@ -1228,7 +1237,7 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
     painter.setBrush(QColor(8, 15, 19, 220));
     painter.drawRoundedRect(panel, 4, 4);
     painter.setPen(QColor(235, 240, 243));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+    painter.setFont(hudFont(8, QFont::DemiBold));
     auto label = QString::fromUtf8(descriptor.label.data());
     if (product_ == ProductKind::Velocity && velocityOptions_.mode == VelocityProcessingMode::Dealiased)
         label = QStringLiteral("Dealiased velocity");
@@ -1246,7 +1255,7 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
     painter.setBrush(gradient);
     painter.drawRect(gradientRect);
     painter.setPen(QColor(205, 215, 220));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 7));
+    painter.setFont(hudFont(7));
     for (int tick = 0; tick < 5; ++tick) {
         const auto fraction = tick / 4.0;
         const auto value = descriptor.minimum + fraction * (descriptor.maximum - descriptor.minimum);
@@ -1303,7 +1312,7 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         painter.setBrush(accent);
         painter.drawRoundedRect(QRectF(x, y, 5.0, cardHeight), 3.0, 3.0);
 
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
+        painter.setFont(hudFont(10, QFont::DemiBold));
         painter.setPen(QColor("#f5f8fa"));
         painter.drawText(QRectF(x + 16.0, y + 10.0, cardWidth - 54.0, 21.0),
                          Qt::AlignLeft | Qt::AlignVCenter,
@@ -1312,7 +1321,7 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
 
         const QRectF closeRect(x + cardWidth - 34.0, y + 7.0, 25.0, 25.0);
         painter.setPen(QColor("#aebbc2"));
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 11, QFont::DemiBold));
+        painter.setFont(hudFont(11, QFont::DemiBold));
         painter.drawText(closeRect, Qt::AlignCenter, QStringLiteral("×"));
 
         auto contentTop = y + 38.0;
@@ -1326,14 +1335,14 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
             painter.setBrush(badgeFill);
             painter.drawRoundedRect(badge, 5.0, 5.0);
             painter.setPen(accent.lighter(125));
-            painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+            painter.setFont(hudFont(8, QFont::DemiBold));
             painter.drawText(badge, Qt::AlignCenter, severity.toUpper());
             contentTop += 29.0;
         }
 
         if (!headline.isEmpty()) {
             painter.setPen(QColor("#e5edf1"));
-            painter.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+            painter.setFont(hudFont(9, QFont::DemiBold));
             painter.drawText(QRectF(x + 16.0, contentTop, cardWidth - 32.0, headlineHeight),
                              Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, headline);
             contentTop += headlineHeight + 3.0;
@@ -1343,7 +1352,7 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
                               y + cardHeight - contentTop - 12.0);
         painter.setClipRect(bodyRect);
         painter.setPen(QColor("#cbd6dc"));
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
+        painter.setFont(hudFont(8));
         painter.drawText(bodyRect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, body);
         painter.restore();
         return;
@@ -1379,7 +1388,7 @@ void RadarMapCanvas::paintStationCard(QPainter& painter) {
     painter.setBrush(QColor(8, 15, 19, 230));
     painter.drawRoundedRect(panel, 4, 4);
     painter.setPen(QColor(238, 244, 247));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+    painter.setFont(hudFont(8, QFont::DemiBold));
     painter.drawText(panel.adjusted(9, 4, -8, -4), Qt::AlignLeft | Qt::AlignVCenter, text);
 }
 
@@ -1432,7 +1441,7 @@ void RadarMapCanvas::requestVisibleTiles() {
             if (store.tiles.contains(key)) continue;
             watchTile(store, key, this);
             if (store.pendingKeys.contains(key)) continue;
-            const auto url = QUrl(QStringLiteral("https://tile.openstreetmap.org/%1/%2/%3.png")
+            const auto url = QUrl(QStringLiteral("https://basemaps.cartocdn.com/dark_all/%1/%2/%3.png")
                                       .arg(zoom_).arg(wrappedX).arg(tileY));
             QNetworkRequest request(url);
             const auto contact = QSettings().value(QStringLiteral("network/contact")).toString().trimmed();
@@ -1669,7 +1678,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     paintRadarOverlay(painter);
     paintWeatherOverlays(painter);
 
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+    painter.setFont(hudFont(8, QFont::DemiBold));
     QSet<QString> occupiedMarkerCells;
     ensureSiteWorldPoints();
     for (std::size_t siteIndex = 0; siteIndex < sites_.size(); ++siteIndex) {
@@ -1709,7 +1718,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     }
 
     if (chunk_ && !chunk_->rays.empty()) {
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 9));
+        painter.setFont(hudFont(9));
         painter.setPen(QColor(232, 238, 240));
         painter.setBrush(QColor(8, 15, 19, 205));
         painter.drawRoundedRect(QRectF(12, height() - 30, 510, 22), 4, 4);
@@ -1727,12 +1736,12 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
                                                      .arg(scanQualityText_));
         painter.drawText(QRectF(20, height() - 27, 494, 16), Qt::AlignLeft, overlayLabel);
     }
-    painter.setPen(QColor(35, 45, 50));
-    painter.setBrush(QColor(245, 248, 249, 225));
+    painter.setPen(QColor(43, 45, 51));
+    painter.setBrush(QColor(26, 27, 30, 225));
     painter.drawRoundedRect(QRectF(width() - 250, height() - 25, 238, 18), 3, 3);
-    painter.setPen(QColor(30, 38, 42));
+    painter.setPen(QColor(146, 152, 160));
     painter.drawText(QRectF(width() - 242, height() - 22, 222, 13), Qt::AlignRight,
-                     QStringLiteral("(c) OpenStreetMap contributors"));
+                     QStringLiteral("© OpenStreetMap contributors · CARTO"));
     paintLegend(painter);
     paintProbe(painter);
     paintMeasurement(painter);
@@ -1749,7 +1758,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         painter.drawArc(QRectF(center.x() - 10, center.y() - 10, 20, 20),
                         loadingAngle_ * 16, 250 * 16);
         painter.setPen(QColor(235, 243, 247));
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+        painter.setFont(hudFont(8, QFont::DemiBold));
         painter.drawText(chip.adjusted(42, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
                          loadingMessage_.isEmpty() ? QStringLiteral("Loading radar data")
                                                    : loadingMessage_);
