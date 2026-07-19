@@ -6,13 +6,13 @@ The application does not ship synthetic or demo radar frames. It discovers live 
 
 ## Screenshots
 
-### Live reflectivity
+### Quad-panel console view
 
-![CappedWeather showing live KEWX reflectivity with warning overlays](docs/screenshots/cappedweather-reflectivity.png)
+![CappedWeather in 2x2 layout on KABR showing correlation coefficient, radial velocity, and differential reflectivity panels side by side in the dock-based console UI](docs/screenshots/cappedweather-console-2x2.png)
 
-### Radial velocity
+### SPC storm reports
 
-![CappedWeather showing live KEWX radial velocity](docs/screenshots/cappedweather-velocity.png)
+![CappedWeather in 1x2 layout showing rolling 24-hour SPC storm reports across the Mid-Atlantic with a pinned wind report detail card](docs/screenshots/cappedweather-spc-reports.png)
 
 ## Build
 
@@ -78,8 +78,18 @@ The viewer exposes the decoded product fields and the elevation tilts present in
 - Great-circle range/bearing tools, standard-atmosphere beam height, scan coverage/gap diagnostics, and multi-tilt vertical cross-sections.
 - PNG snapshots, animated GIF timelines, and cross-section CSV export.
 - Cached, color-batched radar geometry built off the UI thread; decoded frames are shared across panels instead of copied.
+- Dock-based console layout with movable control and playback docks, a flat dark theme, and a dark CARTO-rendered OpenStreetMap basemap.
 - Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
 - Persistent operational settings for panels, products, palettes, overlays, opacity, playback, timeline depth, and window geometry.
+
+## Performance
+
+- Gate geometry is color-batched and rasterized into a cached overlay image off the UI thread; pan and zoom re-blit the cache instead of re-walking rays.
+- One decoded volume feeds every panel — the 2x2 layout renders four products from a single decode, not four.
+- Cached overlay images survive zoom transitions: they are rescaled on screen and reused until the background rebuild lands, so zooming stays fluid instead of hitching on a re-render.
+- Warnings and storm reports publish progressively — polygons appear as soon as their own responses land rather than after the slowest request, and failed requests keep the last known good overlay instead of blanking the map.
+- Chunk downloads are bounded-parallel with per-chunk retries, timeouts, and backoff; basemap tiles use bounded memory and disk caches shared across panels.
+- A full volume is on the order of 8,000+ rays across ~70 chunks, and up to eight volumes per radar are held in memory for instant timeline scrubbing.
 
 ## Operator notes
 
