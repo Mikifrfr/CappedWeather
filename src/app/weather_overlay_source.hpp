@@ -15,6 +15,7 @@
 #include <array>
 
 class QNetworkReply;
+class QTimer;
 
 namespace cappedweather {
 
@@ -101,6 +102,8 @@ private:
     void request(const QUrl& url, RequestContext context, const QByteArray& accept = {});
     void requestFinished(QNetworkReply* reply);
     void publishIfComplete();
+    void schedulePublish();
+    void publishOverlaySnapshot();
 
     QNetworkAccessManager network_;
     QHash<QNetworkReply*, RequestContext> requests_;
@@ -112,6 +115,8 @@ private:
     QHash<QUrl, QByteArray> responseBodies_;
     QHash<QUrl, QByteArray> responseEtags_;
     QHash<QUrl, QByteArray> responseLastModified_;
+    QTimer* publishTimer_ = nullptr;
+    bool alertResponseReady_ = false;
     int totalRequests_ = 0;
     int pending_ = 0;
     int failures_ = 0;

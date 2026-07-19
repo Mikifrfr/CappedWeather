@@ -421,8 +421,6 @@ void RadarMapCanvas::setWeatherOverlays(QVector<WeatherWarning> warnings,
     warnings_ = std::move(warnings);
     stormReports_ = std::move(reports);
     ++weatherGeneration_;
-    weatherOverlayImage_ = {};
-    weatherOverlayZoom_ = -1;
     update();
 }
 
@@ -759,8 +757,6 @@ void RadarMapCanvas::invalidateWorldCaches(const bool zoomChanged) {
     if (zoomChanged) {
         siteWorldZoom_ = -1;
         warningPathsZoom_ = -1;
-        weatherOverlayImage_ = {};
-        weatherOverlayZoom_ = -1;
     }
 }
 
@@ -786,7 +782,8 @@ void RadarMapCanvas::invalidateOverlay(const bool preserveForZoomTransition) {
 }
 
 bool RadarMapCanvas::overlayCacheCoversView() const {
-    if (overlayImage_.isNull() || overlayZoom_ != zoom_ || overlayImageLogicalSize_.isEmpty()) return false;
+    if (overlayImage_.isNull() || overlayZoom_ != zoom_ || overlayImageGeneration_ != overlayGeneration_ ||
+        overlayImageLogicalSize_.isEmpty()) return false;
     const auto world = static_cast<double>(kTileSize * (1 << zoom_));
     const auto currentCenter = mapCenterWorld();
     auto dx = currentCenter.x() - overlayImageCenterWorld_.x();
@@ -1104,6 +1101,7 @@ void RadarMapCanvas::rebuildOverlay() {
                                                   ? maximumRangeMeters
                                                   : 230000.0;
                 guard->overlayZoom_ = targetZoom;
+                guard->overlayImageGeneration_ = generation;
             }
             guard->update();
         }, Qt::QueuedConnection);
@@ -1202,20 +1200,24 @@ void RadarMapCanvas::ensureWeatherPaths() const {
 
 void RadarMapCanvas::paintWeatherOverlays(QPainter& painter) {
     if (!weatherOverlayCacheCoversView()) rebuildWeatherOverlay();
-    if (weatherOverlayImage_.isNull() || weatherOverlayImageGeneration_ != weatherGeneration_ ||
-        weatherOverlayZoom_ != zoom_) return;
+    if (weatherOverlayImage_.isNull() || weatherOverlayImageLogicalSize_.isEmpty() ||
+        weatherOverlayZoom_ < kMinZoom) return;
 
     painter.save();
     const auto world = static_cast<double>(kTileSize * (1 << zoom_));
     const auto currentCenter = mapCenterWorld();
-    auto dx = weatherOverlayImageCenterWorld_.x() - currentCenter.x();
+    const auto zoomScale = std::ldexp(1.0, zoom_ - weatherOverlayZoom_);
+    const auto cachedCenterAtCurrentZoom = weatherOverlayImageCenterWorld_ * zoomScale;
+    auto dx = cachedCenterAtCurrentZoom.x() - currentCenter.x();
     if (dx > world / 2.0) dx -= world;
     if (dx < -world / 2.0) dx += world;
-    const auto dy = weatherOverlayImageCenterWorld_.y() - currentCenter.y();
+    const auto dy = cachedCenterAtCurrentZoom.y() - currentCenter.y();
+    const QSizeF scaledSize(weatherOverlayImageLogicalSize_.width() * zoomScale,
+                            weatherOverlayImageLogicalSize_.height() * zoomScale);
     const QPointF topLeft(
-        std::round(width() / 2.0 - weatherOverlayImageLogicalSize_.width() / 2.0 + dx),
-        std::round(height() / 2.0 - weatherOverlayImageLogicalSize_.height() / 2.0 + dy));
-    painter.drawImage(QRectF(topLeft, weatherOverlayImageLogicalSize_), weatherOverlayImage_);
+        std::round(width() / 2.0 - scaledSize.width() / 2.0 + dx),
+        std::round(height() / 2.0 - scaledSize.height() / 2.0 + dy));
+    painter.drawImage(QRectF(topLeft, scaledSize), weatherOverlayImage_);
     painter.restore();
 }
 

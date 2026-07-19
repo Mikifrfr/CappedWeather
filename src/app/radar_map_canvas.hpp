@@ -154,6 +154,7 @@ private:
     QSize overlayImageLogicalSize_;
     int overlayZoom_ = -1;
     quint64 overlayGeneration_ = 0;
+    quint64 overlayImageGeneration_ = 0;
     bool overlayBuildPending_ = false;
     double maximumRangeMeters_ = 230000.0;
     QImage weatherOverlayImage_;

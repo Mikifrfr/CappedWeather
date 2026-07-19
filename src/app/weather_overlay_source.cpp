@@ -7,6 +7,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSettings>
+#include <QTimer>
 #include <QTimeZone>
 #include <QUrl>
 
@@ -247,6 +248,10 @@ int nwsOfficialAlertStyleCount() {
 WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
     : QObject(parent) {
     connect(&network_, &QNetworkAccessManager::finished, this, &WeatherOverlaySource::requestFinished);
+    publishTimer_ = new QTimer(this);
+    publishTimer_->setSingleShot(true);
+    publishTimer_->setInterval(100);
+    connect(publishTimer_, &QTimer::timeout, this, &WeatherOverlaySource::publishOverlaySnapshot);
 }
 
 QVector<WeatherWarning> WeatherOverlaySource::parseAlerts(const QByteArray& data, QString* error) {
@@ -352,6 +357,11 @@ void WeatherOverlaySource::refresh() {
     if (pending_ != 0) return;
     failures_ = 0;
     firstError_.clear();
+    alertResponseReady_ = false;
+    if (publishTimer_) publishTimer_->stop();
+    // Report sets are intentionally retained: each successful response replaces its
+    // own set wholesale, so a failed request keeps the previously published contents
+    // instead of wiping storm reports off the map until the next success.
     pending_ = totalRequests_ = 7;
     zoneWarningIndexes_.clear();
     const auto now = QDateTime::currentDateTimeUtc();
@@ -438,6 +448,8 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
                     request(QUrl(it.key()), {RequestKind::Zone, -1, StormReportKind::Wind, {}, it.key()},
                             QByteArrayLiteral("application/geo+json"));
                 }
+                alertResponseReady_ = true;
+                schedulePublish();
             }
         } else if (context.kind == RequestKind::Reports) {
             auto parsed = parseStormReports(data, context.reportKind, &error, context.convectiveDate);
@@ -456,6 +468,7 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
             ++failures_;
             if (firstError_.isEmpty()) firstError_ = error;
         }
+        if (alertResponseReady_) schedulePublish();
     }
     reply->deleteLater();
     --pending_;
@@ -464,6 +477,21 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
 
 void WeatherOverlaySource::publishIfComplete() {
     if (pending_ != 0) return;
+    if (alertResponseReady_) {
+        schedulePublish();
+        return;
+    }
+    // The alerts request (or its parse) failed; still publish the stale-but-consistent
+    // warnings and whatever report sets succeeded so they are not silently discarded.
+    publishOverlaySnapshot();
+}
+
+void WeatherOverlaySource::schedulePublish() {
+    if (!alertResponseReady_ || !publishTimer_ || publishTimer_->isActive()) return;
+    publishTimer_->start();
+}
+
+void WeatherOverlaySource::publishOverlaySnapshot() {
     reports_.clear();
     const auto cutoff = QDateTime::currentDateTimeUtc().addSecs(-24 * 60 * 60);
     for (const auto& set : reportSets_) {
@@ -472,6 +500,7 @@ void WeatherOverlaySource::publishIfComplete() {
         }
     }
     emit overlaysReady(warnings_, reports_, QDateTime::currentDateTimeUtc());
+    if (pending_ != 0) return;
     if (failures_ == 0) {
         const auto drawable = std::count_if(warnings_.cbegin(), warnings_.cend(),
                                             [](const auto& warning) { return !warning.polygons.isEmpty(); });
