@@ -48,6 +48,17 @@ cmake -S . -B build `
   -DBZIP2_LIBRARY_RELEASE="C:/path/to/libbz2.lib"
 ```
 
+Live GLM ingestion requires netCDF-C. Production builds should make that
+dependency mandatory so they cannot silently fall back to the stub reader:
+
+```powershell
+cmake -S . -B build `
+  -DnetCDF_DIR="C:/path/to/netcdf/lib/cmake/netCDF" `
+  -DCAPPEDWEATHER_REQUIRE_NETCDF=ON
+cmake --build build --config Release --target cappedweather_live_glm_probe
+.\build\Release\cappedweather_live_glm_probe.exe
+```
+
 ## Data sources
 
 - Real-time Level II chunks: `https://unidata-nexrad-level2-chunks.s3.amazonaws.com/`

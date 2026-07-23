@@ -11,6 +11,9 @@ if(MSVC)
 endif()
 
 option(CAPPEDWEATHER_BUILD_APP "Build the Qt6 desktop application when Qt6 is available" ON)
+option(CAPPEDWEATHER_REQUIRE_NETCDF
+    "Fail configuration instead of building the stubbed GLM reader when netCDF-C is unavailable"
+    OFF)
 
 include(CTest)
 
@@ -53,6 +56,10 @@ if(CAPPEDWEATHER_NETCDF_TARGET)
     target_link_libraries(cappedweather_core PUBLIC ${CAPPEDWEATHER_NETCDF_TARGET})
     target_compile_definitions(cappedweather_core PRIVATE CAPPEDWEATHER_HAS_NETCDF=1)
     message(STATUS "netCDF found: GLM L2 reader enabled")
+elseif(CAPPEDWEATHER_REQUIRE_NETCDF)
+    message(FATAL_ERROR
+        "netCDF-C is required for this build, but CMake could not find it. "
+        "Set netCDF_DIR to the directory containing netCDFConfig.cmake.")
 else()
     message(STATUS "netCDF not found: GLM L2 reader stubbed (key helpers still available)")
 endif()
@@ -62,6 +69,10 @@ if(BUILD_TESTING)
         tests/core_tests.cpp
     )
     target_link_libraries(cappedweather_core_tests PRIVATE cappedweather_core)
+    if(CAPPEDWEATHER_NETCDF_TARGET)
+        target_compile_definitions(cappedweather_core_tests PRIVATE
+            CAPPEDWEATHER_EXPECT_NETCDF=1)
+    endif()
     add_test(NAME cappedweather_core_tests COMMAND cappedweather_core_tests)
 endif()
 
@@ -131,6 +142,22 @@ if(CAPPEDWEATHER_BUILD_APP)
                 VERBATIM
             )
         endif()
+
+        qt_add_executable(cappedweather_live_glm_probe
+            tests/live_glm_probe.cpp
+            src/app/glm_source.cpp
+            src/app/glm_source.hpp
+        )
+        target_link_libraries(cappedweather_live_glm_probe PRIVATE
+            cappedweather_core
+            Qt6::Core
+            Qt6::Network
+        )
+        target_compile_definitions(cappedweather_live_glm_probe PRIVATE
+            CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
+            NOMINMAX
+            WIN32_LEAN_AND_MEAN
+        )
 
         find_package(Qt6 6.4 COMPONENTS Test QUIET)
         if(TARGET Qt6::Test)

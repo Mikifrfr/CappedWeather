@@ -444,6 +444,12 @@ void testGlmL2Keys() {
     assert(!parseGlmLcfaStartTime("random_file.nc").has_value());
 }
 
+void testGlmReaderBuildContract() {
+#ifdef CAPPEDWEATHER_EXPECT_NETCDF
+    assert(glmL2ReaderAvailable());
+#endif
+}
+
 int main() {
     testProducts();
     testCatalog();
@@ -462,6 +468,7 @@ int main() {
     testFlashRateGrid();
     testFlashRateGridUsesConfiguredDetectorAndPrunes();
     testGlmL2Keys();
+    testGlmReaderBuildContract();
     testRadarLightningFusion();
     std::cout << "core tests passed\n";
 }
