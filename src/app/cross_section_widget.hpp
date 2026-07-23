@@ -7,6 +7,7 @@
 #include <QWidget>
 
 #include <memory>
+#include <limits>
 #include <vector>
 
 namespace cappedweather {
@@ -26,9 +27,10 @@ protected:
 
 private:
     struct Cell {
+        int sampleIndex = 0;
         double distanceMeters = 0.0;
         double heightMslMeters = 0.0;
-        double value = 0.0;
+        double value = std::numeric_limits<double>::quiet_NaN();
     };
 
     void buildCells();
@@ -43,6 +45,7 @@ private:
     QVector<RadarMapCanvas::PaletteStop> customPalette_;
     VelocityProcessingOptions velocityOptions_;
     std::vector<Cell> cells_;
+    int sampleCount_ = 0;
     double transectLengthMeters_ = 0.0;
     double maximumHeightMeters_ = 20000.0;
 };

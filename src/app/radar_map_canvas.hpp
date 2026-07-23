@@ -93,6 +93,7 @@ public:
                                 int opacityPercent = 100,
                                 const QVector<PaletteStop>& custom = {});
     QString probeText() const;
+    QRectF infoCardRect() const { return pinnedInfoCardRect_; }
     void inspectAt(const QPointF& point);
     int warningCount() const;
     int stormReportCount() const;
@@ -204,6 +205,12 @@ private:
     QString hoverRadarId_;
     QString pinnedInfo_;
     QRectF pinnedInfoCardRect_;
+    QRectF pinnedInfoBodyRect_;
+    QPointF pinnedInfoCardPosition_{-1.0, -1.0};
+    QPointF pinnedInfoDragOffset_;
+    int pinnedInfoScrollOffset_ = 0;
+    int pinnedInfoContentHeight_ = 0;
+    bool draggingPinnedInfoCard_ = false;
     QPointF center_{-96.5, 38.5}; // longitude, latitude
     int zoom_ = 4;
     QPoint lastMousePosition_;

@@ -14,6 +14,7 @@
 
 class QByteArray;
 class QDateTime;
+class QDockWidget;
 class QEvent;
 class QModelIndex;
 class QComboBox;
@@ -123,6 +124,8 @@ private:
     RadarMapCanvas* map_ = nullptr;
     QVector<RadarMapCanvas*> maps_;
     QGridLayout* mapGrid_ = nullptr;
+    QDockWidget* controlDock_ = nullptr;
+    QDockWidget* playbackDock_ = nullptr;
     QComboBox* productCombo_ = nullptr;
     QComboBox* tiltCombo_ = nullptr;
     QComboBox* stationCombo_ = nullptr;

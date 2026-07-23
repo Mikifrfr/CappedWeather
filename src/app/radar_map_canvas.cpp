@@ -1446,8 +1446,13 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         const auto fraction = tick / 4.0;
         const auto value = descriptor.minimum + fraction * (descriptor.maximum - descriptor.minimum);
         const auto x = gradientRect.left() + fraction * gradientRect.width();
-        const QRectF labelRect(x - 30.0, 45, 60, 12);
-        painter.drawText(labelRect, tick == 0 ? Qt::AlignLeft : tick == 4 ? Qt::AlignRight : Qt::AlignCenter,
+        const auto alignment = tick == 0 ? Qt::AlignLeft
+                             : tick == 4 ? Qt::AlignRight
+                                         : Qt::AlignCenter;
+        const auto labelLeft = tick == 0 ? gradientRect.left()
+                             : tick == 4 ? gradientRect.right() - 60.0
+                                         : x - 30.0;
+        painter.drawText(QRectF(labelLeft, 45, 60, 12), alignment,
                          QString::number(value, 'g', 4));
     }
 
@@ -1478,12 +1483,35 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
 
         const auto accent = isWarning ? nwsAlertStyle(title).color : QColor("#80d3ff");
 
-        const auto cardWidth = std::min(440.0, std::max(280.0, width() - 24.0));
-        const auto maximumHeight = std::max(110.0, std::min(300.0, height() - 24.0));
-        const auto headlineHeight = headline.isEmpty() ? 0.0 : 34.0;
-        const auto cardHeight = std::min(maximumHeight, isWarning ? 290.0 : 150.0);
-        const auto x = std::max(12.0, width() - cardWidth - 12.0);
-        const auto y = std::clamp(64.0, 12.0, std::max(12.0, height() - cardHeight - 12.0));
+        const auto cardWidth = std::min(390.0, std::max(280.0, width() - 24.0));
+        const auto maximumHeight = std::max(130.0, std::min(270.0, height() - 24.0));
+        const auto contentWidth = cardWidth - 32.0;
+        painter.setFont(hudFont(9, QFont::DemiBold));
+        const auto headlineHeight = headline.isEmpty()
+            ? 0.0
+            : static_cast<double>(painter.fontMetrics().boundingRect(
+                  QRect(0, 0, static_cast<int>(contentWidth), 1000),
+                  Qt::TextWordWrap, headline).height());
+        painter.setFont(hudFont(8));
+        const auto bodyHeight = static_cast<double>(painter.fontMetrics().boundingRect(
+            QRect(0, 0, static_cast<int>(contentWidth - 8.0), 10000),
+            Qt::TextWordWrap, body).height());
+        const auto contentTopOffset = 38.0 + (isWarning ? 29.0 : 0.0) +
+                                      (headline.isEmpty() ? 0.0 : headlineHeight + 3.0);
+        const auto naturalHeight = contentTopOffset + bodyHeight + 12.0;
+        const auto cardHeight = std::clamp(naturalHeight, 130.0, maximumHeight);
+        if (pinnedInfoCardPosition_.x() < 0.0 || pinnedInfoCardPosition_.y() < 0.0) {
+            pinnedInfoCardPosition_ = {
+                std::max(12.0, width() - cardWidth - 12.0),
+                std::clamp(64.0, 12.0, std::max(12.0, height() - cardHeight - 12.0)),
+            };
+        }
+        pinnedInfoCardPosition_.setX(std::clamp(
+            pinnedInfoCardPosition_.x(), 8.0, std::max(8.0, width() - cardWidth - 8.0)));
+        pinnedInfoCardPosition_.setY(std::clamp(
+            pinnedInfoCardPosition_.y(), 8.0, std::max(8.0, height() - cardHeight - 8.0)));
+        const auto x = pinnedInfoCardPosition_.x();
+        const auto y = pinnedInfoCardPosition_.y();
         pinnedInfoCardRect_ = QRectF(x, y, cardWidth, cardHeight);
 
         painter.save();
@@ -1535,16 +1563,42 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         }
 
         const QRectF bodyRect(x + 16.0, contentTop, cardWidth - 32.0,
-                              y + cardHeight - contentTop - 12.0);
+                               y + cardHeight - contentTop - 12.0);
+        pinnedInfoBodyRect_ = bodyRect;
+        pinnedInfoContentHeight_ = static_cast<int>(std::ceil(bodyHeight));
+        const auto maximumScroll = std::max(
+            0, pinnedInfoContentHeight_ - static_cast<int>(std::floor(bodyRect.height())));
+        pinnedInfoScrollOffset_ = std::clamp(pinnedInfoScrollOffset_, 0, maximumScroll);
+        painter.save();
         painter.setClipRect(bodyRect);
         painter.setPen(QColor("#cbd6dc"));
         painter.setFont(hudFont(8));
-        painter.drawText(bodyRect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, body);
+        painter.drawText(QRectF(bodyRect.left(), bodyRect.top() - pinnedInfoScrollOffset_,
+                                bodyRect.width() - (maximumScroll > 0 ? 8.0 : 0.0),
+                                std::max(bodyRect.height(), bodyHeight)),
+                         Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, body);
+        painter.restore();
+        if (maximumScroll > 0) {
+            const QRectF track(bodyRect.right() - 3.0, bodyRect.top(), 3.0, bodyRect.height());
+            const auto thumbHeight = std::max(
+                22.0, track.height() * bodyRect.height() / pinnedInfoContentHeight_);
+            const auto thumbTravel = track.height() - thumbHeight;
+            const auto thumbY = track.top() + thumbTravel * pinnedInfoScrollOffset_ / maximumScroll;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(118, 143, 156, 70));
+            painter.drawRoundedRect(track, 1.5, 1.5);
+            painter.setBrush(QColor(151, 181, 196, 190));
+            painter.drawRoundedRect(QRectF(track.left(), thumbY, track.width(), thumbHeight),
+                                    1.5, 1.5);
+        }
         painter.restore();
         return;
     }
 
     pinnedInfoCardRect_ = {};
+    pinnedInfoBodyRect_ = {};
+    pinnedInfoContentHeight_ = 0;
+    pinnedInfoScrollOffset_ = 0;
     const auto metrics = painter.fontMetrics();
     const auto textWidth = metrics.horizontalAdvance(probeText_);
     auto x = probePosition_.x() + 14.0;
@@ -1960,6 +2014,23 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
 void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
     emit activated();
     if (event->button() == Qt::LeftButton) {
+        if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position())) {
+            const QRectF closeRect(pinnedInfoCardRect_.right() - 34.0,
+                                   pinnedInfoCardRect_.top() + 7.0, 25.0, 25.0);
+            if (closeRect.contains(event->position())) {
+                pinnedInfo_.clear();
+                probeText_.clear();
+                pinnedInfoCardRect_ = {};
+                pinnedInfoBodyRect_ = {};
+                update();
+            } else if (event->position().y() <= pinnedInfoCardRect_.top() + 38.0) {
+                draggingPinnedInfoCard_ = true;
+                pinnedInfoDragOffset_ = event->position() - pinnedInfoCardRect_.topLeft();
+                setCursor(Qt::ClosedHandCursor);
+            }
+            event->accept();
+            return;
+        }
         if (measureMode_ || crossSectionMode_) {
             measureStart_ = geographicPoint(event->position());
             measureEnd_ = measureStart_;
@@ -1977,6 +2048,26 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
 }
 
 void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
+    if (draggingPinnedInfoCard_) {
+        pinnedInfoCardPosition_ = event->position() - pinnedInfoDragOffset_;
+        pinnedInfoCardPosition_.setX(std::clamp(
+            pinnedInfoCardPosition_.x(), 8.0,
+            std::max(8.0, width() - pinnedInfoCardRect_.width() - 8.0)));
+        pinnedInfoCardPosition_.setY(std::clamp(
+            pinnedInfoCardPosition_.y(), 8.0,
+            std::max(8.0, height() - pinnedInfoCardRect_.height() - 8.0)));
+        update();
+        event->accept();
+        return;
+    }
+    const auto overCardHeader = !pinnedInfo_.isEmpty() &&
+                                pinnedInfoCardRect_.contains(event->position()) &&
+                                event->position().y() <= pinnedInfoCardRect_.top() + 38.0;
+    if (overCardHeader && event->buttons() == Qt::NoButton) {
+        setCursor(Qt::OpenHandCursor);
+    } else if (cursor().shape() == Qt::OpenHandCursor) {
+        unsetCursor();
+    }
     if ((measureMode_ || crossSectionMode_) && measureStart_.has_value()) {
         measureEnd_ = geographicPoint(event->position());
         update();
@@ -2000,6 +2091,12 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && draggingPinnedInfoCard_) {
+        draggingPinnedInfoCard_ = false;
+        unsetCursor();
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && (measureMode_ || crossSectionMode_) && measureStart_.has_value()) {
         measureEnd_ = geographicPoint(event->position());
         if (crossSectionMode_) emit crossSectionRequested(*measureStart_, *measureEnd_);
@@ -2010,24 +2107,14 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && dragging_) {
         dragging_ = false;
         if (!dragged_) {
-            if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position())) {
-                const QRectF closeRect(pinnedInfoCardRect_.right() - 34.0,
-                                       pinnedInfoCardRect_.top() + 7.0, 25.0, 25.0);
-                if (closeRect.contains(event->position())) {
-                    pinnedInfo_.clear();
-                    probeText_.clear();
-                    pinnedInfoCardRect_ = {};
-                    update();
-                    event->accept();
-                    return;
-                }
-            }
             const auto radarId = radarAt(event->pos());
             if (!radarId.isEmpty()) {
                 pinnedInfo_.clear();
                 emit radarClicked(radarId);
             } else {
-                pinnedInfo_ = overlayAt(event->position());
+                const auto selectedInfo = overlayAt(event->position());
+                if (selectedInfo != pinnedInfo_) pinnedInfoScrollOffset_ = 0;
+                pinnedInfo_ = selectedInfo;
                 probePosition_ = event->position();
                 probeText_ = pinnedInfo_;
                 update();
@@ -2040,6 +2127,17 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
+    if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position()) &&
+        pinnedInfoContentHeight_ > pinnedInfoBodyRect_.height()) {
+        const auto maximumScroll = std::max(
+            0, pinnedInfoContentHeight_ - static_cast<int>(std::floor(pinnedInfoBodyRect_.height())));
+        const auto steps = event->angleDelta().y() / 120;
+        pinnedInfoScrollOffset_ = std::clamp(
+            pinnedInfoScrollOffset_ - steps * 36, 0, maximumScroll);
+        update();
+        event->accept();
+        return;
+    }
     const auto steps = event->angleDelta().y() / 120;
     if (steps == 0) return;
     setZoomAt(zoom_ + steps, event->position());

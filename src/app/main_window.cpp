@@ -320,6 +320,13 @@ MainWindow::MainWindow(QWidget* parent)
             resize(1024, 680);
         }
     }
+    const auto dockState = settings.value(QStringLiteral("window/dockState")).toByteArray();
+    if (!dockState.isEmpty()) restoreState(dockState, 1);
+    const auto maximumDockWidth = std::max(220, width() - 420);
+    const auto storedDockWidth = std::clamp(
+        settings.value(QStringLiteral("window/controlDockWidth"), 272).toInt(),
+        220, maximumDockWidth);
+    resizeDocks({controlDock_}, {storedDockWidth}, Qt::Horizontal);
 }
 
 void MainWindow::buildUi() {
@@ -429,10 +436,11 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     setPanelLayout(0);
     setCentralWidget(mapHost);
 
-    auto* controlDock = new QDockWidget(QStringLiteral("RADAR"), this);
-    controlDock->setObjectName(QStringLiteral("controlDock"));
-    controlDock->setFeatures(QDockWidget::DockWidgetMovable);
-    auto* controlScroll = new QScrollArea(controlDock);
+    controlDock_ = new QDockWidget(QStringLiteral("RADAR"), this);
+    controlDock_->setObjectName(QStringLiteral("controlDock"));
+    controlDock_->setFeatures(QDockWidget::DockWidgetMovable);
+    controlDock_->setMinimumWidth(220);
+    auto* controlScroll = new QScrollArea(controlDock_);
     controlScroll->setWidgetResizable(true);
     controlScroll->setFrameShape(QFrame::NoFrame);
     controlScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -679,13 +687,13 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     controlLayout->addLayout(navigationGrid);
     controlLayout->addStretch(1);
     controlScroll->setWidget(controlBody);
-    controlDock->setWidget(controlScroll);
-    addDockWidget(Qt::LeftDockWidgetArea, controlDock);
+    controlDock_->setWidget(controlScroll);
+    addDockWidget(Qt::LeftDockWidgetArea, controlDock_);
 
-    auto* playbackDock = new QDockWidget(QStringLiteral("PLAYBACK"), this);
-    playbackDock->setObjectName(QStringLiteral("playbackDock"));
-    playbackDock->setFeatures(QDockWidget::DockWidgetMovable);
-    auto* playbackBody = new QWidget(playbackDock);
+    playbackDock_ = new QDockWidget(QStringLiteral("PLAYBACK"), this);
+    playbackDock_->setObjectName(QStringLiteral("playbackDock"));
+    playbackDock_->setFeatures(QDockWidget::DockWidgetMovable);
+    auto* playbackBody = new QWidget(playbackDock_);
     playbackBody->setObjectName(QStringLiteral("dockBody"));
     auto* playbackLayout = new QVBoxLayout(playbackBody);
     playbackLayout->setContentsMargins(8, 6, 8, 7);
@@ -751,9 +759,9 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     overlayStatusLabel_ = new QLabel(playbackBody);
     overlayStatusLabel_->setObjectName(QStringLiteral("section"));
     overlayStatusLabel_->hide();
-    playbackDock->setWidget(playbackBody);
-    addDockWidget(Qt::BottomDockWidgetArea, playbackDock);
-    resizeDocks({controlDock}, {272}, Qt::Horizontal);
+    playbackDock_->setWidget(playbackBody);
+    addDockWidget(Qt::BottomDockWidgetArea, playbackDock_);
+    resizeDocks({controlDock_}, {272}, Qt::Horizontal);
 
     auto* status = statusBar();
     unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"));
@@ -1461,6 +1469,9 @@ void MainWindow::restoreSettings() {
 void MainWindow::saveSettings() const {
     QSettings settings;
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    settings.setValue(QStringLiteral("window/dockState"), saveState(1));
+    if (controlDock_ && controlDock_->isVisible())
+        settings.setValue(QStringLiteral("window/controlDockWidth"), controlDock_->width());
     settings.setValue(QStringLiteral("view/product"), productCombo_->currentIndex());
     settings.setValue(QStringLiteral("view/palette"), paletteCombo_->currentIndex());
     QStringList customStops;
@@ -1780,7 +1791,10 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
     if (!site.latitude || !site.longitude) return;
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("%1 Cross-section").arg(selectedRadarId_));
+    dialog.resize(980, 620);
     auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
     const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
     auto* crossSection = new CrossSectionWidget(
         frame.chunk, {*site.latitude, *site.longitude}, site.antennaElevationMeters,

@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDockWidget>
 #include <QFile>
 #include <QImage>
 #include <QLabel>
@@ -49,6 +50,7 @@ int main(int argc, char** argv) {
     auto* stationCombo = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
     auto* liveButton = window.findChild<QToolButton*>(QStringLiteral("liveButton"));
     auto* panelLayout = window.findChild<QComboBox*>(QStringLiteral("panelLayoutCombo"));
+    auto* controlDock = window.findChild<QDockWidget*>(QStringLiteral("controlDock"));
     const auto radarPanels = window.findChildren<RadarMapCanvas*>();
     auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
@@ -58,6 +60,7 @@ int main(int argc, char** argv) {
         !belowThresholdCheck ||
         !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
         !model || model->rowCount() < 200 || !panelLayout || panelLayout->count() != 4 ||
+        !controlDock || controlDock->width() < 220 ||
         radarPanels.size() != 4) {
         std::cerr << "UI smoke setup failed\n";
         return 1;
@@ -212,6 +215,17 @@ int main(int argc, char** argv) {
         std::cerr << "Warning detail card lost structured alert text\n";
         return 1;
     }
+    const auto initialCardRect = map->infoCardRect();
+    const auto dragStart = (initialCardRect.topLeft() + QPointF(90.0, 18.0)).toPoint();
+    const auto dragEnd = dragStart + QPoint(-70, 45);
+    QTest::mousePress(map, Qt::LeftButton, Qt::NoModifier, dragStart);
+    QTest::mouseMove(map, dragEnd);
+    QTest::mouseRelease(map, Qt::LeftButton, Qt::NoModifier, dragEnd);
+    application.processEvents();
+    if (map->infoCardRect().topLeft() == initialCardRect.topLeft()) {
+        std::cerr << "Warning detail card could not be dragged by its header\n";
+        return 1;
+    }
     QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, QPoint(8, map->height() - 8));
     application.processEvents();
     if (!map->probeText().isEmpty()) {
@@ -294,6 +308,22 @@ int main(int argc, char** argv) {
                   << " size=" << map->width() << 'x' << map->height() << "\n";
         return 1;
     }
+
+    window.resizeDocks({controlDock}, {386}, Qt::Horizontal);
+    application.processEvents();
+    const auto savedDockWidth = controlDock->width();
+    window.close();
+    application.processEvents();
+    MainWindow restoredWindow;
+    restoredWindow.show();
+    application.processEvents();
+    const auto* restoredDock = restoredWindow.findChild<QDockWidget*>(QStringLiteral("controlDock"));
+    if (!restoredDock || std::abs(restoredDock->width() - savedDockWidth) > 12) {
+        std::cerr << "Radar sidebar width was not restored: saved=" << savedDockWidth
+                  << " restored=" << (restoredDock ? restoredDock->width() : -1) << '\n';
+        return 1;
+    }
+    restoredWindow.close();
 
     std::cout << "UI smoke passed\n";
     return 0;
