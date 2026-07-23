@@ -19,6 +19,7 @@
 #include <optional>
 #include <array>
 #include <memory>
+#include <utility>
 #include <vector>
 
 class QMouseEvent;
@@ -96,6 +97,7 @@ public:
     QRectF infoCardRect() const { return pinnedInfoCardRect_; }
     double infoCardScrollOffset() const { return pinnedInfoScrollOffset_; }
     void inspectAt(const QPointF& point);
+    QPoint lightningCellScreenPoint(int index) const;
     int warningCount() const;
     int stormReportCount() const;
     int lightningCellCount() const;
@@ -119,6 +121,27 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    enum class PinnedInfoKind {
+        None,
+        Warning,
+        StormReport,
+        Lightning,
+    };
+
+    struct OverlayHit {
+        QString text;
+        PinnedInfoKind kind = PinnedInfoKind::None;
+        std::optional<std::size_t> lightningCellIndex;
+
+        OverlayHit() = default;
+        OverlayHit(QString textValue,
+                   PinnedInfoKind kindValue = PinnedInfoKind::Warning,
+                   std::optional<std::size_t> lightningIndex = std::nullopt)
+            : text(std::move(textValue)),
+              kind(kindValue),
+              lightningCellIndex(lightningIndex) {}
+    };
+
     static constexpr int kTileSize = 256;
     static constexpr int kMinZoom = 3;
     static constexpr int kMaxZoom = 19;
@@ -138,12 +161,16 @@ private:
     void paintStationCard(QPainter& painter);
     void paintMeasurement(QPainter& painter);
     void updateProbe(const QPointF& point);
+    std::optional<std::size_t> lightningCellAt(const QPointF& point) const;
+    QString lightningInfo(std::size_t index) const;
+    void setPinnedOverlay(const OverlayHit& hit, const QPointF& point);
+    void refreshPinnedLightningInfo();
     const RadarSite* selectedSite() const;
     QString tileKey(int x, int y) const;
     void requestVisibleTiles();
     void panBy(const QPointF& delta);
     QString radarAt(const QPointF& point) const;
-    QString overlayAt(const QPointF& point) const;
+    OverlayHit overlayAt(const QPointF& point) const;
     void setZoomAt(int zoom, const QPointF& cursor);
     void refreshScanDiagnostics();
     void refreshVelocityProcessing();
@@ -205,6 +232,8 @@ private:
     QString warningFilter_;
     QString hoverRadarId_;
     QString pinnedInfo_;
+    PinnedInfoKind pinnedInfoKind_ = PinnedInfoKind::None;
+    std::optional<std::pair<int, int>> pinnedLightningCell_;
     QRectF pinnedInfoCardRect_;
     QRectF pinnedInfoBodyRect_;
     QPointF pinnedInfoCardPosition_{-1.0, -1.0};

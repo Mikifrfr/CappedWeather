@@ -45,6 +45,22 @@ QFont hudFont(const int pointSize, const QFont::Weight weight = QFont::Normal) {
     return font;
 }
 
+QColor lightningCellColor(const LightningCellSnapshot& cell) {
+    if (!cell.active()) return QColor(90, 215, 235);
+    if (cell.sigmaLevel >= 5.0) return QColor(238, 70, 255);
+    if (cell.sigmaLevel >= 4.0) return QColor(255, 74, 74);
+    if (cell.sigmaLevel >= 3.0) return QColor(255, 145, 40);
+    return QColor(255, 222, 64);
+}
+
+QString elapsedText(const std::int64_t epochSec, const std::int64_t nowEpochSec) {
+    if (epochSec <= 0) return QStringLiteral("unknown");
+    const auto seconds = std::max<std::int64_t>(0, nowEpochSec - epochSec);
+    if (seconds < 90) return QStringLiteral("%1s").arg(seconds);
+    if (seconds < 90 * 60) return QStringLiteral("%1m").arg(seconds / 60);
+    return QStringLiteral("%1h %2m").arg(seconds / 3600).arg((seconds % 3600) / 60);
+}
+
 struct ColorStop {
     double position;
     QColor color;
@@ -452,12 +468,16 @@ void RadarMapCanvas::setWeatherOverlays(QVector<WeatherWarning> warnings,
 void RadarMapCanvas::setLightningCells(std::vector<LightningCellSnapshot> cells) {
     lightningCells_ = std::move(cells);
     invalidateLightningFusion();
+    refreshPinnedLightningInfo();
     update();
 }
 
 void RadarMapCanvas::setLightningVisible(const bool visible) {
     if (lightningVisible_ == visible) return;
     lightningVisible_ = visible;
+    if (!visible && pinnedInfoKind_ == PinnedInfoKind::Lightning) {
+        setPinnedOverlay({}, probePosition_);
+    }
     update();
 }
 
@@ -513,6 +533,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                 guard->radarFeatures_ = std::move(features);
                 guard->lightningAssociations_ = std::move(associations);
                 guard->lightningFusionComputedGeneration_ = generation;
+                guard->refreshPinnedLightningInfo();
             }
             guard->update();
         }, Qt::QueuedConnection);
@@ -778,7 +799,18 @@ QString RadarMapCanvas::probeText() const {
 }
 
 void RadarMapCanvas::inspectAt(const QPointF& point) {
-    updateProbe(point);
+    const auto hit = overlayAt(point);
+    if (!hit.text.isEmpty()) {
+        setPinnedOverlay(hit, point);
+    } else {
+        updateProbe(point);
+    }
+}
+
+QPoint RadarMapCanvas::lightningCellScreenPoint(const int index) const {
+    if (index < 0 || index >= static_cast<int>(lightningCells_.size())) return {};
+    const auto& cell = lightningCells_.at(static_cast<std::size_t>(index));
+    return screenPoint(cell.latitudeCenterDeg, cell.longitudeCenterDeg).toPoint();
 }
 
 int RadarMapCanvas::warningCount() const {
@@ -1372,16 +1404,21 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
                 << screenPoint(cell.latitudeCenterDeg + half, cell.longitudeCenterDeg - half);
         const auto bounds = polygon.boundingRect();
         if (!QRectF(rect().adjusted(-80, -80, 80, 80)).intersects(bounds)) continue;
-        QColor color;
-        if (!cell.active()) color = QColor(90, 215, 235);
-        else if (cell.sigmaLevel >= 5.0) color = QColor(238, 70, 255);
-        else if (cell.sigmaLevel >= 4.0) color = QColor(255, 74, 74);
-        else if (cell.sigmaLevel >= 3.0) color = QColor(255, 145, 40);
-        else color = QColor(255, 222, 64);
-        painter.setPen(QPen(color, cell.active() ? 2.0 : 1.5,
+        const auto color = lightningCellColor(cell);
+        const auto selected = pinnedLightningCell_.has_value() &&
+                              pinnedLightningCell_->first == cell.cellX &&
+                              pinnedLightningCell_->second == cell.cellY;
+        if (selected) {
+            auto halo = color;
+            halo.setAlpha(90);
+            painter.setPen(QPen(halo, 7.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPolygon(polygon);
+        }
+        painter.setPen(QPen(color, selected ? 3.5 : cell.active() ? 2.0 : 1.5,
                             cell.active() ? Qt::SolidLine : Qt::DashLine));
         QColor fill = color;
-        fill.setAlpha(cell.active() ? 48 : 20);
+        fill.setAlpha(selected ? 82 : cell.active() ? 48 : 20);
         painter.setBrush(fill);
         painter.drawPolygon(polygon);
         if (zoom_ >= 6 && cell.active()) {
@@ -1487,14 +1524,22 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
     if (probeText_.isEmpty()) return;
     if (!pinnedInfo_.isEmpty()) {
         const auto parts = probeText_.split(QLatin1Char('\n'));
-        const auto isWarning = parts.size() >= 7;
+        const auto isWarning = pinnedInfoKind_ == PinnedInfoKind::Warning;
         const auto title = parts.value(0).trimmed();
         const auto severity = isWarning ? parts.value(1).trimmed() : QString{};
         const auto headline = isWarning ? parts.value(2).trimmed() : QString{};
         const auto bodyStart = isWarning ? 3 : 1;
         const auto body = parts.mid(bodyStart).join(QLatin1Char('\n')).trimmed();
 
-        const auto accent = isWarning ? nwsAlertStyle(title).color : QColor("#80d3ff");
+        auto accent = isWarning ? nwsAlertStyle(title).color : QColor("#80d3ff");
+        if (pinnedInfoKind_ == PinnedInfoKind::Lightning && pinnedLightningCell_) {
+            const auto selected = std::find_if(
+                lightningCells_.cbegin(), lightningCells_.cend(), [this](const auto& cell) {
+                    return cell.cellX == pinnedLightningCell_->first &&
+                           cell.cellY == pinnedLightningCell_->second;
+                });
+            if (selected != lightningCells_.cend()) accent = lightningCellColor(*selected);
+        }
 
         const auto cardWidth = std::min(390.0, std::max(280.0, width() - 24.0));
         const auto maximumHeight = std::max(130.0, std::min(270.0, height() - 24.0));
@@ -1748,7 +1793,150 @@ QString RadarMapCanvas::radarAt(const QPointF& point) const {
     return {};
 }
 
-QString RadarMapCanvas::overlayAt(const QPointF& point) const {
+std::optional<std::size_t> RadarMapCanvas::lightningCellAt(const QPointF& point) const {
+    if (!lightningVisible_) return std::nullopt;
+    std::optional<std::size_t> best;
+    auto bestDistance = std::numeric_limits<double>::infinity();
+    for (std::size_t index = 0; index < lightningCells_.size(); ++index) {
+        const auto& cell = lightningCells_[index];
+        const auto half = cell.cellSizeDeg * 0.5;
+        QPolygonF polygon;
+        polygon << screenPoint(cell.latitudeCenterDeg - half, cell.longitudeCenterDeg - half)
+                << screenPoint(cell.latitudeCenterDeg - half, cell.longitudeCenterDeg + half)
+                << screenPoint(cell.latitudeCenterDeg + half, cell.longitudeCenterDeg + half)
+                << screenPoint(cell.latitudeCenterDeg + half, cell.longitudeCenterDeg - half);
+        const auto center = screenPoint(cell.latitudeCenterDeg, cell.longitudeCenterDeg);
+        const auto distance = QLineF(center, point).length();
+        QPainterPath path;
+        path.addPolygon(polygon);
+        if (!path.contains(point) && distance > 10.0) continue;
+        if (distance < bestDistance) {
+            best = index;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+QString RadarMapCanvas::lightningInfo(const std::size_t index) const {
+    if (index >= lightningCells_.size()) return {};
+    const auto& cell = lightningCells_[index];
+    const auto now = QDateTime::currentSecsSinceEpoch();
+    const auto phase = cell.kind == JumpEventKind::JumpCessation
+        ? QStringLiteral("CESSATION")
+        : cell.kind == JumpEventKind::JumpStart
+            ? QStringLiteral("NEW JUMP")
+            : QStringLiteral("ACTIVE UPDATE");
+    const auto signal = !cell.active()
+        ? QStringLiteral("Flash rate is declining after an active jump")
+        : cell.sigmaLevel >= 5.0
+            ? QStringLiteral("Exceptional electrical intensification")
+            : cell.sigmaLevel >= 3.0
+                ? QStringLiteral("Strong electrical intensification")
+                : QStringLiteral("Elevated electrical intensification");
+    const auto satellite = cell.satelliteNumber > 0
+        ? QStringLiteral("GOES-%1 %2")
+              .arg(cell.satelliteNumber)
+              .arg(cell.satelliteNumber == 18 ? QStringLiteral("West")
+                                               : QStringLiteral("East"))
+        : QStringLiteral("GOES GLM");
+    const auto feedAge = cell.latestDataEpochSec > 0
+        ? std::max<std::int64_t>(0, now - cell.latestDataEpochSec)
+        : std::numeric_limits<std::int64_t>::max();
+    const auto feedHealth = feedAge <= 120
+        ? QStringLiteral("LIVE")
+        : feedAge <= 300 ? QStringLiteral("AGING") : QStringLiteral("STALE");
+
+    QStringList lines;
+    lines << QStringLiteral("GLM %1 | %2 sigma")
+                 .arg(cell.active() ? QStringLiteral("LIGHTNING JUMP")
+                                    : QStringLiteral("JUMP CESSATION"))
+                 .arg(cell.sigmaLevel, 0, 'f', 1)
+          << QStringLiteral("Phase: %1 | %2 flashes/min")
+                 .arg(phase)
+                 .arg(cell.flashRatePerMin, 0, 'f', 1)
+          << QStringLiteral("Signal: %1").arg(signal)
+          << QStringLiteral("Age: %1 | %2")
+                 .arg(elapsedText(cell.eventTimeEpochSec, now), satellite)
+          << QStringLiteral("Feed: %1 | newest scan %2 ago")
+                 .arg(feedHealth, elapsedText(cell.latestDataEpochSec, now))
+          << QStringLiteral("Location: %1, %2 | grid %3,%4")
+                 .arg(cell.latitudeCenterDeg, 0, 'f', 3)
+                 .arg(cell.longitudeCenterDeg, 0, 'f', 3)
+                 .arg(cell.cellX)
+                 .arg(cell.cellY);
+
+    const auto association = std::find_if(
+        lightningAssociations_.cbegin(), lightningAssociations_.cend(),
+        [index](const auto& candidate) { return candidate.lightningCellIndex == index; });
+    if (association != lightningAssociations_.cend() &&
+        association->radarFeatureIndex < radarFeatures_.size()) {
+        const auto& feature = radarFeatures_[association->radarFeatureIndex];
+        lines << QStringLiteral("Radar fusion: %1 | object %2 | %3 km")
+                     .arg(selectedRadar_.isEmpty() ? QStringLiteral("selected radar")
+                                                   : selectedRadar_)
+                     .arg(feature.id)
+                     .arg(association->distanceKm, 0, 'f', 1)
+              << QStringLiteral("Reflectivity: %1 dBZ max | %2 km2")
+                     .arg(feature.maximumReflectivityDbz, 0, 'f', 1)
+                     .arg(feature.areaKm2, 0, 'f', 1)
+              << QStringLiteral("Rotation: %1 | shear %2 s^-1 | span %3 m/s")
+                     .arg(feature.rotating ? QStringLiteral("DETECTED")
+                                           : QStringLiteral("not detected"))
+                     .arg(feature.azimuthalShearPerSecond, 0, 'f', 4)
+                     .arg(feature.velocitySpanMetersPerSecond, 0, 'f', 1);
+    } else if (!chunk_) {
+        lines << QStringLiteral("Radar fusion: waiting for a selected radar volume");
+    } else {
+        lines << QStringLiteral("Radar fusion: no storm object within 45 km");
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+void RadarMapCanvas::setPinnedOverlay(const OverlayHit& hit, const QPointF& point) {
+    const auto changed = hit.text != pinnedInfo_ || hit.kind != pinnedInfoKind_;
+    if (changed) {
+        pinnedInfoScrollOffset_ = 0.0;
+        pinnedInfoScrollTarget_ = 0.0;
+        pinnedInfoScrollTimer_->stop();
+    }
+    pinnedInfo_ = hit.text;
+    pinnedInfoKind_ = hit.kind;
+    pinnedLightningCell_.reset();
+    if (hit.lightningCellIndex && *hit.lightningCellIndex < lightningCells_.size()) {
+        const auto& cell = lightningCells_[*hit.lightningCellIndex];
+        pinnedLightningCell_ = std::pair(cell.cellX, cell.cellY);
+    }
+    probePosition_ = point;
+    probeText_ = pinnedInfo_;
+    if (pinnedInfo_.isEmpty()) {
+        pinnedInfoCardRect_ = {};
+        pinnedInfoBodyRect_ = {};
+    }
+    update();
+}
+
+void RadarMapCanvas::refreshPinnedLightningInfo() {
+    if (!pinnedLightningCell_) return;
+    const auto selected = std::find_if(
+        lightningCells_.cbegin(), lightningCells_.cend(), [this](const auto& cell) {
+            return cell.cellX == pinnedLightningCell_->first &&
+                   cell.cellY == pinnedLightningCell_->second;
+        });
+    if (selected == lightningCells_.cend()) {
+        setPinnedOverlay({}, probePosition_);
+        return;
+    }
+    const auto index = static_cast<std::size_t>(
+        std::distance(lightningCells_.cbegin(), selected));
+    pinnedInfo_ = lightningInfo(index);
+    probeText_ = pinnedInfo_;
+}
+
+RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const {
+    if (const auto lightning = lightningCellAt(point)) {
+        return {lightningInfo(*lightning), PinnedInfoKind::Lightning, lightning};
+    }
     ensureWeatherPaths();
     if (stormReportsVisible_) {
         for (qsizetype reportIndex = 0; reportIndex < stormReports_.size(); ++reportIndex) {
@@ -1768,9 +1956,13 @@ QString RadarMapCanvas::overlayAt(const QPointF& point) const {
                                         ? report.occurredAt.secsTo(QDateTime::currentDateTimeUtc()) / 60
                                         : -1;
             const auto age = ageMinutes >= 0 ? QStringLiteral(" | %1m old").arg(ageMinutes) : QString{};
-            return QStringLiteral("%1 report | %2%3 | %4 %5 | %6, %7\n%8")
-                .arg(kind, timestamp, age, report.time, report.magnitude,
-                     report.location, report.state, report.comments);
+            return {
+                QStringLiteral("%1 report | %2%3 | %4 %5 | %6, %7\n%8")
+                    .arg(kind, timestamp, age, report.time, report.magnitude,
+                         report.location, report.state, report.comments),
+                PinnedInfoKind::StormReport,
+                std::nullopt,
+            };
         }
     }
     if (warningsVisible_) {
@@ -2036,11 +2228,7 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
             const QRectF closeRect(pinnedInfoCardRect_.right() - 34.0,
                                    pinnedInfoCardRect_.top() + 7.0, 25.0, 25.0);
             if (closeRect.contains(event->position())) {
-                pinnedInfo_.clear();
-                probeText_.clear();
-                pinnedInfoCardRect_ = {};
-                pinnedInfoBodyRect_ = {};
-                update();
+                setPinnedOverlay({}, event->position());
             } else if (event->position().y() <= pinnedInfoCardRect_.top() + 38.0) {
                 draggingPinnedInfoCard_ = true;
                 pinnedInfoDragOffset_ = event->position() - pinnedInfoCardRect_.topLeft();
@@ -2127,19 +2315,10 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
         if (!dragged_) {
             const auto radarId = radarAt(event->pos());
             if (!radarId.isEmpty()) {
-                pinnedInfo_.clear();
+                setPinnedOverlay({}, event->position());
                 emit radarClicked(radarId);
             } else {
-                const auto selectedInfo = overlayAt(event->position());
-                if (selectedInfo != pinnedInfo_) {
-                    pinnedInfoScrollOffset_ = 0.0;
-                    pinnedInfoScrollTarget_ = 0.0;
-                    pinnedInfoScrollTimer_->stop();
-                }
-                pinnedInfo_ = selectedInfo;
-                probePosition_ = event->position();
-                probeText_ = pinnedInfo_;
-                update();
+                setPinnedOverlay(overlayAt(event->position()), event->position());
             }
         }
         event->accept();

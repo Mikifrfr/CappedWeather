@@ -20,6 +20,8 @@ struct LightningCellSnapshot {
     double flashRatePerMin = 0.0;
     int cellX = 0;
     int cellY = 0;
+    int satelliteNumber = 0;
+    std::int64_t latestDataEpochSec = 0;
 
     [[nodiscard]] bool active() const { return kind != JumpEventKind::JumpCessation; }
 };

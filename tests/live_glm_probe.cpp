@@ -35,6 +35,14 @@ int main(int argc, char** argv) {
                          const int filesProcessed,
                          const int flashesProcessed) {
         if (filesProcessed <= 0 || flashesProcessed <= 0) return;
+        for (const auto& cell : cells) {
+            if ((cell.satelliteNumber != 18 && cell.satelliteNumber != 19) ||
+                cell.latestDataEpochSec <= 0) {
+                std::cerr << "live_glm_probe=invalid_cell_metadata\n";
+                application.exit(2);
+                return;
+            }
+        }
         std::cout << "live_glm_probe=passed"
                   << " files=" << filesProcessed
                   << " flashes=" << flashesProcessed
@@ -47,6 +55,8 @@ int main(int argc, char** argv) {
                       << " sigma=" << cell.sigmaLevel
                       << " rate=" << cell.flashRatePerMin
                       << " active=" << (cell.active() ? "yes" : "no")
+                      << " satellite=GOES-" << cell.satelliteNumber
+                      << " newest=" << cell.latestDataEpochSec
                       << '\n';
         }
         application.exit(0);

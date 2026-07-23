@@ -288,10 +288,16 @@ int main(int argc, char** argv) {
     map->setElevationFilter(1);
     map->setDecodedChunk({"TATL", {ray}, 1}, QDateTime::currentDateTimeUtc());
     LightningCellSnapshot lightning;
+    lightning.kind = JumpEventKind::JumpUpdate;
+    lightning.eventTimeEpochSec = QDateTime::currentSecsSinceEpoch() - 45;
     lightning.latitudeCenterDeg = 33.65;
-    lightning.longitudeCenterDeg = -84.05;
+    lightning.longitudeCenterDeg = -83.85;
     lightning.sigmaLevel = 3.2;
     lightning.flashRatePerMin = 28.0;
+    lightning.cellX = -336;
+    lightning.cellY = 134;
+    lightning.satelliteNumber = 19;
+    lightning.latestDataEpochSec = QDateTime::currentSecsSinceEpoch() - 12;
     map->setLightningCells({lightning});
     if (map->lightningCellCount() != 1) {
         std::cerr << "GLM lightning overlay did not reach the map\n";
@@ -305,6 +311,7 @@ int main(int argc, char** argv) {
     }
     lightningCheck->setChecked(true);
     map->recenterSelected();
+    map->setView({-84.2620, 33.6470}, 8);
     map->setVolumeQuality(9, 10, 1);
     map->setPalette(RadarMapCanvas::PaletteKind::Operational);
     map->setRadarOpacity(65);
@@ -317,6 +324,19 @@ int main(int argc, char** argv) {
                   << " radar=" << map->radarId().toStdString()
                   << " point=" << radarPoint.x() << ',' << radarPoint.y()
                   << " size=" << map->width() << 'x' << map->height() << "\n";
+        return 1;
+    }
+    QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier,
+                      map->lightningCellScreenPoint(0));
+    application.processEvents();
+    const auto lightningInfo = map->probeText();
+    if (!lightningInfo.contains(QStringLiteral("GLM LIGHTNING JUMP")) ||
+        !lightningInfo.contains(QStringLiteral("ACTIVE UPDATE")) ||
+        !lightningInfo.contains(QStringLiteral("GOES-19 East")) ||
+        !lightningInfo.contains(QStringLiteral("Feed: LIVE")) ||
+        !lightningInfo.contains(QStringLiteral("Radar fusion:"))) {
+        std::cerr << "GLM intelligence inspector incomplete: "
+                  << lightningInfo.toStdString() << '\n';
         return 1;
     }
 

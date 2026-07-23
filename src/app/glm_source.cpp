@@ -343,6 +343,10 @@ void GlmSource::ingestBatch() {
         snapshot.flashRatePerMin = event.flashRatePerMin;
         snapshot.cellX = event.cellX;
         snapshot.cellY = event.cellY;
+        snapshot.satelliteNumber =
+            snapshot.longitudeCenterDeg < config_.satelliteSplitLongitudeDeg ? 18 : 19;
+        snapshot.latestDataEpochSec = latestProcessedBySatellite_.value(
+            snapshot.satelliteNumber == 18 ? QStringLiteral("G18") : QStringLiteral("G19"));
         cells_.insert(cellKey(event.cellX, event.cellY), snapshot);
     }
     publishCells(nowEpoch);
@@ -371,6 +375,10 @@ void GlmSource::publishCells(const std::int64_t nowEpochSec) {
         if (it->expiresEpochSec <= nowEpochSec) {
             it = cells_.erase(it);
         } else {
+            const auto satellite = it->satelliteNumber == 18
+                ? QStringLiteral("G18") : QStringLiteral("G19");
+            it->latestDataEpochSec = latestProcessedBySatellite_.value(
+                satellite, it->latestDataEpochSec);
             snapshots.push_back(it.value());
             ++it;
         }
