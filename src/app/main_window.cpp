@@ -1,6 +1,7 @@
 #include "app/main_window.hpp"
 
 #include "app/nexrad_source.hpp"
+#include "app/glm_source.hpp"
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
 #include "app/weather_overlay_source.hpp"
@@ -69,10 +70,31 @@
 
 namespace cappedweather {
 
+namespace {
+
+GlmLiveConfig glmConfigFromSettings() {
+    QSettings settings;
+    GlmLiveConfig config;
+    config.refreshSeconds = settings.value(QStringLiteral("lightning/refreshSeconds"), 20).toInt();
+    config.initialBackfillMinutes = settings.value(QStringLiteral("lightning/backfillMinutes"), 18).toInt();
+    config.maximumConcurrentDownloads = settings.value(QStringLiteral("lightning/parallelDownloads"), 4).toInt();
+    config.cessationRetentionMinutes = settings.value(QStringLiteral("lightning/cessationMinutes"), 10).toInt();
+    config.grid.cellSizeDeg = settings.value(QStringLiteral("lightning/cellSizeDeg"), 0.25).toDouble();
+    config.grid.jump.minFlashRatePerMin = settings.value(QStringLiteral("lightning/minFlashRate"), 12.0).toDouble();
+    config.grid.jump.jumpSigmaThreshold = settings.value(QStringLiteral("lightning/sigmaThreshold"), 2.0).toDouble();
+    config.grid.jump.sigmaWindowSec = settings.value(QStringLiteral("lightning/sigmaWindowMinutes"), 10.0).toDouble() * 60.0;
+    config.grid.jump.rateResolutionSec = settings.value(QStringLiteral("lightning/rateResolutionSeconds"), 60.0).toDouble();
+    config.grid.jump.minSigmaSamples = settings.value(QStringLiteral("lightning/minSigmaSamples"), 5).toInt();
+    return config;
+}
+
+} // namespace
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
       model_(new RadarListModel(this)),
       source_(new NexradSource(this)),
+      glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
       refreshTimer_(new QTimer(this)),
       overlayRefreshTimer_(new QTimer(this)),
@@ -188,6 +210,13 @@ MainWindow::MainWindow(QWidget* parent)
     connect(reportsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setStormReportsVisible(visible);
     });
+    connect(lightningCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setLightningVisible(visible);
+        lightningFusionCheck_->setEnabled(visible);
+    });
+    connect(lightningFusionCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setLightningFusionVisible(visible);
+    });
     connect(source_, &NexradSource::statusChanged, this, &MainWindow::sourceStatusChanged);
     connect(source_, &NexradSource::requestFailed, this, &MainWindow::sourceFailed);
     connect(source_, &NexradSource::catalogReceived, this, &MainWindow::catalogReceived);
@@ -201,6 +230,19 @@ MainWindow::MainWindow(QWidget* parent)
             });
     connect(overlaySource_, &WeatherOverlaySource::statusChanged, this, [this](const QString& status) {
         overlayStatus_ = status;
+        updateUnifiedStatus();
+    });
+    connect(glmSource_, &GlmSource::cellsUpdated, this,
+            [this](QVector<LightningCellSnapshot> cells, const QDateTime&, int, int) {
+                std::vector<LightningCellSnapshot> snapshots(cells.begin(), cells.end());
+                for (auto* panel : maps_) panel->setLightningCells(snapshots);
+            });
+    connect(glmSource_, &GlmSource::statusChanged, this, [this](const QString& status) {
+        lightningStatus_ = status;
+        updateUnifiedStatus();
+    });
+    connect(glmSource_, &GlmSource::requestFailed, this, [this](const QString& message) {
+        lightningStatus_ = message;
         updateUnifiedStatus();
     });
 
@@ -266,6 +308,8 @@ MainWindow::MainWindow(QWidget* parent)
     overlaySource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
+    glmSource_->configure(glmConfigFromSettings());
+    glmSource_->start();
     if (!restoreGeometry(settings.value(QStringLiteral("window/geometry")).toByteArray())) {
         if (const auto* screen = QGuiApplication::primaryScreen()) {
             const auto available = screen->availableGeometry();
@@ -463,6 +507,16 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     reportsCheck_->setObjectName(QStringLiteral("reportsCheck"));
     reportsCheck_->setChecked(true);
     controlLayout->addWidget(reportsCheck_);
+    lightningCheck_ = new QCheckBox(QStringLiteral("GLM lightning jumps"), controlBody);
+    lightningCheck_->setObjectName(QStringLiteral("lightningCheck"));
+    lightningCheck_->setChecked(true);
+    lightningCheck_->setToolTip(QStringLiteral("Live GOES-18/19 total-lightning jump cells"));
+    controlLayout->addWidget(lightningCheck_);
+    lightningFusionCheck_ = new QCheckBox(QStringLiteral("Radar fusion"), controlBody);
+    lightningFusionCheck_->setObjectName(QStringLiteral("lightningFusionCheck"));
+    lightningFusionCheck_->setChecked(true);
+    lightningFusionCheck_->setToolTip(QStringLiteral("Associate GLM jumps with reflectivity objects and azimuthal shear"));
+    controlLayout->addWidget(lightningFusionCheck_);
     warningFilterCombo_ = new QComboBox(controlBody);
     warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
                                    QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
@@ -633,55 +687,67 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     playbackDock->setFeatures(QDockWidget::DockWidgetMovable);
     auto* playbackBody = new QWidget(playbackDock);
     playbackBody->setObjectName(QStringLiteral("dockBody"));
-    auto* playback = new QHBoxLayout(playbackBody);
-    playback->setContentsMargins(8, 6, 8, 7);
-    playback->setSpacing(4);
+    auto* playbackLayout = new QVBoxLayout(playbackBody);
+    playbackLayout->setContentsMargins(8, 6, 8, 7);
+    playbackLayout->setSpacing(4);
+    auto* transportRow = new QHBoxLayout();
+    transportRow->setContentsMargins(0, 0, 0, 0);
+    transportRow->setSpacing(4);
     previousButton_ = new QToolButton(playbackBody);
     previousButton_->setObjectName(QStringLiteral("previousFrameButton"));
     previousButton_->setText(QStringLiteral("Previous"));
-    playback->addWidget(previousButton_);
+    transportRow->addWidget(previousButton_);
     playButton_ = new QToolButton(playbackBody);
     playButton_->setObjectName(QStringLiteral("playButton"));
     playButton_->setText(QStringLiteral("Play"));
     playButton_->setCheckable(true);
-    playback->addWidget(playButton_);
+    transportRow->addWidget(playButton_);
     nextButton_ = new QToolButton(playbackBody);
     nextButton_->setObjectName(QStringLiteral("nextFrameButton"));
     nextButton_->setText(QStringLiteral("Next"));
-    playback->addWidget(nextButton_);
+    transportRow->addWidget(nextButton_);
     liveButton_ = new QToolButton(playbackBody);
     liveButton_->setObjectName(QStringLiteral("liveButton"));
     liveButton_->setText(QStringLiteral("LIVE"));
     liveButton_->setCheckable(true);
     liveButton_->setChecked(true);
     liveButton_->setToolTip(QStringLiteral("Follow the newest complete volume (L)"));
-    playback->addWidget(liveButton_);
+    transportRow->addWidget(liveButton_);
     frameSlider_ = new QSlider(Qt::Horizontal, playbackBody);
     frameSlider_->setObjectName(QStringLiteral("frameSlider"));
     frameSlider_->setRange(0, 0);
     frameSlider_->installEventFilter(this);
-    playback->addWidget(frameSlider_, 1);
-    frameLabel_ = new QLabel(QStringLiteral("No volume history"), playbackBody);
-    frameLabel_->setMinimumWidth(185);
-    frameLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    frameLabel_->setFont(monoFont);
-    playback->addWidget(frameLabel_);
+    transportRow->addWidget(frameSlider_, 1);
     speedCombo_ = new QComboBox(playbackBody);
     speedCombo_->setObjectName(QStringLiteral("speedCombo"));
     speedCombo_->addItem(QStringLiteral("1x"), 1000);
     speedCombo_->addItem(QStringLiteral("2x"), 500);
     speedCombo_->addItem(QStringLiteral("4x"), 250);
     speedCombo_->setCurrentIndex(1);
-    playback->addWidget(speedCombo_);
+    transportRow->addWidget(speedCombo_);
+    playbackLayout->addLayout(transportRow);
+
+    auto* detailsRow = new QHBoxLayout();
+    detailsRow->setContentsMargins(0, 0, 0, 0);
+    detailsRow->setSpacing(4);
+    frameLabel_ = new QLabel(QStringLiteral("No volume history"), playbackBody);
+    frameLabel_->setObjectName(QStringLiteral("frameLabel"));
+    frameLabel_->setMinimumWidth(0);
+    frameLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    frameLabel_->setFont(monoFont);
+    detailsRow->addWidget(frameLabel_, 1);
     auto* snapshotButton = new QToolButton(playbackBody);
+    snapshotButton->setObjectName(QStringLiteral("snapshotButton"));
     snapshotButton->setText(QStringLiteral("Snapshot"));
     connect(snapshotButton, &QToolButton::clicked, this, &MainWindow::exportSnapshot);
-    playback->addWidget(snapshotButton);
+    detailsRow->addWidget(snapshotButton);
     auto* timelineButton = new QToolButton(playbackBody);
+    timelineButton->setObjectName(QStringLiteral("timelineButton"));
     timelineButton->setText(QStringLiteral("Timeline GIF"));
     timelineButton->setToolTip(QStringLiteral("Export loaded volume frames as an animated GIF"));
     connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
-    playback->addWidget(timelineButton);
+    detailsRow->addWidget(timelineButton);
+    playbackLayout->addLayout(detailsRow);
     overlayStatusLabel_ = new QLabel(playbackBody);
     overlayStatusLabel_->setObjectName(QStringLiteral("section"));
     overlayStatusLabel_->hide();
@@ -691,7 +757,7 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
 
     auto* status = statusBar();
     unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"));
-    unifiedStatusLabel_->setObjectName(QStringLiteral("section"));
+    unifiedStatusLabel_->setObjectName(QStringLiteral("unifiedStatusLabel"));
     unifiedStatusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     unifiedStatusLabel_->setMinimumWidth(0);
     unifiedStatusLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -773,8 +839,8 @@ void MainWindow::updateStationSummary() {
 
 void MainWindow::updateUnifiedStatus() {
     if (!unifiedStatusLabel_) return;
-    const auto status = QStringLiteral("Radar: %1    |    Overlays: %2")
-                            .arg(radarStatus_, overlayStatus_);
+    const auto status = QStringLiteral("Radar: %1    |    NWS/SPC: %2    |    GLM: %3")
+                            .arg(radarStatus_, overlayStatus_, lightningStatus_);
     unifiedStatusLabel_->setText(status);
     unifiedStatusLabel_->setToolTip(status);
 }
@@ -1383,6 +1449,8 @@ void MainWindow::restoreSettings() {
     hailCheck_->setChecked(settings.value(QStringLiteral("overlays/hail"), true).toBool());
     windCheck_->setChecked(settings.value(QStringLiteral("overlays/wind"), true).toBool());
     belowThresholdCheck_->setChecked(settings.value(QStringLiteral("view/belowThreshold"), false).toBool());
+    lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
+    lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
     speedCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("timeline/speed"), 1).toInt(),
                                             0, speedCombo_->count() - 1));
     panelLayoutCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("panels/layout"), 0).toInt(),
@@ -1407,6 +1475,8 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/hail"), hailCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/wind"), windCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/warningFilter"), warningFilterCombo_->currentIndex());
+    settings.setValue(QStringLiteral("overlays/lightning"), lightningCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/lightningFusion"), lightningFusionCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
     settings.setValue(QStringLiteral("timeline/maximumFrames"), maximumHistoryFrames_);
     settings.setValue(QStringLiteral("timeline/historyVolumes"), historyVolumeCount_);
@@ -1477,6 +1547,33 @@ void MainWindow::showSettingsDialog() {
     overlayRefresh->setRange(30, 600);
     overlayRefresh->setSuffix(QStringLiteral(" s"));
     overlayRefresh->setValue(QSettings().value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt());
+    auto* lightningRefresh = new QSpinBox(&dialog);
+    lightningRefresh->setRange(10, 300);
+    lightningRefresh->setSuffix(QStringLiteral(" s"));
+    lightningRefresh->setValue(QSettings().value(QStringLiteral("lightning/refreshSeconds"), 20).toInt());
+    auto* lightningBackfill = new QSpinBox(&dialog);
+    lightningBackfill->setRange(13, 60);
+    lightningBackfill->setSuffix(QStringLiteral(" min"));
+    lightningBackfill->setValue(QSettings().value(QStringLiteral("lightning/backfillMinutes"), 18).toInt());
+    auto* lightningCell = new QDoubleSpinBox(&dialog);
+    lightningCell->setRange(0.05, 1.0);
+    lightningCell->setSingleStep(0.05);
+    lightningCell->setDecimals(2);
+    lightningCell->setSuffix(QStringLiteral(" deg"));
+    lightningCell->setValue(QSettings().value(QStringLiteral("lightning/cellSizeDeg"), 0.25).toDouble());
+    auto* lightningRate = new QDoubleSpinBox(&dialog);
+    lightningRate->setRange(1.0, 100.0);
+    lightningRate->setSuffix(QStringLiteral(" flashes/min"));
+    lightningRate->setValue(QSettings().value(QStringLiteral("lightning/minFlashRate"), 12.0).toDouble());
+    auto* lightningSigma = new QDoubleSpinBox(&dialog);
+    lightningSigma->setRange(1.0, 10.0);
+    lightningSigma->setSingleStep(0.25);
+    lightningSigma->setSuffix(QStringLiteral(" sigma"));
+    lightningSigma->setValue(QSettings().value(QStringLiteral("lightning/sigmaThreshold"), 2.0).toDouble());
+    auto* lightningWindow = new QDoubleSpinBox(&dialog);
+    lightningWindow->setRange(5.0, 30.0);
+    lightningWindow->setSuffix(QStringLiteral(" min"));
+    lightningWindow->setValue(QSettings().value(QStringLiteral("lightning/sigmaWindowMinutes"), 10.0).toDouble());
     auto* memoryCache = new QSpinBox(&dialog);
     memoryCache->setRange(8, 256);
     memoryCache->setSuffix(QStringLiteral(" MB/panel"));
@@ -1497,6 +1594,12 @@ void MainWindow::showSettingsDialog() {
     form->addRow(QStringLiteral("Initial retry backoff"), backoff);
     form->addRow(QStringLiteral("Radar refresh"), radarRefresh);
     form->addRow(QStringLiteral("Warning/report refresh"), overlayRefresh);
+    form->addRow(QStringLiteral("GLM refresh"), lightningRefresh);
+    form->addRow(QStringLiteral("GLM initial history"), lightningBackfill);
+    form->addRow(QStringLiteral("GLM cell size"), lightningCell);
+    form->addRow(QStringLiteral("GLM minimum rate"), lightningRate);
+    form->addRow(QStringLiteral("GLM jump threshold"), lightningSigma);
+    form->addRow(QStringLiteral("GLM sigma window"), lightningWindow);
     form->addRow(QStringLiteral("Map memory cache (restart)"), memoryCache);
     form->addRow(QStringLiteral("Map disk cache (restart)"), diskCache);
     form->addRow(QStringLiteral("Multi-panel"), synchronize);
@@ -1526,10 +1629,18 @@ void MainWindow::showSettingsDialog() {
     networkSettings.setValue(QStringLiteral("network/retryBackoffMs"), backoff->value());
     networkSettings.setValue(QStringLiteral("network/radarRefreshSeconds"), radarRefresh->value());
     networkSettings.setValue(QStringLiteral("network/overlayRefreshSeconds"), overlayRefresh->value());
+    networkSettings.setValue(QStringLiteral("lightning/refreshSeconds"), lightningRefresh->value());
+    networkSettings.setValue(QStringLiteral("lightning/backfillMinutes"), lightningBackfill->value());
+    networkSettings.setValue(QStringLiteral("lightning/cellSizeDeg"), lightningCell->value());
+    networkSettings.setValue(QStringLiteral("lightning/minFlashRate"), lightningRate->value());
+    networkSettings.setValue(QStringLiteral("lightning/sigmaThreshold"), lightningSigma->value());
+    networkSettings.setValue(QStringLiteral("lightning/sigmaWindowMinutes"), lightningWindow->value());
     networkSettings.setValue(QStringLiteral("cache/memoryMbPerPanel"), memoryCache->value());
     networkSettings.setValue(QStringLiteral("cache/diskMbPerPanel"), diskCache->value());
     refreshTimer_->setInterval(radarRefresh->value() * 1000);
     overlayRefreshTimer_->setInterval(overlayRefresh->value() * 1000);
+    glmSource_->configure(glmConfigFromSettings());
+    glmSource_->refresh();
     for (const auto& session : radarSessions_) {
         while (session->history.size() > static_cast<std::size_t>(maximumHistoryFrames_))
             session->history.erase(session->history.begin());

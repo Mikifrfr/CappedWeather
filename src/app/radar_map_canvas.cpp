@@ -370,6 +370,7 @@ void RadarMapCanvas::setSites(std::vector<RadarSite> sites) {
         siteIndexes_.insert(QString::fromStdString(sites_[index].id), index);
     siteWorldZoom_ = -1;
     invalidateOverlay(true);
+    invalidateLightningFusion();
     update();
 }
 
@@ -379,6 +380,7 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
     if (changed) {
         chunk_.reset();
         invalidateOverlay();
+        invalidateLightningFusion();
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -418,6 +420,7 @@ void RadarMapCanvas::setDecodedChunk(std::shared_ptr<const DecodedChunk> chunk, 
     chunk_ = std::move(chunk);
     dataTime_ = dataTime;
     invalidateOverlay();
+    invalidateLightningFusion();
     refreshVelocityProcessing();
     rebuildProbeIndex();
     refreshScanDiagnostics();
@@ -431,6 +434,76 @@ void RadarMapCanvas::setWeatherOverlays(QVector<WeatherWarning> warnings,
     stormReports_ = std::move(reports);
     ++weatherGeneration_;
     update();
+}
+
+void RadarMapCanvas::setLightningCells(std::vector<LightningCellSnapshot> cells) {
+    lightningCells_ = std::move(cells);
+    invalidateLightningFusion();
+    update();
+}
+
+void RadarMapCanvas::setLightningVisible(const bool visible) {
+    if (lightningVisible_ == visible) return;
+    lightningVisible_ = visible;
+    update();
+}
+
+void RadarMapCanvas::setLightningFusionVisible(const bool visible) {
+    if (lightningFusionVisible_ == visible) return;
+    lightningFusionVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::lightningCellCount() const {
+    return static_cast<int>(lightningCells_.size());
+}
+
+int RadarMapCanvas::radarFeatureCount() const {
+    return static_cast<int>(radarFeatures_.size());
+}
+
+int RadarMapCanvas::lightningFusionCount() const {
+    return static_cast<int>(lightningAssociations_.size());
+}
+
+void RadarMapCanvas::invalidateLightningFusion() {
+    ++lightningFusionGeneration_;
+    radarFeatures_.clear();
+    lightningAssociations_.clear();
+    lightningFusionComputedGeneration_ = 0;
+}
+
+void RadarMapCanvas::rebuildLightningFusion() {
+    if (lightningFusionBuildPending_ ||
+        lightningFusionComputedGeneration_ == lightningFusionGeneration_) return;
+    const auto* site = selectedSite();
+    if (!site || !site->latitude || !site->longitude || !chunk_) {
+        lightningFusionComputedGeneration_ = lightningFusionGeneration_;
+        return;
+    }
+    lightningFusionBuildPending_ = true;
+    const auto generation = lightningFusionGeneration_;
+    const auto chunk = chunk_;
+    const auto cells = lightningCells_;
+    const auto latitude = *site->latitude;
+    const auto longitude = *site->longitude;
+    const QPointer<RadarMapCanvas> guard(this);
+    QThreadPool::globalInstance()->start([guard, generation, chunk, cells, latitude, longitude] {
+        auto features = extractRadarStormFeatures(*chunk, latitude, longitude);
+        auto associations = associateLightningWithRadar(cells, features);
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [guard, generation, features = std::move(features),
+                                          associations = std::move(associations)]() mutable {
+            if (!guard) return;
+            guard->lightningFusionBuildPending_ = false;
+            if (generation == guard->lightningFusionGeneration_) {
+                guard->radarFeatures_ = std::move(features);
+                guard->lightningAssociations_ = std::move(associations);
+                guard->lightningFusionComputedGeneration_ = generation;
+            }
+            guard->update();
+        }, Qt::QueuedConnection);
+    });
 }
 
 void RadarMapCanvas::setWarningsVisible(const bool visible) {
@@ -837,12 +910,19 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
     const auto warningsVisible = warningsVisible_;
     const auto stormReportsVisible = stormReportsVisible_;
     const auto reportKindsVisible = stormReportKindsVisible_;
+    const auto geometryIsCurrent = warningPathsZoom_ == targetZoom &&
+                                   warningPathsGeneration_ == generation &&
+                                   stormReportWorldPoints_.size() == reports.size();
+    const auto cachedPaths = geometryIsCurrent ? warningPaths_ : QVector<CachedWarningPath>{};
+    const auto cachedReportWorldPoints =
+        geometryIsCurrent ? stormReportWorldPoints_ : QVector<QPointF>{};
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start([
         guard, generation, targetZoom, centerCoordinate, viewportSize, devicePixelRatio,
-        warnings, reports, warningFilter, warningsVisible, stormReportsVisible, reportKindsVisible
+        warnings, reports, warningFilter, warningsVisible, stormReportsVisible, reportKindsVisible,
+        geometryIsCurrent, cachedPaths, cachedReportWorldPoints
     ] {
-        constexpr int kOverlayMargin = 256;
+        constexpr int kOverlayMargin = 384;
         const auto worldPointAt = [targetZoom](const double latitude, const double longitude) {
             const auto world = static_cast<double>(RadarMapCanvas::kTileSize * (1 << targetZoom));
             const auto lat = qDegreesToRadians(std::clamp(latitude, -85.0511, 85.0511));
@@ -851,83 +931,112 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
                            (0.5 - std::log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * kPi)) * world);
         };
 
-        QVector<CachedWarningPath> paths;
-        QVector<int> warningOrder;
-        warningOrder.reserve(warnings.size());
-        for (int warningIndex = 0; warningIndex < warnings.size(); ++warningIndex) {
-            const auto& warning = warnings.at(warningIndex);
-            if (!warningFilter.isEmpty() &&
-                !warning.event.contains(warningFilter, Qt::CaseInsensitive) &&
-                !warning.severity.contains(warningFilter, Qt::CaseInsensitive)) continue;
-            warningOrder.push_back(warningIndex);
-        }
-        std::sort(warningOrder.begin(), warningOrder.end(), [&warnings](const int left, const int right) {
-            const auto& leftWarning = warnings.at(left);
-            const auto& rightWarning = warnings.at(right);
-            if (leftWarning.alertPriority != rightWarning.alertPriority)
-                return leftWarning.alertPriority < rightWarning.alertPriority;
-            return left < right;
-        });
+        QVector<CachedWarningPath> paths = cachedPaths;
+        QVector<QPointF> reportWorldPoints = cachedReportWorldPoints;
+        if (!geometryIsCurrent) {
+            QVector<int> warningOrder;
+            warningOrder.reserve(warnings.size());
+            for (int warningIndex = 0; warningIndex < warnings.size(); ++warningIndex) {
+                const auto& warning = warnings.at(warningIndex);
+                if (!warningFilter.isEmpty() &&
+                    !warning.event.contains(warningFilter, Qt::CaseInsensitive) &&
+                    !warning.severity.contains(warningFilter, Qt::CaseInsensitive)) continue;
+                warningOrder.push_back(warningIndex);
+            }
+            std::sort(warningOrder.begin(), warningOrder.end(),
+                      [&warnings](const int left, const int right) {
+                const auto& leftWarning = warnings.at(left);
+                const auto& rightWarning = warnings.at(right);
+                if (leftWarning.alertPriority != rightWarning.alertPriority)
+                    return leftWarning.alertPriority < rightWarning.alertPriority;
+                return left < right;
+            });
 
-        QHash<QRgb, QPainterPath> warningGroups;
-        QVector<QRgb> warningGroupOrder;
-        for (const auto warningIndex : warningOrder) {
-            const auto& warning = warnings.at(warningIndex);
-            const auto color = warning.alertColor.isValid()
-                                   ? warning.alertColor
-                                   : nwsAlertStyle(warning.event).color;
-            auto& group = warningGroups[color.rgba()];
-            if (group.isEmpty()) warningGroupOrder.push_back(color.rgba());
-            for (const auto& geographicPolygon : warning.polygons) {
-                QPainterPath path;
-                path.setFillRule(Qt::OddEvenFill);
-                QPolygonF exterior;
-                exterior.reserve(geographicPolygon.exterior.size());
-                for (const auto& coordinate : geographicPolygon.exterior)
-                    exterior.push_back(worldPointAt(coordinate.y(), coordinate.x()));
-                path.addPolygon(exterior);
-                for (const auto& geographicHole : geographicPolygon.holes) {
-                    QPolygonF hole;
-                    hole.reserve(geographicHole.size());
-                    for (const auto& coordinate : geographicHole)
-                        hole.push_back(worldPointAt(coordinate.y(), coordinate.x()));
-                    path.addPolygon(hole);
+            paths.reserve(warnings.size());
+            for (const auto warningIndex : warningOrder) {
+                const auto& warning = warnings.at(warningIndex);
+                const auto color = warning.alertColor.isValid()
+                                       ? warning.alertColor
+                                       : nwsAlertStyle(warning.event).color;
+                for (const auto& geographicPolygon : warning.polygons) {
+                    QPainterPath path;
+                    path.setFillRule(Qt::OddEvenFill);
+                    QPolygonF exterior;
+                    exterior.reserve(geographicPolygon.exterior.size());
+                    for (const auto& coordinate : geographicPolygon.exterior)
+                        exterior.push_back(worldPointAt(coordinate.y(), coordinate.x()));
+                    path.addPolygon(exterior);
+                    for (const auto& geographicHole : geographicPolygon.holes) {
+                        QPolygonF hole;
+                        hole.reserve(geographicHole.size());
+                        for (const auto& coordinate : geographicHole)
+                            hole.push_back(worldPointAt(coordinate.y(), coordinate.x()));
+                        path.addPolygon(hole);
+                    }
+                    const auto bounds = path.boundingRect();
+                    paths.push_back({warningIndex, color, std::move(path), bounds});
                 }
-                const auto bounds = path.boundingRect();
-                paths.push_back({warningIndex, color, path, bounds});
-                group.addPath(path);
             }
-        }
 
-        QVector<QPointF> reportWorldPoints;
-        reportWorldPoints.reserve(reports.size());
-        std::array<QPainterPath, 3> reportGroups;
-        for (const auto& report : reports) {
-            const auto point = worldPointAt(report.coordinate.y(), report.coordinate.x());
-            reportWorldPoints.push_back(point);
-            const auto kindIndex = static_cast<std::size_t>(report.kind);
-            if (!stormReportsVisible || kindIndex >= reportKindsVisible.size() ||
-                !reportKindsVisible.at(kindIndex)) continue;
-            auto& group = reportGroups.at(kindIndex);
-            if (report.kind == StormReportKind::Tornado) {
-                group.addPolygon(QPolygonF{{point.x(), point.y() - 6.0},
-                                           {point.x() - 5.5, point.y() + 5.0},
-                                           {point.x() + 5.5, point.y() + 5.0}});
-            } else if (report.kind == StormReportKind::Hail) {
-                group.addEllipse(point, 5.0, 5.0);
-            } else {
-                group.addRect(QRectF(point.x() - 4.5, point.y() - 4.5, 9.0, 9.0));
-            }
+            reportWorldPoints.reserve(reports.size());
+            for (const auto& report : reports)
+                reportWorldPoints.push_back(
+                    worldPointAt(report.coordinate.y(), report.coordinate.x()));
         }
 
         const auto overlayLogicalSize = viewportSize + QSize(kOverlayMargin * 2, kOverlayMargin * 2);
+        const auto overlayCenterWorld = worldPointAt(centerCoordinate.y(), centerCoordinate.x());
+        const auto visibleWorldBounds = QRectF(
+            overlayCenterWorld - QPointF(overlayLogicalSize.width() / 2.0,
+                                         overlayLogicalSize.height() / 2.0),
+            QSizeF(overlayLogicalSize));
+        const auto world = static_cast<double>(RadarMapCanvas::kTileSize * (1 << targetZoom));
+
+        QHash<QRgb, QPainterPath> warningGroups;
+        QVector<QRgb> warningGroupOrder;
+        if (warningsVisible) {
+            for (const auto& cached : paths) {
+                for (const auto xOffset : {0.0, -world, world}) {
+                    if (!visibleWorldBounds.intersects(cached.bounds.translated(xOffset, 0.0))) continue;
+                    auto& group = warningGroups[cached.color.rgba()];
+                    if (group.isEmpty()) warningGroupOrder.push_back(cached.color.rgba());
+                    group.addPath(xOffset == 0.0
+                                      ? cached.path
+                                      : cached.path.translated(xOffset, 0.0));
+                }
+            }
+        }
+
+        std::array<QPainterPath, 3> reportGroups;
+        for (qsizetype reportIndex = 0; reportIndex < reports.size(); ++reportIndex) {
+            const auto& report = reports.at(reportIndex);
+            const auto kindIndex = static_cast<std::size_t>(report.kind);
+            if (!stormReportsVisible || kindIndex >= reportKindsVisible.size() ||
+                !reportKindsVisible.at(kindIndex)) continue;
+            if (reportIndex >= reportWorldPoints.size()) continue;
+            const auto basePoint = reportWorldPoints.at(reportIndex);
+            for (const auto xOffset : {0.0, -world, world}) {
+                const auto point = basePoint + QPointF(xOffset, 0.0);
+                if (!visibleWorldBounds.adjusted(-8.0, -8.0, 8.0, 8.0).contains(point)) continue;
+                auto& group = reportGroups.at(kindIndex);
+                if (report.kind == StormReportKind::Tornado) {
+                    group.addPolygon(QPolygonF{{point.x(), point.y() - 6.0},
+                                               {point.x() - 5.5, point.y() + 5.0},
+                                               {point.x() + 5.5, point.y() + 5.0}});
+                } else if (report.kind == StormReportKind::Hail) {
+                    group.addEllipse(point, 5.0, 5.0);
+                } else {
+                    group.addRect(QRectF(point.x() - 4.5, point.y() - 4.5, 9.0, 9.0));
+                }
+            }
+        }
+
         const auto pixelSize = QSize(
             std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.width() * devicePixelRatio))),
             std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.height() * devicePixelRatio))));
         QImage overlayImage(pixelSize, QImage::Format_ARGB32_Premultiplied);
         overlayImage.setDevicePixelRatio(devicePixelRatio);
         overlayImage.fill(Qt::transparent);
-        const auto overlayCenterWorld = worldPointAt(centerCoordinate.y(), centerCoordinate.x());
         QPainter overlayPainter(&overlayImage);
         overlayPainter.setRenderHint(QPainter::Antialiasing, true);
         overlayPainter.setPen(Qt::NoPen);
@@ -974,6 +1083,9 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
                 guard->weatherOverlayZoom_ = targetZoom;
                 guard->weatherOverlayImageGeneration_ = generation;
             }
+            // A drag or data refresh may have overtaken this worker. Start the
+            // newest view immediately instead of waiting for another paint pass.
+            guard->rebuildWeatherOverlay();
             guard->update();
         }, Qt::QueuedConnection);
     });
@@ -1227,6 +1339,80 @@ void RadarMapCanvas::paintWeatherOverlays(QPainter& painter) {
         std::round(width() / 2.0 - scaledSize.width() / 2.0 + dx),
         std::round(height() / 2.0 - scaledSize.height() / 2.0 + dy));
     painter.drawImage(QRectF(topLeft, scaledSize), weatherOverlayImage_);
+    painter.restore();
+}
+
+void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
+    if (!lightningVisible_) return;
+    if (lightningFusionComputedGeneration_ != lightningFusionGeneration_)
+        rebuildLightningFusion();
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (std::size_t index = 0; index < lightningCells_.size(); ++index) {
+        const auto& cell = lightningCells_[index];
+        const auto half = cell.cellSizeDeg * 0.5;
+        QPolygonF polygon;
+        polygon << screenPoint(cell.latitudeCenterDeg - half, cell.longitudeCenterDeg - half)
+                << screenPoint(cell.latitudeCenterDeg - half, cell.longitudeCenterDeg + half)
+                << screenPoint(cell.latitudeCenterDeg + half, cell.longitudeCenterDeg + half)
+                << screenPoint(cell.latitudeCenterDeg + half, cell.longitudeCenterDeg - half);
+        const auto bounds = polygon.boundingRect();
+        if (!QRectF(rect().adjusted(-80, -80, 80, 80)).intersects(bounds)) continue;
+        QColor color;
+        if (!cell.active()) color = QColor(90, 215, 235);
+        else if (cell.sigmaLevel >= 5.0) color = QColor(238, 70, 255);
+        else if (cell.sigmaLevel >= 4.0) color = QColor(255, 74, 74);
+        else if (cell.sigmaLevel >= 3.0) color = QColor(255, 145, 40);
+        else color = QColor(255, 222, 64);
+        painter.setPen(QPen(color, cell.active() ? 2.0 : 1.5,
+                            cell.active() ? Qt::SolidLine : Qt::DashLine));
+        QColor fill = color;
+        fill.setAlpha(cell.active() ? 48 : 20);
+        painter.setBrush(fill);
+        painter.drawPolygon(polygon);
+        if (zoom_ >= 6 && cell.active()) {
+            painter.setPen(QColor(245, 247, 249));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(bounds.adjusted(3, 2, -3, -2), Qt::AlignTop | Qt::AlignLeft,
+                             QStringLiteral("%1 sigma | %2/min")
+                                 .arg(cell.sigmaLevel, 0, 'f', 1)
+                                 .arg(cell.flashRatePerMin, 0, 'f', 0));
+        }
+    }
+
+    if (lightningFusionVisible_) {
+        QSet<int> paintedFeatures;
+        for (const auto& association : lightningAssociations_) {
+            if (association.lightningCellIndex >= lightningCells_.size() ||
+                association.radarFeatureIndex >= radarFeatures_.size()) continue;
+            const auto& cell = lightningCells_[association.lightningCellIndex];
+            const auto& feature = radarFeatures_[association.radarFeatureIndex];
+            const auto cellPoint = screenPoint(cell.latitudeCenterDeg, cell.longitudeCenterDeg);
+            const auto featurePoint = screenPoint(feature.latitudeDeg, feature.longitudeDeg);
+            if (!rect().adjusted(-100, -100, 100, 100).contains(featurePoint.toPoint()) &&
+                !rect().adjusted(-100, -100, 100, 100).contains(cellPoint.toPoint())) continue;
+            const QColor fusionColor = feature.rotating ? QColor(255, 78, 210) : QColor(170, 190, 205);
+            painter.setPen(QPen(fusionColor, feature.rotating ? 2.0 : 1.0, Qt::DashLine));
+            painter.drawLine(cellPoint, featurePoint);
+            if (paintedFeatures.contains(static_cast<int>(association.radarFeatureIndex))) continue;
+            paintedFeatures.insert(static_cast<int>(association.radarFeatureIndex));
+            painter.setBrush(QColor(fusionColor.red(), fusionColor.green(), fusionColor.blue(), 55));
+            painter.setPen(QPen(fusionColor, feature.rotating ? 2.5 : 1.5));
+            painter.drawEllipse(featurePoint, feature.rotating ? 9.0 : 6.0,
+                                feature.rotating ? 9.0 : 6.0);
+            if (zoom_ >= 6) {
+                painter.setPen(QColor(238, 241, 244));
+                painter.setFont(hudFont(7));
+                painter.drawText(QRectF(featurePoint.x() + 11, featurePoint.y() - 18, 190, 36),
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 QStringLiteral("%1 dBZ | shear %2 s^-1 | %3 km")
+                                     .arg(feature.maximumReflectivityDbz, 0, 'f', 0)
+                                     .arg(feature.azimuthalShearPerSecond, 0, 'f', 3)
+                                     .arg(association.distanceKm, 0, 'f', 0));
+            }
+        }
+    }
     painter.restore();
 }
 
@@ -1677,6 +1863,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     requestVisibleTiles();
     paintRadarOverlay(painter);
     paintWeatherOverlays(painter);
+    paintLightningOverlay(painter);
 
     painter.setFont(hudFont(8, QFont::DemiBold));
     QSet<QString> occupiedMarkerCells;

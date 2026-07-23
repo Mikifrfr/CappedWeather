@@ -4,6 +4,8 @@
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 #include "core/velocity_processing.hpp"
+#include "core/lightning_overlay.hpp"
+#include "core/radar_lightning_fusion.hpp"
 #include "app/weather_overlay_source.hpp"
 
 #include <QColor>
@@ -55,6 +57,9 @@ public:
     void setDecodedChunk(DecodedChunk chunk, const QDateTime& dataTime);
     void setDecodedChunk(std::shared_ptr<const DecodedChunk> chunk, const QDateTime& dataTime);
     void setWeatherOverlays(QVector<WeatherWarning> warnings, QVector<StormReport> reports);
+    void setLightningCells(std::vector<LightningCellSnapshot> cells);
+    void setLightningVisible(bool visible);
+    void setLightningFusionVisible(bool visible);
     void setWarningsVisible(bool visible);
     void setStormReportsVisible(bool visible);
     void setStormReportKindVisible(StormReportKind kind, bool visible);
@@ -91,6 +96,10 @@ public:
     void inspectAt(const QPointF& point);
     int warningCount() const;
     int stormReportCount() const;
+    int lightningCellCount() const;
+    const std::vector<LightningCellSnapshot>& lightningCells() const { return lightningCells_; }
+    int radarFeatureCount() const;
+    int lightningFusionCount() const;
 
 signals:
     void radarClicked(const QString& radarId);
@@ -121,6 +130,7 @@ private:
     void invalidateOverlay(bool preserveForZoomTransition = false);
     void paintRadarOverlay(QPainter& painter);
     void paintWeatherOverlays(QPainter& painter);
+    void paintLightningOverlay(QPainter& painter);
     void paintLegend(QPainter& painter);
     void paintProbe(QPainter& painter);
     void paintStationCard(QPainter& painter);
@@ -142,6 +152,8 @@ private:
     bool overlayCacheCoversView() const;
     void rebuildWeatherOverlay();
     bool weatherOverlayCacheCoversView() const;
+    void invalidateLightningFusion();
+    void rebuildLightningFusion();
 
     std::vector<RadarSite> sites_;
     QHash<QString, std::size_t> siteIndexes_;
@@ -165,6 +177,9 @@ private:
     bool weatherOverlayBuildPending_ = false;
     QVector<WeatherWarning> warnings_;
     QVector<StormReport> stormReports_;
+    std::vector<LightningCellSnapshot> lightningCells_;
+    std::vector<RadarStormFeature> radarFeatures_;
+    std::vector<LightningRadarAssociation> lightningAssociations_;
     struct CachedWarningPath {
         int warningIndex = -1;
         QColor color;
@@ -197,6 +212,8 @@ private:
     bool loading_ = false;
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;
+    bool lightningVisible_ = true;
+    bool lightningFusionVisible_ = true;
     std::array<bool, 3> stormReportKindsVisible_{true, true, true};
     PaletteKind palette_ = PaletteKind::Capped;
     QVector<PaletteStop> customPalette_;
@@ -209,6 +226,9 @@ private:
     std::shared_ptr<const ProcessedVelocity> processedVelocity_;
     quint64 velocityGeneration_ = 0;
     bool velocityBuildPending_ = false;
+    quint64 lightningFusionGeneration_ = 1;
+    quint64 lightningFusionComputedGeneration_ = 0;
+    bool lightningFusionBuildPending_ = false;
     QVector<std::pair<double, std::size_t>> probeRayIndex_;
     int loadingAngle_ = 0;
     QTimer* loadingTimer_ = nullptr;

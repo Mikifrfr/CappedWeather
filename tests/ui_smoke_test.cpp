@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QFile>
 #include <QImage>
+#include <QLabel>
 #include <QSlider>
 #include <QProgressBar>
 #include <QSettings>
@@ -36,9 +37,14 @@ int main(int argc, char** argv) {
     auto* secondMap = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
     auto* products = window.findChild<QComboBox*>(QStringLiteral("productCombo"));
     auto* frameSlider = window.findChild<QSlider*>(QStringLiteral("frameSlider"));
+    auto* frameLabel = window.findChild<QLabel*>(QStringLiteral("frameLabel"));
     auto* playButton = window.findChild<QToolButton*>(QStringLiteral("playButton"));
+    auto* snapshotButton = window.findChild<QToolButton*>(QStringLiteral("snapshotButton"));
+    auto* timelineButton = window.findChild<QToolButton*>(QStringLiteral("timelineButton"));
     auto* warningsCheck = window.findChild<QCheckBox*>(QStringLiteral("warningsCheck"));
     auto* reportsCheck = window.findChild<QCheckBox*>(QStringLiteral("reportsCheck"));
+    auto* lightningCheck = window.findChild<QCheckBox*>(QStringLiteral("lightningCheck"));
+    auto* lightningFusionCheck = window.findChild<QCheckBox*>(QStringLiteral("lightningFusionCheck"));
     auto* belowThresholdCheck = window.findChild<QCheckBox*>(QStringLiteral("belowThresholdCheck"));
     auto* stationCombo = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
     auto* liveButton = window.findChild<QToolButton*>(QStringLiteral("liveButton"));
@@ -46,7 +52,9 @@ int main(int argc, char** argv) {
     const auto radarPanels = window.findChildren<RadarMapCanvas*>();
     auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
-    if (!map || !secondMap || !products || !frameSlider || !playButton || !warningsCheck || !reportsCheck ||
+    if (!map || !secondMap || !products || !frameSlider || !frameLabel || !playButton ||
+        !snapshotButton || !timelineButton || !warningsCheck || !reportsCheck ||
+        !lightningCheck || !lightningFusionCheck ||
         !belowThresholdCheck ||
         !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
         !model || model->rowCount() < 200 || !panelLayout || panelLayout->count() != 4 ||
@@ -63,6 +71,18 @@ int main(int argc, char** argv) {
         std::cerr << "Responsive controls overflow at 1024 px: window=" << window.width()
                   << " controlRight=" << belowThresholdBottomRight.x()
                   << " contentRight=" << window.rect().right() << '\n';
+        return 1;
+    }
+    const auto frameLabelBottomRight = frameLabel->mapTo(&window, frameLabel->rect().bottomRight());
+    const auto snapshotTopLeft = snapshotButton->mapTo(&window, snapshotButton->rect().topLeft());
+    const auto timelineBottomRight = timelineButton->mapTo(&window, timelineButton->rect().bottomRight());
+    if (frameLabelBottomRight.x() >= snapshotTopLeft.x() ||
+        !window.rect().contains(timelineBottomRight) ||
+        frameLabel->width() < 185) {
+        std::cerr << "Playback details overlap export controls: labelRight=" << frameLabelBottomRight.x()
+                  << " snapshotLeft=" << snapshotTopLeft.x()
+                  << " labelWidth=" << frameLabel->width()
+                  << " timelineRight=" << timelineBottomRight.x() << '\n';
         return 1;
     }
 
@@ -242,6 +262,23 @@ int main(int argc, char** argv) {
     map->setProduct(ProductKind::Reflectivity);
     map->setElevationFilter(1);
     map->setDecodedChunk({"TATL", {ray}, 1}, QDateTime::currentDateTimeUtc());
+    LightningCellSnapshot lightning;
+    lightning.latitudeCenterDeg = 33.65;
+    lightning.longitudeCenterDeg = -84.05;
+    lightning.sigmaLevel = 3.2;
+    lightning.flashRatePerMin = 28.0;
+    map->setLightningCells({lightning});
+    if (map->lightningCellCount() != 1) {
+        std::cerr << "GLM lightning overlay did not reach the map\n";
+        return 1;
+    }
+    lightningCheck->setChecked(false);
+    application.processEvents();
+    if (lightningFusionCheck->isEnabled()) {
+        std::cerr << "Fusion control remained enabled while GLM overlay was disabled\n";
+        return 1;
+    }
+    lightningCheck->setChecked(true);
     map->recenterSelected();
     map->setVolumeQuality(9, 10, 1);
     map->setPalette(RadarMapCanvas::PaletteKind::Operational);

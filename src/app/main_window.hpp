@@ -30,6 +30,7 @@ class QToolButton;
 namespace cappedweather {
 
 class NexradSource;
+class GlmSource;
 class RadarMapCanvas;
 class RadarListModel;
 class WeatherOverlaySource;
@@ -156,7 +157,10 @@ private:
     QCheckBox* hailCheck_ = nullptr;
     QCheckBox* windCheck_ = nullptr;
     QCheckBox* belowThresholdCheck_ = nullptr;
+    QCheckBox* lightningCheck_ = nullptr;
+    QCheckBox* lightningFusionCheck_ = nullptr;
     NexradSource* source_ = nullptr;
+    GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
     QTimer* refreshTimer_ = nullptr;
     QTimer* overlayRefreshTimer_ = nullptr;
@@ -164,6 +168,7 @@ private:
     QString selectedRadarId_;
     QString radarStatus_ = QStringLiteral("Waiting for NOAA radar data");
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
+    QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");
     QStringList recentRadarIds_;
     QSet<QString> favoriteRadarIds_;
     QHash<QString, std::shared_ptr<RadarSession>> radarSessions_;

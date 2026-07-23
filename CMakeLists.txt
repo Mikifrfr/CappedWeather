@@ -23,6 +23,10 @@ add_library(cappedweather_core STATIC
     src/core/scan_diagnostics.cpp
     src/core/velocity_processing.cpp
     src/core/s3_object.cpp
+    src/core/lightning_jump.cpp
+    src/core/flash_rate_grid.cpp
+    src/core/glm_l2_reader.cpp
+    src/core/radar_lightning_fusion.cpp
 )
 
 target_include_directories(cappedweather_core
@@ -36,6 +40,23 @@ else()
     target_compile_options(cappedweather_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Optional netCDF-C for the GLM L2 LCFA reader (vcpkg: netcdf-c).
+# Without it the reader stubs out; S3 key helpers and the LJA core still build.
+find_package(netCDF QUIET)
+set(CAPPEDWEATHER_NETCDF_TARGET "")
+if(TARGET netCDF::netcdf)
+    set(CAPPEDWEATHER_NETCDF_TARGET netCDF::netcdf)
+elseif(TARGET netcdf)
+    set(CAPPEDWEATHER_NETCDF_TARGET netcdf)
+endif()
+if(CAPPEDWEATHER_NETCDF_TARGET)
+    target_link_libraries(cappedweather_core PUBLIC ${CAPPEDWEATHER_NETCDF_TARGET})
+    target_compile_definitions(cappedweather_core PRIVATE CAPPEDWEATHER_HAS_NETCDF=1)
+    message(STATUS "netCDF found: GLM L2 reader enabled")
+else()
+    message(STATUS "netCDF not found: GLM L2 reader stubbed (key helpers still available)")
+endif()
+
 if(BUILD_TESTING)
     add_executable(cappedweather_core_tests
         tests/core_tests.cpp
@@ -43,6 +64,9 @@ if(BUILD_TESTING)
     target_link_libraries(cappedweather_core_tests PRIVATE cappedweather_core)
     add_test(NAME cappedweather_core_tests COMMAND cappedweather_core_tests)
 endif()
+
+add_executable(glm_replay tools/glm_replay.cpp)
+target_link_libraries(glm_replay PRIVATE cappedweather_core)
 
 if(CAPPEDWEATHER_BUILD_APP)
     find_package(Qt6 6.4 COMPONENTS Core Gui Widgets Network Xml QUIET)
@@ -59,6 +83,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/cross_section_widget.hpp
             src/app/gif_writer.cpp
             src/app/gif_writer.hpp
+            src/app/glm_source.cpp
+            src/app/glm_source.hpp
             src/app/main_window.cpp
             src/app/main_window.hpp
             src/app/radar_map_canvas.cpp
@@ -130,7 +156,33 @@ if(CAPPEDWEATHER_BUILD_APP)
             )
             add_test(NAME cappedweather_ui_tests COMMAND cappedweather_ui_tests -platform offscreen)
             set_tests_properties(cappedweather_ui_tests PROPERTIES
-                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CAPPEDWEATHER_QT_ROOT}/plugins;PATH=${CAPPEDWEATHER_QT_ROOT}/bin"
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CAPPEDWEATHER_QT_ROOT}/plugins"
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CAPPEDWEATHER_QT_ROOT}/bin"
+            )
+            if(CAPPEDWEATHER_NETCDF_TARGET)
+                set_property(TEST cappedweather_ui_tests APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:${CAPPEDWEATHER_NETCDF_TARGET}>"
+                )
+            endif()
+
+            qt_add_executable(cappedweather_live_gui_probe
+                tests/live_gui_probe.cpp
+                ${CAPPEDWEATHER_UI_SOURCES}
+            )
+            target_link_libraries(cappedweather_live_gui_probe PRIVATE
+                cappedweather_core
+                Qt6::Core
+                Qt6::Gui
+                Qt6::Widgets
+                Qt6::Network
+                Qt6::Xml
+                BZip2::BZip2
+            )
+            target_compile_definitions(cappedweather_live_gui_probe PRIVATE
+                CAPPEDWEATHER_HAS_BZIP2=1
+                CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
+                NOMINMAX
+                WIN32_LEAN_AND_MEAN
             )
         endif()
 
@@ -139,10 +191,22 @@ if(CAPPEDWEATHER_BUILD_APP)
             MACOSX_BUNDLE TRUE
         )
 
-        install(TARGETS CappedWeather
-            BUNDLE DESTINATION .
-            RUNTIME DESTINATION bin
-        )
+        if(WIN32 AND CAPPEDWEATHER_NETCDF_TARGET)
+            install(TARGETS CappedWeather
+                RUNTIME_DEPENDENCIES
+                    DIRECTORIES "$<TARGET_FILE_DIR:${CAPPEDWEATHER_NETCDF_TARGET}>"
+                                "${CAPPEDWEATHER_QT_ROOT}/bin"
+                    PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+                    POST_EXCLUDE_REGEXES ".*[Ss]ystem32/.*"
+                BUNDLE DESTINATION .
+                RUNTIME DESTINATION bin
+            )
+        else()
+            install(TARGETS CappedWeather
+                BUNDLE DESTINATION .
+                RUNTIME DESTINATION bin
+            )
+        endif()
         qt_generate_deploy_app_script(
             TARGET CappedWeather
             OUTPUT_SCRIPT CAPPEDWEATHER_DEPLOY_SCRIPT

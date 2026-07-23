@@ -6,3 +6,8 @@
 /CappedWeather-*.zip
 *.user
 *.suo
+
+/data/glm/
+/data/verification/results/
+__pycache__/
+*.py[cod]

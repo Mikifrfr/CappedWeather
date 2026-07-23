@@ -6,6 +6,10 @@
 #include "core/scan_diagnostics.hpp"
 #include "core/velocity_processing.hpp"
 #include "core/s3_object.hpp"
+#include "core/lightning_jump.hpp"
+#include "core/flash_rate_grid.hpp"
+#include "core/glm_l2_reader.hpp"
+#include "core/radar_lightning_fusion.hpp"
 
 #include <array>
 #include <algorithm>
@@ -283,6 +287,163 @@ void testOptionalRealChunk() {
     }
 }
 
+void testLightningJumpDetection() {
+    // 2026-07-20T14:00:00Z, aligned to a 60 s bin boundary.
+    const std::int64_t t0 = 1784556000;
+
+    LightningJumpDetector detector({});
+    // 20 min of wobbling ~10-14 fl/min baseline (nonzero dfrdt variance).
+    for (int m = 0; m < 20; ++m) {
+        const int n = (m % 2 == 0) ? 10 : 14;
+        for (int k = 0; k < n; ++k) {
+            detector.addFlash(static_cast<double>(t0 + m * 60 + k));
+        }
+    }
+    auto events = detector.poll(t0 + 20 * 60);
+    assert(events.empty());
+    assert(!detector.jumpActive());
+
+    // Surge minute: 60 flashes in one bin -> classic >=2 sigma jump.
+    for (int k = 0; k < 60; ++k) {
+        detector.addFlash(static_cast<double>(t0 + 20 * 60 + k));
+    }
+    events = detector.poll(t0 + 21 * 60);
+    assert(events.size() == 1);
+    assert(events[0].kind == JumpEventKind::JumpStart);
+    assert(events[0].sigmaLevel >= 2.0);
+    assert(events[0].flashRatePerMin == 60.0);
+    assert(events[0].timeEpochSec == t0 + 20 * 60);
+    assert(detector.jumpActive());
+    assert(detector.lastSigmaLevel() >= 2.0);
+
+    // Data stops: empty bins must decay into jump cessation (dfrdt < 0).
+    events = detector.poll(t0 + 26 * 60);
+    assert(events.size() == 1);
+    assert(events[0].kind == JumpEventKind::JumpCessation);
+    assert(events[0].timeEpochSec == t0 + 21 * 60);
+    assert(!detector.jumpActive());
+}
+
+void testLightningJumpNoiseFloor() {
+    const std::int64_t t0 = 1784556000;
+
+    LightningJumpDetector detector({});
+    for (int m = 0; m < 20; ++m) {
+        const int n = (m % 2 == 0) ? 2 : 3;
+        for (int k = 0; k < n; ++k) {
+            detector.addFlash(static_cast<double>(t0 + m * 60 + k));
+        }
+    }
+    // Surge that passes 2 sigma but stays below the 10 fl/min noise floor.
+    for (int k = 0; k < 9; ++k) {
+        detector.addFlash(static_cast<double>(t0 + 20 * 60 + k));
+    }
+    const auto events = detector.poll(t0 + 21 * 60);
+    assert(events.empty());
+    assert(!detector.jumpActive());
+}
+
+void testFlashRateGrid() {
+    const std::int64_t t0 = 1784556000;
+
+    FlashRateGrid grid({});
+    for (int m = 0; m < 20; ++m) {
+        const int n = (m % 2 == 0) ? 10 : 14;
+        for (int k = 0; k < n; ++k) {
+            grid.addFlash(static_cast<double>(t0 + m * 60 + k), 35.1, -97.1);   // OKC-ish
+            grid.addFlash(static_cast<double>(t0 + m * 60 + k), 40.1, -100.1); // quiet cell
+        }
+    }
+    assert(grid.poll(t0 + 20 * 60).empty());
+    assert(grid.activeCellCount() == 2);
+
+    for (int k = 0; k < 60; ++k) {
+        grid.addFlash(static_cast<double>(t0 + 20 * 60 + k), 35.1, -97.1);
+    }
+    const auto events = grid.poll(t0 + 21 * 60);
+    assert(events.size() == 1);
+    assert(events[0].kind == JumpEventKind::JumpStart);
+    // 0.25 deg cells: floor(35.1/0.25) = 140, floor(-97.1/0.25) = -389.
+    assert(events[0].cellY == 140);
+    assert(events[0].cellX == -389);
+}
+
+void testFlashRateGridUsesConfiguredDetectorAndPrunes() {
+    const std::int64_t t0 = 1784556000;
+    FlashRateGridConfig config;
+    config.jump.minFlashRatePerMin = 100.0;
+    config.inactiveCellTtlSec = 120.0;
+    FlashRateGrid grid(config);
+    for (int minute = 0; minute < 20; ++minute) {
+        const int flashes = minute % 2 == 0 ? 10 : 14;
+        for (int k = 0; k < flashes; ++k)
+            grid.addFlash(t0 + minute * 60 + k, 35.1, -97.1);
+    }
+    grid.poll(t0 + 20 * 60);
+    for (int k = 0; k < 60; ++k)
+        grid.addFlash(t0 + 20 * 60 + k, 35.1, -97.1);
+    assert(grid.poll(t0 + 21 * 60).empty()); // custom 100/min floor is honored
+    grid.poll(t0 + 24 * 60);
+    assert(grid.activeCellCount() == 0);
+}
+
+DecodedRay syntheticFusionRay(const float azimuth, const ProductKind product,
+                              const std::uint16_t encoded) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = 1;
+    ray.elevationDegrees = 0.5F;
+    const auto index = static_cast<std::size_t>(product);
+    ray.fields[index] = std::vector<std::uint16_t>(32, encoded);
+    ray.firstGateByProduct[index] = 5000;
+    ray.gateSpacingByProduct[index] = 1000;
+    ray.scaleByProduct[index] = 2.0F;
+    ray.offsetByProduct[index] = product == ProductKind::Reflectivity ? 66.0F : 129.0F;
+    return ray;
+}
+
+void testRadarLightningFusion() {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticFusionRay(89.0F, ProductKind::Reflectivity, 156)); // 45 dBZ
+    chunk.rays.push_back(syntheticFusionRay(90.0F, ProductKind::Reflectivity, 156));
+    chunk.rays.push_back(syntheticFusionRay(89.0F, ProductKind::Velocity, 89));  // -20 m/s
+    chunk.rays.push_back(syntheticFusionRay(91.0F, ProductKind::Velocity, 169)); // +20 m/s
+
+    RadarFeatureConfig config;
+    config.gridSizeDeg = 0.02;
+    config.minimumReflectivityCells = 1;
+    config.minimumAzimuthalShearPerSecond = 0.0005;
+    const auto features = extractRadarStormFeatures(chunk, 35.333, -97.278, config);
+    assert(!features.empty());
+    assert(features.front().maximumReflectivityDbz >= 45.0);
+    assert(features.front().velocitySpanMetersPerSecond >= 40.0);
+    assert(features.front().rotating);
+
+    LightningCellSnapshot lightning;
+    lightning.latitudeCenterDeg = features.front().latitudeDeg;
+    lightning.longitudeCenterDeg = features.front().longitudeDeg;
+    const auto associations = associateLightningWithRadar({lightning}, features, config);
+    assert(associations.size() == 1);
+    assert(associations.front().distanceKm < 0.1);
+    assert(associations.front().radarFeatureIndex == 0);
+}
+
+void testGlmL2Keys() {
+    assert(glmLcfaPrefix(2026, 201, 14) == "GLM-L2-LCFA/2026/201/14/");
+    assert(glmLcfaPrefix(2026, 3, 4) == "GLM-L2-LCFA/2026/003/04/");
+
+    const auto start = parseGlmLcfaStartTime(
+        "OR_GLM-L2-LCFA_G19_s20262011400000_e20262011400200_c20262011400220.nc");
+    assert(start.has_value());
+    assert(*start == 1784556000); // 2026-07-20T14:00:00Z (doy 201)
+
+    assert(!parseGlmLcfaStartTime("OR_ABI-L2-CMIPC_G19_s20262011400000.nc").has_value());
+    assert(!parseGlmLcfaStartTime("OR_GLM-L2-LCFA_G19_s20269991400000.nc").has_value());
+    assert(!parseGlmLcfaStartTime("random_file.nc").has_value());
+}
+
 int main() {
     testProducts();
     testCatalog();
@@ -296,5 +457,11 @@ int main() {
     testMessage31SixteenBitMoment();
     testMessage31MalformedInputs();
     testOptionalRealChunk();
+    testLightningJumpDetection();
+    testLightningJumpNoiseFloor();
+    testFlashRateGrid();
+    testFlashRateGridUsesConfiguredDetectorAndPrunes();
+    testGlmL2Keys();
+    testRadarLightningFusion();
     std::cout << "core tests passed\n";
 }

@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {
+      "id": "2025-05-16-midwest",
+      "glm_dir": "data/glm/20250516",
+      "warnings": "data/verification/20250516-warnings.geojson",
+      "phenomena": ["TO", "SV"],
+      "lead_min": 0,
+      "lead_max": 120,
+      "radius_km": 35,
+      "domain_margin_deg": 1.0,
+      "coverage_windows": [
+        ["2025-05-16T19:00:00Z", "2025-05-16T21:00:00Z"],
+        ["2025-05-17T02:00:00Z", "2025-05-17T05:00:00Z"]
+      ]
+    },
+    {
+      "id": "2025-05-18-kansas",
+      "glm_dir": "data/glm/20250518",
+      "warnings": "data/verification/20250518-warnings.geojson",
+      "phenomena": ["TO", "SV"],
+      "lead_min": 0,
+      "lead_max": 120,
+      "radius_km": 35,
+      "domain_margin_deg": 1.0,
+      "coverage_windows": [
+        ["2025-05-18T22:00:00Z", "2025-05-19T04:30:00Z"]
+      ]
+    }
+  ]
+}
