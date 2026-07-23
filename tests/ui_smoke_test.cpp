@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
         "geometry":{"type":"Polygon","coordinates":[[[-98.0,35.0],[-97.0,35.0],[-97.0,36.0],[-98.0,35.0]],
                                                                [[-97.8,35.1],[-97.5,35.1],[-97.6,35.3],[-97.8,35.1]]]},
         "properties":{"event":"Tornado Warning","headline":"Test warning","severity":"Extreme",
-                      "senderName":"NWS Norman","description":"Observed tornado","instruction":"Take shelter now",
+                      "senderName":"NWS Norman","description":"Observed tornado. Long warning details for smooth scrolling. Long warning details for smooth scrolling. Long warning details for smooth scrolling. Long warning details for smooth scrolling. Long warning details for smooth scrolling. Long warning details for smooth scrolling. Long warning details for smooth scrolling. Long warning details for smooth scrolling.","instruction":"Take shelter now",
                       "onset":"2026-07-13T19:00:00+00:00","expires":"2026-07-13T20:00:00+00:00"}
       }]})JSON";
     QString parseError;
@@ -224,6 +224,17 @@ int main(int argc, char** argv) {
     application.processEvents();
     if (map->infoCardRect().topLeft() == initialCardRect.topLeft()) {
         std::cerr << "Warning detail card could not be dragged by its header\n";
+        return 1;
+    }
+    const auto scrollPosition = map->infoCardRect().center();
+    QWheelEvent partialWheel(
+        scrollPosition, map->mapToGlobal(scrollPosition.toPoint()),
+        QPoint{}, QPoint(0, -30), Qt::NoButton, Qt::NoModifier,
+        Qt::ScrollUpdate, false);
+    QCoreApplication::sendEvent(map, &partialWheel);
+    QTest::qWait(80);
+    if (map->infoCardScrollOffset() <= 0.0) {
+        std::cerr << "Warning detail card discarded high-resolution wheel input\n";
         return 1;
     }
     QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, QPoint(8, map->height() - 8));

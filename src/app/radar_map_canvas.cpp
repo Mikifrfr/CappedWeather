@@ -359,6 +359,19 @@ RadarMapCanvas::RadarMapCanvas(QWidget* parent)
         hoverRadarId_ = radarAt(pendingProbePosition_);
         updateProbe(pendingProbePosition_);
     });
+    pinnedInfoScrollTimer_ = new QTimer(this);
+    pinnedInfoScrollTimer_->setTimerType(Qt::PreciseTimer);
+    pinnedInfoScrollTimer_->setInterval(16);
+    connect(pinnedInfoScrollTimer_, &QTimer::timeout, this, [this] {
+        const auto distance = pinnedInfoScrollTarget_ - pinnedInfoScrollOffset_;
+        if (std::abs(distance) < 0.2) {
+            pinnedInfoScrollOffset_ = pinnedInfoScrollTarget_;
+            pinnedInfoScrollTimer_->stop();
+        } else {
+            pinnedInfoScrollOffset_ += distance * 0.32;
+        }
+        update(pinnedInfoCardRect_.adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect());
+    });
 }
 
 RadarMapCanvas::~RadarMapCanvas() = default;
@@ -1568,7 +1581,10 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         pinnedInfoContentHeight_ = static_cast<int>(std::ceil(bodyHeight));
         const auto maximumScroll = std::max(
             0, pinnedInfoContentHeight_ - static_cast<int>(std::floor(bodyRect.height())));
-        pinnedInfoScrollOffset_ = std::clamp(pinnedInfoScrollOffset_, 0, maximumScroll);
+        pinnedInfoScrollOffset_ = std::clamp(
+            pinnedInfoScrollOffset_, 0.0, static_cast<double>(maximumScroll));
+        pinnedInfoScrollTarget_ = std::clamp(
+            pinnedInfoScrollTarget_, 0.0, static_cast<double>(maximumScroll));
         painter.save();
         painter.setClipRect(bodyRect);
         painter.setPen(QColor("#cbd6dc"));
@@ -1598,7 +1614,9 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
     pinnedInfoCardRect_ = {};
     pinnedInfoBodyRect_ = {};
     pinnedInfoContentHeight_ = 0;
-    pinnedInfoScrollOffset_ = 0;
+    pinnedInfoScrollOffset_ = 0.0;
+    pinnedInfoScrollTarget_ = 0.0;
+    pinnedInfoScrollTimer_->stop();
     const auto metrics = painter.fontMetrics();
     const auto textWidth = metrics.horizontalAdvance(probeText_);
     auto x = probePosition_.x() + 14.0;
@@ -2113,7 +2131,11 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
                 emit radarClicked(radarId);
             } else {
                 const auto selectedInfo = overlayAt(event->position());
-                if (selectedInfo != pinnedInfo_) pinnedInfoScrollOffset_ = 0;
+                if (selectedInfo != pinnedInfo_) {
+                    pinnedInfoScrollOffset_ = 0.0;
+                    pinnedInfoScrollTarget_ = 0.0;
+                    pinnedInfoScrollTimer_->stop();
+                }
                 pinnedInfo_ = selectedInfo;
                 probePosition_ = event->position();
                 probeText_ = pinnedInfo_;
@@ -2129,12 +2151,21 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
 void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
     if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position()) &&
         pinnedInfoContentHeight_ > pinnedInfoBodyRect_.height()) {
-        const auto maximumScroll = std::max(
-            0, pinnedInfoContentHeight_ - static_cast<int>(std::floor(pinnedInfoBodyRect_.height())));
-        const auto steps = event->angleDelta().y() / 120;
-        pinnedInfoScrollOffset_ = std::clamp(
-            pinnedInfoScrollOffset_ - steps * 36, 0, maximumScroll);
-        update();
+        const auto maximumScroll = static_cast<double>(std::max(
+            0, pinnedInfoContentHeight_ - static_cast<int>(std::floor(pinnedInfoBodyRect_.height()))));
+        const auto pixelDelta = event->pixelDelta().y();
+        const auto scrollDelta = pixelDelta != 0
+            ? static_cast<double>(pixelDelta)
+            : static_cast<double>(event->angleDelta().y()) * 0.45;
+        if (scrollDelta == 0.0) {
+            event->accept();
+            return;
+        }
+        if (!pinnedInfoScrollTimer_->isActive())
+            pinnedInfoScrollTarget_ = pinnedInfoScrollOffset_;
+        pinnedInfoScrollTarget_ = std::clamp(
+            pinnedInfoScrollTarget_ - scrollDelta, 0.0, maximumScroll);
+        pinnedInfoScrollTimer_->start();
         event->accept();
         return;
     }

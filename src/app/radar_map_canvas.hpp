@@ -94,6 +94,7 @@ public:
                                 const QVector<PaletteStop>& custom = {});
     QString probeText() const;
     QRectF infoCardRect() const { return pinnedInfoCardRect_; }
+    double infoCardScrollOffset() const { return pinnedInfoScrollOffset_; }
     void inspectAt(const QPointF& point);
     int warningCount() const;
     int stormReportCount() const;
@@ -208,7 +209,8 @@ private:
     QRectF pinnedInfoBodyRect_;
     QPointF pinnedInfoCardPosition_{-1.0, -1.0};
     QPointF pinnedInfoDragOffset_;
-    int pinnedInfoScrollOffset_ = 0;
+    double pinnedInfoScrollOffset_ = 0.0;
+    double pinnedInfoScrollTarget_ = 0.0;
     int pinnedInfoContentHeight_ = 0;
     bool draggingPinnedInfoCard_ = false;
     QPointF center_{-96.5, 38.5}; // longitude, latitude
@@ -240,6 +242,7 @@ private:
     int loadingAngle_ = 0;
     QTimer* loadingTimer_ = nullptr;
     QTimer* probeTimer_ = nullptr;
+    QTimer* pinnedInfoScrollTimer_ = nullptr;
     QPointF pendingProbePosition_;
     QPointF probePosition_;
     QString probeText_;

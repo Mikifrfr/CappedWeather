@@ -41,6 +41,14 @@ int main(int argc, char** argv) {
                   << " cells=" << cells.size()
                   << " latest=" << latestDataTime.toUTC().toString(Qt::ISODate).toStdString()
                   << '\n';
+        for (const auto& cell : cells) {
+            std::cout << "cell="
+                      << cell.latitudeCenterDeg << ',' << cell.longitudeCenterDeg
+                      << " sigma=" << cell.sigmaLevel
+                      << " rate=" << cell.flashRatePerMin
+                      << " active=" << (cell.active() ? "yes" : "no")
+                      << '\n';
+        }
         application.exit(0);
     });
     QObject::connect(&timeout, &QTimer::timeout, [&] {
