@@ -7,7 +7,9 @@
 #include "app/weather_overlay_source.hpp"
 #include "app/cross_section_widget.hpp"
 #include "app/gif_writer.hpp"
+#include "app/shortcut_help_dialog.hpp"
 #include "core/level2_decoder.hpp"
+#include "core/glm_l2_reader.hpp"
 #include "core/product.hpp"
 
 #include <QApplication>
@@ -40,6 +42,7 @@
 #include <QMessageBox>
 #include <QPalette>
 #include <QProgressBar>
+#include <QResizeEvent>
 #include <QPushButton>
 #include <QPointer>
 #include <QSettings>
@@ -290,6 +293,14 @@ MainWindow::MainWindow(QWidget* parent)
     for (int product = 0; product < productCombo_->count() && product < 9; ++product) {
         addShortcut(QKeySequence(Qt::Key_1 + product), [this, product] { productCombo_->setCurrentIndex(product); });
     }
+    addShortcut(QKeySequence(QStringLiteral("?")), [this] {
+        ShortcutHelpDialog dialog(this);
+        dialog.exec();
+    });
+    addShortcut(QKeySequence(Qt::Key_F1), [this] {
+        ShortcutHelpDialog dialog(this);
+        dialog.exec();
+    });
 
     restoreSettings();
 
@@ -436,6 +447,18 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     setPanelLayout(0);
     setCentralWidget(mapHost);
 
+    emptyStateHint_ = new QLabel(mapHost);
+    emptyStateHint_->setObjectName(QStringLiteral("emptyStateHint"));
+    emptyStateHint_->setText(QStringLiteral(
+        "Welcome to CappedWeather — pick a radar to begin. "
+        "Tip: Station list → LIVE → timeline → overlays."));
+    emptyStateHint_->setAlignment(Qt::AlignCenter);
+    emptyStateHint_->setWordWrap(true);
+    emptyStateHint_->setStyleSheet(QStringLiteral(
+        "color: #d4d6d9; background: rgba(26,27,30,200); padding: 10px; border-radius: 6px;"));
+    emptyStateHint_->raise();
+    emptyStateHint_->show();
+
     controlDock_ = new QDockWidget(QStringLiteral("RADAR"), this);
     controlDock_->setObjectName(QStringLiteral("controlDock"));
     controlDock_->setFeatures(QDockWidget::DockWidgetMovable);
@@ -525,6 +548,22 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     lightningFusionCheck_->setChecked(true);
     lightningFusionCheck_->setToolTip(QStringLiteral("Associate GLM jumps with reflectivity objects and azimuthal shear"));
     controlLayout->addWidget(lightningFusionCheck_);
+    if (!cappedweather::glmL2ReaderAvailable()) {
+        lightningCheck_->setEnabled(false);
+        lightningCheck_->setChecked(false);
+        lightningCheck_->setToolTip(QStringLiteral(
+            "GLM lightning jumps require a CappedWeather build with netCDF-C support. "
+            "Reinstall with netCDF or set CAPPEDWEATHER_REQUIRE_NETCDF=OFF to use a stub."));
+        lightningFusionCheck_->setEnabled(false);
+        lightningFusionCheck_->setChecked(false);
+        lightningFusionCheck_->setToolTip(QStringLiteral(
+            "Radar fusion requires live GLM data, which is disabled in this build."));
+    }
+    glmStatusNote_ = new QLabel(controlBody);
+    glmStatusNote_->setObjectName(QStringLiteral("glmStatusNote"));
+    glmStatusNote_->setWordWrap(true);
+    glmStatusNote_->setVisible(false);
+    controlLayout->addWidget(glmStatusNote_);
     warningFilterCombo_ = new QComboBox(controlBody);
     warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
                                    QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
@@ -851,6 +890,20 @@ void MainWindow::updateUnifiedStatus() {
                             .arg(radarStatus_, overlayStatus_, lightningStatus_);
     unifiedStatusLabel_->setText(status);
     unifiedStatusLabel_->setToolTip(status);
+    if (glmStatusNote_) {
+        if (!cappedweather::glmL2ReaderAvailable()) {
+            glmStatusNote_->setText(QStringLiteral("GLM disabled (netCDF-C unavailable)"));
+            glmStatusNote_->setStyleSheet(QStringLiteral("color: #ff8a80;"));
+            glmStatusNote_->setVisible(true);
+        } else if (lightningStatus_.startsWith(QStringLiteral("GLM disabled"))) {
+            glmStatusNote_->setText(lightningStatus_);
+            glmStatusNote_->setStyleSheet(QStringLiteral("color: #ff8a80;"));
+            glmStatusNote_->setVisible(true);
+        } else {
+            glmStatusNote_->setVisible(false);
+            glmStatusNote_->setStyleSheet(QString());
+        }
+    }
 }
 
 QString MainWindow::selectedRadarId() const {
@@ -885,7 +938,23 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     return QMainWindow::eventFilter(watched, event);
 }
 
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    if (emptyStateHint_ && emptyStateHint_->isVisible()) {
+        const auto* parent = emptyStateHint_->parentWidget();
+        if (parent) {
+            const auto hintWidth = std::min(520, parent->width() - 40);
+            emptyStateHint_->setGeometry(
+                (parent->width() - hintWidth) / 2,
+                (parent->height() - emptyStateHint_->sizeHint().height()) / 2,
+                hintWidth,
+                emptyStateHint_->sizeHint().height());
+        }
+    }
+}
+
 void MainWindow::radarSelected(const QModelIndex& index) {
+    if (emptyStateHint_) emptyStateHint_->hide();
     if (!index.isValid()) {
         return;
     }
@@ -1457,8 +1526,10 @@ void MainWindow::restoreSettings() {
     hailCheck_->setChecked(settings.value(QStringLiteral("overlays/hail"), true).toBool());
     windCheck_->setChecked(settings.value(QStringLiteral("overlays/wind"), true).toBool());
     belowThresholdCheck_->setChecked(settings.value(QStringLiteral("view/belowThreshold"), false).toBool());
-    lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
-    lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
+    if (lightningCheck_->isEnabled())
+        lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
+    if (lightningFusionCheck_->isEnabled())
+        lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
     speedCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("timeline/speed"), 1).toInt(),
                                             0, speedCombo_->count() - 1));
     panelLayoutCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("panels/layout"), 0).toInt(),

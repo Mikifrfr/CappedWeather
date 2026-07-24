@@ -3,6 +3,7 @@
 #include "app/radar_list_model.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/gif_writer.hpp"
+#include "app/shortcut_help_dialog.hpp"
 #include "core/product.hpp"
 
 #include <QApplication>
@@ -46,6 +47,7 @@ int main(int argc, char** argv) {
     auto* reportsCheck = window.findChild<QCheckBox*>(QStringLiteral("reportsCheck"));
     auto* lightningCheck = window.findChild<QCheckBox*>(QStringLiteral("lightningCheck"));
     auto* lightningFusionCheck = window.findChild<QCheckBox*>(QStringLiteral("lightningFusionCheck"));
+    auto* glmStatusNote = window.findChild<QLabel*>(QStringLiteral("glmStatusNote"));
     auto* belowThresholdCheck = window.findChild<QCheckBox*>(QStringLiteral("belowThresholdCheck"));
     auto* stationCombo = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
     auto* liveButton = window.findChild<QToolButton*>(QStringLiteral("liveButton"));
@@ -61,8 +63,13 @@ int main(int argc, char** argv) {
         !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
         !model || model->rowCount() < 200 || !panelLayout || panelLayout->count() != 4 ||
         !controlDock || controlDock->width() < 220 ||
-        radarPanels.size() != 4) {
+        radarPanels.size() != 4 || !glmStatusNote) {
         std::cerr << "UI smoke setup failed\n";
+        return 1;
+    }
+    auto* emptyStateHint = window.findChild<QLabel*>(QStringLiteral("emptyStateHint"));
+    if (!emptyStateHint || emptyStateHint->text().isEmpty()) {
+        std::cerr << "Empty-state hint is missing or empty\n";
         return 1;
     }
 
@@ -355,6 +362,12 @@ int main(int argc, char** argv) {
         return 1;
     }
     restoredWindow.close();
+
+    ShortcutHelpDialog helpDialog;
+    if (helpDialog.windowTitle() != QStringLiteral("Keyboard shortcuts — CappedWeather")) {
+        std::cerr << "Shortcut help dialog title mismatch\n";
+        return 1;
+    }
 
     std::cout << "UI smoke passed\n";
     return 0;

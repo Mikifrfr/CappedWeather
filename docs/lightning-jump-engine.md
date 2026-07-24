@@ -1,6 +1,6 @@
 # Lightning-Jump Engine — Design Spec
 
-Status: in progress (M1)
+Status: production (M1–M5 complete; netCDF required for production builds per P0.1)
 Owner: miki
 Started: 2026-07-20
 
@@ -88,10 +88,10 @@ Dependency: netCDF-C (vcpkg `netcdf-c`, or system). Guarded by
   outbreak, zero tuning). Note: netCDF-C via micromamba env
   (`C:\Users\brawl\mamba-envs\netcdf`), vcpkg broken on this machine (Polish-locale
   vswhere crash). ← NOW: M3
-- **M3** — live S3 poller in app; jump cells on the map with sigma-level colors.
-- **M4** — Level II fusion: jump ↔ mesocyclone/az-shear correlation view.
+- **M3** — live S3 poller in app; jump cells on the map with sigma-level colors. ✅ 2026-07-23 (`GlmSource` S3 poller, `radar_map_canvas` jump overlay, GLM intelligence inspector).
+- **M4** — Level II fusion: jump ↔ mesocyclone/az-shear correlation view. ✅ `radar_lightning_fusion` correlates jumps with NEXRAD reflectivity objects; surfaced in the GLM intelligence panel.
 - **M5** — verification harness: archived outbreak days, jump lead time vs NWS
-  warnings (IEM archive), POD/FAR stats. Tune `minFlashRate` + window from data.
+  warnings (IEM archive), POD/FAR stats. Tune `minFlashRate` + window from data. ✅ `data/verification/results/m5-report.md` (POD 0.65–0.76, FAR 0.69–0.81, CSI 0.18–0.26 on 2025-05-16 midwest + 2025-05-18 kansas cases, 397 warnings).
 
 ## Risks / honest notes
 

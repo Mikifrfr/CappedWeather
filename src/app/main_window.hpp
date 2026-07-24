@@ -22,6 +22,7 @@ class QCheckBox;
 class QDoubleSpinBox;
 class QCloseEvent;
 class QProgressBar;
+class QResizeEvent;
 class QLabel;
 class QGridLayout;
 class QSlider;
@@ -45,6 +46,7 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private slots:
     void radarSelected(const QModelIndex& index);
@@ -141,6 +143,8 @@ private:
     QLabel* frameLabel_ = nullptr;
     QLabel* overlayStatusLabel_ = nullptr;
     QLabel* unifiedStatusLabel_ = nullptr;
+    QLabel* glmStatusNote_ = nullptr;
+    QLabel* emptyStateHint_ = nullptr;
     QProgressBar* loadingProgress_ = nullptr;
     QSlider* frameSlider_ = nullptr;
     QSlider* radarOpacitySlider_ = nullptr;
@@ -169,7 +173,7 @@ private:
     QTimer* overlayRefreshTimer_ = nullptr;
     QTimer* animationTimer_ = nullptr;
     QString selectedRadarId_;
-    QString radarStatus_ = QStringLiteral("Waiting for NOAA radar data");
+    QString radarStatus_ = QStringLiteral("Pick a station → LIVE → timeline → overlays");
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
     QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");
     QStringList recentRadarIds_;

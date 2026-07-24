@@ -11,9 +11,18 @@ if(MSVC)
 endif()
 
 option(CAPPEDWEATHER_BUILD_APP "Build the Qt6 desktop application when Qt6 is available" ON)
+
+# Production builds require netCDF-C so the GLM reader cannot silently stub out.
+# Dev / CI can override with -DCAPPEDWEATHER_REQUIRE_NETCDF=OFF or by setting
+# the CAPPEDWEATHER_REQUIRE_NETCDF environment variable.
+if(DEFINED ENV{CAPPEDWEATHER_REQUIRE_NETCDF} AND NOT DEFINED CAPPEDWEATHER_REQUIRE_NETCDF)
+    set(_cw_require_netcdf_default "$ENV{CAPPEDWEATHER_REQUIRE_NETCDF}")
+else()
+    set(_cw_require_netcdf_default "ON")
+endif()
 option(CAPPEDWEATHER_REQUIRE_NETCDF
     "Fail configuration instead of building the stubbed GLM reader when netCDF-C is unavailable"
-    OFF)
+    ${_cw_require_netcdf_default})
 
 include(CTest)
 
@@ -98,12 +107,14 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/glm_source.hpp
             src/app/main_window.cpp
             src/app/main_window.hpp
+            src/app/nexrad_source.cpp
+            src/app/nexrad_source.hpp
             src/app/radar_map_canvas.cpp
             src/app/radar_map_canvas.hpp
             src/app/radar_list_model.cpp
             src/app/radar_list_model.hpp
-            src/app/nexrad_source.cpp
-            src/app/nexrad_source.hpp
+            src/app/shortcut_help_dialog.cpp
+            src/app/shortcut_help_dialog.hpp
             src/app/weather_overlay_source.cpp
             src/app/weather_overlay_source.hpp
         )

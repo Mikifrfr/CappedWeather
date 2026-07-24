@@ -48,15 +48,29 @@ cmake -S . -B build `
   -DBZIP2_LIBRARY_RELEASE="C:/path/to/libbz2.lib"
 ```
 
-Live GLM ingestion requires netCDF-C. Production builds should make that
-dependency mandatory so they cannot silently fall back to the stub reader:
+Live GLM ingestion requires netCDF-C. The build **defaults to
+`CAPPEDWEATHER_REQUIRE_NETCDF=ON`** so production builds fail-fast when
+netCDF is unavailable instead of silently shipping the stub reader.
+
+Provide the netCDF CMake config directory and build as usual:
 
 ```powershell
 cmake -S . -B build `
-  -DnetCDF_DIR="C:/path/to/netcdf/lib/cmake/netCDF" `
-  -DCAPPEDWEATHER_REQUIRE_NETCDF=ON
+  -DnetCDF_DIR="C:/path/to/netcdf/lib/cmake/netCDF"
 cmake --build build --config Release --target cappedweather_live_glm_probe
 .\build\Release\cappedweather_live_glm_probe.exe
+```
+
+To develop without netCDF (stub-only build), disable the requirement
+with a CMake variable or environment variable:
+
+```powershell
+# Either pass -D on the command line:
+cmake -S . -B build -DCAPPEDWEATHER_REQUIRE_NETCDF=OFF
+
+# Or export the env var (works with any CMake invocation):
+$env:CAPPEDWEATHER_REQUIRE_NETCDF = "OFF"
+cmake -S . -B build
 ```
 
 ## Data sources
