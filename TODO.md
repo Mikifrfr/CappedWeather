@@ -33,7 +33,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 
 ### Map & tool UX
 - [x] **Right-click map context menu** — `RadarMapCanvas::contextMenuEvent` exposes: Select radar (when over a station), Recenter on selected, National view, Zoom in/out, Copy lat/lon (formatted to 4 dp; clipboard copy to 6 dp), Inspect at cursor, and checkable Measure / Cross-section entries. The two tool toggles emit `measureModeToggled` / `crossSectionModeToggled` so the toolbar buttons stay in sync.
-- [ ] **Nav history undo/redo** — pan/zoom stack (misclick recovery).
+- [x] **Nav history undo/redo** — `RadarMapCanvas` keeps a bounded (50-entry) `viewBack_` / `viewForward_` ring of (center, zoom) snapshots. User-driven pan/zoom/setView on the active panel pushes to the back stack; the existing `synchronizingMapView_` guard prevents passive syncs from polluting history. `Ctrl+Z` pops back and pushes forward; `Ctrl+Shift+Z` / `Ctrl+Y` replay. Programmatic restores inside `undoView`/`redoView` set `suppressHistory_` so a redo doesn't immediately push the same view back. Status bar shows remaining history size after each operation.
 - [x] **Rubber-band measure preview** — already in place: `mouseMoveEvent` updates `measureEnd_` whenever `measureStart_` is set in measure/cross-section mode, and `paintMeasurement()` draws the live distance/bearing line. `setCursor(Qt::CrossCursor)` is set in both `setMeasureMode()` and `setCrossSectionMode()`.
 - [ ] **Modeless cross-section window** — replace modal `QDialog::exec()` so live radar stays usable beside the XS view.
 - [ ] **Panel maximize from 2×2** — temporary full-screen one panel without nuking the whole layout preset.
@@ -47,7 +47,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 - [ ] **Single-card replace is OK as default** — but support “pin” lock so a card isn’t wiped by the next click.
 
 ### Chase / field
-- [ ] **GPS / current-location chase** — “Use current location” (Windows location API or NMEA/GPSD later); periodic nearest-radar refresh.
+- [x] **GPS / current-location chase** — "Detect from IP" button next to the chase latitude/longitude in the Settings dialog. One-shot `QNetworkAccessManager` GET to `https://ipwho.is/` (free, no key, JSON with `latitude`/`longitude`), 10 s timeout. Response is parsed and copied into the spinboxes; a confirmation dialog shows the approximate coords and reminds the user that the result is city-level, not GPS-grade. Coarse fallback for setups without a real GPS; a future revision can layer on Windows.Devices.Geolocation once the build environment is ready for it.
 - [ ] **Touch / trackpad gestures** — pinch zoom, two-finger pan where Qt allows.
 - [ ] **Offline / degraded mode** — keep last volumes + disk-cached basemap tiles usable when cellular dies; clear “offline” banner.
 - [ ] **Low-bandwidth preset** — one-click: parallel chunks=1–2, shorter history, overlays throttled.
@@ -60,7 +60,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 
 ### Controls polish
 - [ ] **Collapse / hide Velocity section when product ≠ VEL** — or show a one-line “switch to Velocity to enable”.
-- [ ] **Settings tooltips / help text** — especially lightning σ window, cell size, GLM knobs; palette import format example in the file dialog/tooltip.
+- [x] **Settings tooltips / help text** — added hover hints on the lightning σ threshold, σ window, cell size, min flash rate, and backfill settings. Combined with the existing tooltips across the rest of the dialog, every "obscure" knob now has a one-line explanation on hover. Palette import format example still belongs in the import file dialog/tooltip.
 - [ ] **Don’t cancel measure/XS silently on panel switch** — confirm, transfer, or keep tool state.
 
 ---
