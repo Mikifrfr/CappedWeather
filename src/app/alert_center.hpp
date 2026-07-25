@@ -38,6 +38,14 @@ struct AlertConfig {
     QStringList eventFilter;
     // Trigger lightning alerts on cells whose sigmaLevel >= this threshold.
     double lightningSigmaThreshold = 2.0;
+    // Minimum NWS CAP severity to alert on. The NWS severity taxonomy is
+    // {Extreme, Severe, Moderate, Minor, Unknown}; the default (Severe) means
+    // Tornado/Severe Thunderstorm warnings and up. Anything tagged Moderate
+    // or Minor (Dense Fog Advisory, Air Quality Alert, Special Weather
+    // Statement, etc.) is dropped by default. Unknown is treated as Moderate
+    // so that the rare unclassified event still notifies the operator.
+    //   0 = Minor, 1 = Moderate, 2 = Severe, 3 = Extreme
+    int minSeverity = 2;
     // Suppress repeat alerts for the same cell/warning for this many minutes.
     int repeatSuppressionMinutes = 30;
     // Custom sound file path. When empty, falls back to a generated beep.
@@ -106,6 +114,11 @@ private:
 
     bool withinGeographicFilter(double latitude, double longitude) const;
     bool eventAllowed(const QString& event) const;
+    // Returns true when the warning's CAP severity meets or exceeds
+    // config_.minSeverity. Unknown severity is conservatively treated as
+    // Moderate so unclassified warnings still reach the operator when the
+    // threshold is at or below Moderate.
+    bool severityAllowed(const QString& severity) const;
     void raiseAlert(const QString& kind, const QString& title, const QString& detail);
     void playSound();
     void showSystemNotification(const QString& title, const QString& detail);

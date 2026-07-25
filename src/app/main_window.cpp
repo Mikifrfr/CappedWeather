@@ -1727,6 +1727,9 @@ void MainWindow::restoreSettings() {
         alertConfig.repeatSuppressionMinutes = std::clamp(
             settings.value(QStringLiteral("alerts/repeatSuppressionMinutes"), alertConfig.repeatSuppressionMinutes).toInt(),
             1, 240);
+        alertConfig.minSeverity = std::clamp(
+            settings.value(QStringLiteral("alerts/minSeverity"), alertConfig.minSeverity).toInt(),
+            0, 3);
         alertConfig.customSoundPath = settings.value(QStringLiteral("alerts/customSoundPath"), alertConfig.customSoundPath).toString();
         alertCenter_->setConfig(alertConfig);
         alertCenter_->setChaseMode(chaseMode_, chaseLatitude_, chaseLongitude_);
@@ -1842,6 +1845,7 @@ void MainWindow::saveSettings() const {
         settings.setValue(QStringLiteral("alerts/eventFilter"), alertConfig.eventFilter);
         settings.setValue(QStringLiteral("alerts/lightningSigma"), alertConfig.lightningSigmaThreshold);
         settings.setValue(QStringLiteral("alerts/repeatSuppressionMinutes"), alertConfig.repeatSuppressionMinutes);
+        settings.setValue(QStringLiteral("alerts/minSeverity"), alertConfig.minSeverity);
         settings.setValue(QStringLiteral("alerts/customSoundPath"), alertConfig.customSoundPath);
     }
 }
@@ -2032,6 +2036,14 @@ void MainWindow::showSettingsDialog() {
     auto* alertsSuppression = new QSpinBox(&dialog);
     alertsSuppression->setRange(1, 240);
     alertsSuppression->setSuffix(QStringLiteral(" min"));
+    alertsSuppression->setSingleStep(1.0);
+    auto* alertsMinSeverity = new QComboBox(&dialog);
+    // Index is the integer severity level (matches AlertConfig::minSeverity):
+    // 0=Minor, 1=Moderate, 2=Severe, 3=Extreme. Default is Severe (2).
+    alertsMinSeverity->addItem(QStringLiteral("Minor (advisories + above)"), 0);
+    alertsMinSeverity->addItem(QStringLiteral("Moderate (watches + above)"), 1);
+    alertsMinSeverity->addItem(QStringLiteral("Severe (warnings only, default)"), 2);
+    alertsMinSeverity->addItem(QStringLiteral("Extreme (tornado / extreme wind only)"), 3);
     auto* alertsSoundPath = new QLineEdit(&dialog);
     alertsSoundPath->setPlaceholderText(QStringLiteral("(uses system beep when empty)"));
     auto* alertsBrowseButton = new QToolButton(&dialog);
@@ -2050,6 +2062,12 @@ void MainWindow::showSettingsDialog() {
         alertsEventList->setText(cfg.eventFilter.join(QStringLiteral(", ")));
         alertsSigma->setValue(cfg.lightningSigmaThreshold);
         alertsSuppression->setValue(cfg.repeatSuppressionMinutes);
+        // Map stored severity level back to the combo index. Clamp to keep
+        // an out-of-range stored value from silently pinning the UI.
+        const auto stored = cfg.minSeverity;
+        auto severityIndex = alertsMinSeverity->findData(stored);
+        if (severityIndex < 0) severityIndex = alertsMinSeverity->findData(2);  // default = Severe
+        alertsMinSeverity->setCurrentIndex(severityIndex);
         alertsSoundPath->setText(cfg.customSoundPath);
     }
 
@@ -2068,6 +2086,7 @@ void MainWindow::showSettingsDialog() {
     alertsLayout->addRow(QStringLiteral("Event filter list"), alertsEventList);
     alertsLayout->addRow(QStringLiteral("Lightning jump threshold"), alertsSigma);
     alertsLayout->addRow(QStringLiteral("Suppress repeats for"), alertsSuppression);
+    alertsLayout->addRow(QStringLiteral("Minimum severity"), alertsMinSeverity);
     alertsLayout->addRow(QStringLiteral("Custom sound (.wav)"), alertsSoundContainer);
     alertsLayout->addRow(alertsTestButton);
     layout->addWidget(alertsGroup);
@@ -2138,6 +2157,7 @@ void MainWindow::showSettingsDialog() {
         cfg.eventFilterEnabled = alertsEventFilter->isChecked();
         cfg.lightningSigmaThreshold = alertsSigma->value();
         cfg.repeatSuppressionMinutes = alertsSuppression->value();
+        cfg.minSeverity = alertsMinSeverity->currentData().toInt();
         cfg.customSoundPath = alertsSoundPath->text().trimmed();
         QStringList events;
         for (const auto& token : alertsEventList->text().split(QLatin1Char(','), Qt::SkipEmptyParts)) {

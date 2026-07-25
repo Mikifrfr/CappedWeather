@@ -125,6 +125,7 @@ void AlertCenter::ingestWarnings(const QVector<WeatherWarning>& warnings) {
     if (!config_.enabled) return;
     for (const auto& warning : warnings) {
         if (!eventAllowed(warning.event)) continue;
+        if (!severityAllowed(warning.severity)) continue;
 
         // Geographic filter. If the warning has no polygon (zone-only alert),
         // we cannot verify location and so we accept it through the filter only
@@ -227,6 +228,18 @@ bool AlertCenter::withinGeographicFilter(double latitude, double longitude) cons
 bool AlertCenter::eventAllowed(const QString& event) const {
     if (!config_.eventFilterEnabled) return true;
     return config_.eventFilter.contains(event);
+}
+
+bool AlertCenter::severityAllowed(const QString& severity) const {
+    // NWS CAP severity values: "Extreme", "Severe", "Moderate", "Minor", "Unknown".
+    // Map to the integer scale documented on AlertConfig::minSeverity.
+    int level = 1;  // Unknown defaults to Moderate so unclassified warnings still alert.
+    const QString trimmed = severity.trimmed();
+    if (trimmed.compare(QLatin1String("Extreme"), Qt::CaseInsensitive) == 0) level = 3;
+    else if (trimmed.compare(QLatin1String("Severe"), Qt::CaseInsensitive) == 0) level = 2;
+    else if (trimmed.compare(QLatin1String("Moderate"), Qt::CaseInsensitive) == 0) level = 1;
+    else if (trimmed.compare(QLatin1String("Minor"), Qt::CaseInsensitive) == 0) level = 0;
+    return level >= config_.minSeverity;
 }
 
 void AlertCenter::raiseAlert(const QString& kind, const QString& title, const QString& detail) {
