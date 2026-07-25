@@ -396,5 +396,8 @@ This is the most significant conditional feature in the codebase.
 | Multi pin cards | ✓ Added in P1 round 3: `P` toggles `RadarMapCanvas::setPinnedOverlayLocked`; locked cards survive comparison clicks. Lock glyph drawn in the card header. |
 | CWA / selected-radar warning filter | ✓ Added in P1 round 4: `RadarMapCanvas::setProximityFilter(anchor, radiusKm)` plus a control-dock checkbox + radius spinbox. Anchor is the selected radar's coordinates, or the chase point when chase mode is on. |
 | Named layout presets | ✓ Added in P1 round 4: `presetsCombo_` + "Save..." button; three built-ins (Chase 1×1 / Analysis 2×2 dual-pol / Lightning scout 1×2) and user presets persisted under `presets/<name>` in QSettings. |
+| Nav history undo/redo | ✓ Added in P1 round 5: `RadarMapCanvas` keeps bounded `viewBack_` / `viewForward_` rings; `Ctrl+Z` / `Ctrl+Shift+Z` rewind/replay user-driven pan/zoom. |
+| GPS / current-location chase | ✓ Added in P1 round 5: "Detect from IP" button in Settings hits `https://ipwho.is/` and populates the chase coords (city-level, not GPS-grade; honest fallback until a real GPS source is wired). |
+| Settings tooltips / help text | ✓ Added in P1 round 5: tooltips on the lightning σ threshold, σ window, cell size, min flash rate, and backfill; combined with pre-existing tooltips, every obscure knob in the dialog has a hover hint. |
 | GPU volume rendering | ✗ Backlog only — no code |
 | Storm-scale nowcasting | ✗ Backlog only — no code |

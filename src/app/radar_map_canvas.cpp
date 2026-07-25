@@ -2541,4 +2541,46 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     event->accept();
 }
 
+void RadarMapCanvas::pushViewHistory() {
+    if (suppressHistory_) return;
+    // Skip a no-op push (same view) so a click that doesn't pan/zoom doesn't
+    // pollute the back stack.
+    if (!viewBack_.isEmpty()) {
+        const auto& last = viewBack_.constLast();
+        if (qFuzzyCompare(last.center.x() + 1.0, center_.x() + 1.0) &&
+            qFuzzyCompare(last.center.y() + 1.0, center_.y() + 1.0) &&
+            last.zoom == zoom_) {
+            return;
+        }
+    }
+    viewBack_.push_back({center_, zoom_});
+    while (viewBack_.size() > kViewHistoryLimit) viewBack_.removeFirst();
+    viewForward_.clear();
+}
+
+void RadarMapCanvas::undoView() {
+    if (viewBack_.isEmpty()) return;
+    viewForward_.push_back({center_, zoom_});
+    while (viewForward_.size() > kViewHistoryLimit) viewForward_.removeFirst();
+    const auto snapshot = viewBack_.takeLast();
+    suppressHistory_ = true;
+    setView(snapshot.center, snapshot.zoom);
+    suppressHistory_ = false;
+}
+
+void RadarMapCanvas::redoView() {
+    if (viewForward_.isEmpty()) return;
+    viewBack_.push_back({center_, zoom_});
+    while (viewBack_.size() > kViewHistoryLimit) viewBack_.removeFirst();
+    const auto snapshot = viewForward_.takeLast();
+    suppressHistory_ = true;
+    setView(snapshot.center, snapshot.zoom);
+    suppressHistory_ = false;
+}
+
+void RadarMapCanvas::clearViewHistory() {
+    viewBack_.clear();
+    viewForward_.clear();
+}
+
 } // namespace cappedweather

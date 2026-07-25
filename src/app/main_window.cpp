@@ -129,6 +129,14 @@ MainWindow::MainWindow(QWidget* parent)
         connect(panel, &RadarMapCanvas::activated, this, [this, panel] { activateMap(panel); });
         connect(panel, &RadarMapCanvas::viewChanged, this,
                 [this, panel](const QPointF&, int) { synchronizeMapView(panel); });
+        // Push the active panel's view to its undo stack. We only record when
+        // the active panel itself changed (not when it's a passive recipient
+        // of a sync) so the back stack represents user actions.
+        connect(panel, &RadarMapCanvas::viewChanged, this,
+                [this, panel](const QPointF&, int) {
+                    if (synchronizingMapView_) return;
+                    if (panel == map_) panel->pushViewHistory();
+                });
         connect(panel, &RadarMapCanvas::crossSectionRequested, this,
                 [this, panel](const QPointF& start, const QPointF& end) {
                     activateMap(panel);
@@ -336,6 +344,18 @@ MainWindow::MainWindow(QWidget* parent)
         if (!map_) return;
         map_->setPinnedOverlayLocked(!map_->pinnedOverlayLocked());
         updateUnifiedStatus();
+    });
+    addShortcut(QKeySequence::Undo, [this] {
+        if (map_ && map_->canUndoView()) {
+            map_->undoView();
+            statusBar()->showMessage(QStringLiteral("View undo (%1 left)").arg(map_->viewBackSizeForUi()), 3000);
+        }
+    });
+    addShortcut(QKeySequence::Redo, [this] {
+        if (map_ && map_->canRedoView()) {
+            map_->redoView();
+            statusBar()->showMessage(QStringLiteral("View redo (%1 forward)").arg(map_->viewForwardSizeForUi()), 3000);
+        }
     });
     connect(timeJumpEdit_, &QDateTimeEdit::editingFinished, this, [this] {
         const auto session = activeSession();
@@ -1841,6 +1861,11 @@ void MainWindow::showSettingsDialog() {
     longitude->setRange(-180.0, 180.0);
     longitude->setDecimals(5);
     longitude->setValue(chaseLongitude_);
+    auto* detectButton = new QPushButton(QStringLiteral("Detect from IP"), &dialog);
+    detectButton->setToolTip(QStringLiteral("Coarse: query a public IP geolocation service and populate the chase coords"));
+    auto* chaseRow = new QHBoxLayout();
+    chaseRow->addWidget(detectButton);
+    chaseRow->addStretch(1);
     auto* frames = new QSpinBox(&dialog);
     frames->setRange(2, 24);
     frames->setValue(maximumHistoryFrames_);
@@ -1882,25 +1907,30 @@ void MainWindow::showSettingsDialog() {
     lightningBackfill->setRange(13, 60);
     lightningBackfill->setSuffix(QStringLiteral(" min"));
     lightningBackfill->setValue(QSettings().value(QStringLiteral("lightning/backfillMinutes"), 18).toInt());
+    lightningBackfill->setToolTip(QStringLiteral("How much GLM history to pull on first start (minutes)"));
     auto* lightningCell = new QDoubleSpinBox(&dialog);
     lightningCell->setRange(0.05, 1.0);
     lightningCell->setSingleStep(0.05);
     lightningCell->setDecimals(2);
     lightningCell->setSuffix(QStringLiteral(" deg"));
     lightningCell->setValue(QSettings().value(QStringLiteral("lightning/cellSizeDeg"), 0.25).toDouble());
+    lightningCell->setToolTip(QStringLiteral("Spatial binning size for the flash-rate grid (degrees lat/lon)"));
     auto* lightningRate = new QDoubleSpinBox(&dialog);
     lightningRate->setRange(1.0, 100.0);
     lightningRate->setSuffix(QStringLiteral(" flashes/min"));
     lightningRate->setValue(QSettings().value(QStringLiteral("lightning/minFlashRate"), 12.0).toDouble());
+    lightningRate->setToolTip(QStringLiteral("Cells below this flash rate are not eligible for jump detection"));
     auto* lightningSigma = new QDoubleSpinBox(&dialog);
     lightningSigma->setRange(1.0, 10.0);
     lightningSigma->setSingleStep(0.25);
     lightningSigma->setSuffix(QStringLiteral(" sigma"));
     lightningSigma->setValue(QSettings().value(QStringLiteral("lightning/sigmaThreshold"), 2.0).toDouble());
+    lightningSigma->setToolTip(QStringLiteral("Sigma threshold for a flash-rate change to count as a jump"));
     auto* lightningWindow = new QDoubleSpinBox(&dialog);
     lightningWindow->setRange(5.0, 30.0);
     lightningWindow->setSuffix(QStringLiteral(" min"));
     lightningWindow->setValue(QSettings().value(QStringLiteral("lightning/sigmaWindowMinutes"), 10.0).toDouble());
+    lightningWindow->setToolTip(QStringLiteral("Window over which the flash-rate sigma is computed"));
     auto* memoryCache = new QSpinBox(&dialog);
     memoryCache->setRange(8, 256);
     memoryCache->setSuffix(QStringLiteral(" MB/panel"));
@@ -1912,6 +1942,54 @@ void MainWindow::showSettingsDialog() {
     form->addRow(QStringLiteral("Chase mode"), chaseCheck);
     form->addRow(QStringLiteral("Chase latitude"), latitude);
     form->addRow(QStringLiteral("Chase longitude"), longitude);
+    form->addRow(QString(), chaseRow);
+    connect(detectButton, &QPushButton::clicked, &dialog, [&dialog, latitude, longitude, detectButton]() {
+        detectButton->setEnabled(false);
+        detectButton->setText(QStringLiteral("Detecting…"));
+        auto* nam = new QNetworkAccessManager(&dialog);
+        QNetworkRequest request(QUrl(QStringLiteral("https://ipwho.is/")));
+        request.setHeader(QNetworkRequest::UserAgentHeader,
+                          QStringLiteral("CappedWeather/0.3 (chase-position detection)"));
+        request.setRawHeader("Accept", "application/json");
+        auto* reply = nam->get(request);
+        QTimer::singleShot(10'000, reply, [reply]() {
+            if (reply->isRunning()) reply->abort();
+        });
+        QObject::connect(reply, &QNetworkReply::finished, &dialog, [&dialog, reply, nam,
+                                                                             latitude, longitude, detectButton]() {
+            detectButton->setEnabled(true);
+            detectButton->setText(QStringLiteral("Detect from IP"));
+            if (reply->error() != QNetworkReply::NoError) {
+                QMessageBox::warning(&dialog, QStringLiteral("Detect from IP"),
+                                     QStringLiteral("Geolocation lookup failed: %1").arg(reply->errorString()));
+            } else {
+                QJsonParseError parseError;
+                const auto document = QJsonDocument::fromJson(reply->readAll(), &parseError);
+                if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+                    QMessageBox::warning(&dialog, QStringLiteral("Detect from IP"),
+                                         QStringLiteral("Geolocation response was not valid JSON"));
+                } else {
+                    const auto obj = document.object();
+                    const auto lat = obj.value(QStringLiteral("latitude")).toDouble(-1000.0);
+                    const auto lon = obj.value(QStringLiteral("longitude")).toDouble(-1000.0);
+                    const auto okLat = lat >= -90.0 && lat <= 90.0;
+                    const auto okLon = lon >= -180.0 && lon <= 180.0;
+                    if (okLat) latitude->setValue(lat);
+                    if (okLon) longitude->setValue(lon);
+                    if (!okLat || !okLon) {
+                        QMessageBox::warning(&dialog, QStringLiteral("Detect from IP"),
+                                             QStringLiteral("Response did not include valid latitude/longitude"));
+                    } else {
+                        QMessageBox::information(&dialog, QStringLiteral("Detect from IP"),
+                                                 QStringLiteral("Approximate position set to %1, %2 (city-level, not GPS-grade).")
+                                                     .arg(lat, 0, 'f', 4).arg(lon, 0, 'f', 4));
+                    }
+                }
+            }
+            reply->deleteLater();
+            nam->deleteLater();
+        });
+    });
     form->addRow(QStringLiteral("Frames kept in memory"), frames);
     form->addRow(QStringLiteral("Volumes loaded for playback"), volumes);
     form->addRow(QStringLiteral("Network contact"), contact);

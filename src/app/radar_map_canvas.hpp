@@ -122,10 +122,21 @@ public:
     const std::vector<LightningCellSnapshot>& lightningCells() const { return lightningCells_; }
     int radarFeatureCount() const;
     int lightningFusionCount() const;
-    // Pin lock: when true, new overlay clicks are ignored so the active
-    // card survives comparison clicks. Empties the card and clears the lock.
+    // Pin lock: when true, new overlay clicks are ignored so the active card
+    // survives comparison clicks. Empties the card and clears the lock.
     void setPinnedOverlayLocked(bool locked);
     [[nodiscard]] bool pinnedOverlayLocked() const { return pinnedInfoLocked_; }
+    // Pan/zoom history. User-driven pan/zoom/setView pushes onto the back
+    // stack; undoView/redoView pop between the two stacks. Programmatic
+    // restores (undo/redo) are excluded from re-recording.
+    void pushViewHistory();
+    bool canUndoView() const { return viewBack_.size() > 0; }
+    bool canRedoView() const { return viewForward_.size() > 0; }
+    int viewBackSizeForUi() const { return viewBack_.size(); }
+    int viewForwardSizeForUi() const { return viewForward_.size(); }
+    void undoView();
+    void redoView();
+    void clearViewHistory();
 
 signals:
     void radarClicked(const QString& radarId);
@@ -272,6 +283,12 @@ private:
     bool pinnedInfoLocked_ = false;
     QPointF center_{-96.5, 38.5}; // longitude, latitude
     int zoom_ = 4;
+    // Pan/zoom undo/redo. Bounded ring of (center, zoom) snapshots.
+    struct ViewSnapshot { QPointF center; int zoom = 0; };
+    static constexpr int kViewHistoryLimit = 50;
+    QVector<ViewSnapshot> viewBack_;
+    QVector<ViewSnapshot> viewForward_;
+    bool suppressHistory_ = false;
     QPoint lastMousePosition_;
     bool dragging_ = false;
     bool dragged_ = false;
