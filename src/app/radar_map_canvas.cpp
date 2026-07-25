@@ -1614,6 +1614,18 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         painter.setFont(hudFont(11, QFont::DemiBold));
         painter.drawText(closeRect, Qt::AlignCenter, QStringLiteral("×"));
 
+        if (pinnedInfoLocked_) {
+            // Small lock glyph in the header so the user can see the active
+            // card is protected from replacement. Drawn as a primitive so it
+            // doesn't depend on emoji font support.
+            const QRectF lockRect(x + cardWidth - 60.0, y + 12.0, 14.0, 14.0);
+            painter.setPen(QPen(QColor("#ffd17a"), 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawArc(lockRect.adjusted(1.0, 2.0, -1.0, -3.0), 180 * 16, 180 * 16);
+            painter.setBrush(QColor("#ffd17a"));
+            painter.drawRoundedRect(lockRect.adjusted(3.0, 7.0, -3.0, -1.0), 1.0, 1.0);
+        }
+
         auto contentTop = y + 38.0;
         if (isWarning) {
             const auto badgeWidth = std::min(150.0,
@@ -1912,6 +1924,13 @@ QString RadarMapCanvas::lightningInfo(const std::size_t index) const {
 }
 
 void RadarMapCanvas::setPinnedOverlay(const OverlayHit& hit, const QPointF& point) {
+    // When the user has locked the active card, ignore new overlay clicks
+    // entirely so the card survives comparison clicks. Empty hits still clear
+    // (so the explicit close path works).
+    if (pinnedInfoLocked_ && !hit.text.isEmpty() &&
+        (hit.text != pinnedInfo_ || hit.kind != pinnedInfoKind_)) {
+        return;
+    }
     const auto changed = hit.text != pinnedInfo_ || hit.kind != pinnedInfoKind_;
     if (changed) {
         pinnedInfoScrollOffset_ = 0.0;
@@ -1930,7 +1949,13 @@ void RadarMapCanvas::setPinnedOverlay(const OverlayHit& hit, const QPointF& poin
     if (pinnedInfo_.isEmpty()) {
         pinnedInfoCardRect_ = {};
         pinnedInfoBodyRect_ = {};
+        pinnedInfoLocked_ = false;
     }
+    update();
+}
+
+void RadarMapCanvas::setPinnedOverlayLocked(bool locked) {
+    pinnedInfoLocked_ = locked;
     update();
 }
 

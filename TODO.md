@@ -26,14 +26,15 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 
 ### Alerts & situational awareness
 - [x] **Warning / jump audio + system notifications** — `AlertCenter` (sinks `WeatherOverlaySource::overlaysReady` + `GlmSource::cellsUpdated`) plays a sound (system beep fallback, or a user-selected `.wav` via `QSoundEffect` when `Qt6::Multimedia` is available) and shows a system tray balloon notification. Dedupe is keyed by NWS `@id` / lightning cell key with a configurable suppression window. Settings dialog has enable / sound / notification toggles, a geo filter around the selected radar or chase point, a comma-separated NWS event allowlist, lightning sigma threshold, suppression minutes, custom sound file picker, and a Test button.
-- [ ] **Radar health indicator** — clear online / stale / offline affordance (not only status text).
+- [x] **Radar health indicator** — small colored dot + label ("Online" / "Stale" / "Offline" / "Unknown") under the station summary. Updated on `volumeReady` (resets to Online when the latest frame is ≤ 5 min old), on `sourceFailed` (Offline), on radar selection (Stale until a new volume arrives), and reclassified every 30 s by a `healthTimer_`. Thresholds: ≤ 5 min Online, 5–15 min Stale, > 15 min Offline.
 - [ ] **CWA / selected-radar warning filter** — reduce national noise; “warnings near active radar / chase point” mode.
-- [ ] **Multi pin cards** — pin more than one warning/report/lightning card at once for comparison.
+- [x] **Multi pin cards** — `P` toggles a pin lock (`RadarMapCanvas::setPinnedOverlayLocked`); while locked, the active card survives any new overlay clicks. A small lock glyph is drawn in the card header so the user can see the state. The lock clears when the card is closed. Single-card replace remains the default for un-locked cards.
+- [x] **Single-card replace is OK as default** — same TODO entry as "Multi pin cards"; the existing single-card replace behavior is preserved when the lock is off, and the lock is the user-opt-in escape hatch for keeping a card.
 
 ### Map & tool UX
 - [x] **Right-click map context menu** — `RadarMapCanvas::contextMenuEvent` exposes: Select radar (when over a station), Recenter on selected, National view, Zoom in/out, Copy lat/lon (formatted to 4 dp; clipboard copy to 6 dp), Inspect at cursor, and checkable Measure / Cross-section entries. The two tool toggles emit `measureModeToggled` / `crossSectionModeToggled` so the toolbar buttons stay in sync.
 - [ ] **Nav history undo/redo** — pan/zoom stack (misclick recovery).
-- [ ] **Rubber-band measure preview** — live range/bearing line while placing the second point; crosshair cursor in measure/XS modes.
+- [x] **Rubber-band measure preview** — already in place: `mouseMoveEvent` updates `measureEnd_` whenever `measureStart_` is set in measure/cross-section mode, and `paintMeasurement()` draws the live distance/bearing line. `setCursor(Qt::CrossCursor)` is set in both `setMeasureMode()` and `setCrossSectionMode()`.
 - [ ] **Modeless cross-section window** — replace modal `QDialog::exec()` so live radar stays usable beside the XS view.
 - [ ] **Panel maximize from 2×2** — temporary full-screen one panel without nuking the whole layout preset.
 - [ ] **Closable / floatable docks** — allow hiding control/playback docks to maximize map (persist layout).

@@ -108,7 +108,8 @@ MainWindow::MainWindow(QWidget* parent)
       alertCenter_(new AlertCenter(this)),
       refreshTimer_(new QTimer(this)),
       overlayRefreshTimer_(new QTimer(this)),
-      animationTimer_(new QTimer(this)) {
+      animationTimer_(new QTimer(this)),
+      healthTimer_(new QTimer(this)) {
     buildUi();
 
     QSettings settings;
@@ -184,6 +185,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(refreshTimer_, &QTimer::timeout, this, &MainWindow::requestSelectedRadar);
     connect(overlayRefreshTimer_, &QTimer::timeout, overlaySource_, &WeatherOverlaySource::refresh);
     connect(animationTimer_, &QTimer::timeout, this, &MainWindow::advanceFrame);
+    healthTimer_->setInterval(30'000); // 30 s — enough resolution to flip Online/Stale
+    healthTimer_->setSingleShot(false);
+    connect(healthTimer_, &QTimer::timeout, this, &MainWindow::recomputeRadarHealth);
+    healthTimer_->start();
     connect(frameSlider_, &QSlider::valueChanged, this, [this](const int index) {
         const auto session = activeSession();
         if (!session) return;
@@ -323,6 +328,11 @@ MainWindow::MainWindow(QWidget* parent)
         if (!session || session->history.empty()) return;
         session->followLatest = liveButton_->isChecked();
         showFrame(static_cast<int>(session->history.size()) - 1);
+    });
+    addShortcut(QKeySequence(Qt::Key_P), [this] {
+        if (!map_) return;
+        map_->setPinnedOverlayLocked(!map_->pinnedOverlayLocked());
+        updateUnifiedStatus();
     });
     connect(timeJumpEdit_, &QDateTimeEdit::editingFinished, this, [this] {
         const auto session = activeSession();
@@ -564,6 +574,19 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     stationSummaryLabel_->setMinimumWidth(0);
     stationSummaryLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     controlLayout->addWidget(stationSummaryLabel_);
+    auto* healthRow = new QHBoxLayout();
+    healthRow->setObjectName(QStringLiteral("healthRow"));
+    healthDot_ = new QLabel(controlBody);
+    healthDot_->setObjectName(QStringLiteral("healthDot"));
+    healthDot_->setFixedSize(12, 12);
+    healthDot_->setToolTip(QStringLiteral("Radar data health"));
+    healthLabel_ = new QLabel(QStringLiteral("Unknown"), controlBody);
+    healthLabel_->setObjectName(QStringLiteral("healthLabel"));
+    healthLabel_->setToolTip(QStringLiteral("Reflects whether real Level II chunks are arriving for the selected radar"));
+    healthRow->addWidget(healthDot_);
+    healthRow->addWidget(healthLabel_, 1);
+    controlLayout->addLayout(healthRow);
+    setRadarHealth(RadarHealthState::Unknown, QStringLiteral("Pick a station to begin"));
     statusLabel_ = new QLabel(controlBody);
     statusLabel_->setObjectName(QStringLiteral("section"));
     statusLabel_->hide();
@@ -1090,6 +1113,8 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     for (auto& panelRadarId : panelRadarIds_) panelRadarId = radarId;
     const auto existed = radarSessions_.contains(radarId);
     const auto session = sessionFor(radarId);
+    lastVolumeTime_ = {};
+    setRadarHealth(RadarHealthState::Stale, QStringLiteral("Loading %1...").arg(radarId));
     recentRadarIds_.removeAll(radarId);
     recentRadarIds_.prepend(radarId);
     while (recentRadarIds_.size() > 8) recentRadarIds_.removeLast();
@@ -1180,6 +1205,8 @@ void MainWindow::sourceFailed(const QString& radarId, const QString& message) {
         loadingProgress_->hide();
         cancelButton_->hide();
         retryButton_->show();
+        setRadarHealth(RadarHealthState::Offline,
+                       QStringLiteral("Last fetch failed: %1").arg(message));
     }
 }
 
@@ -1387,6 +1414,10 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
     if (radarId == selectedRadarId() && session->playWhenHistoryReady && session->history.size() >= 2) {
         session->playWhenHistoryReady = false;
         QTimer::singleShot(0, this, [this] { playButton_->setChecked(true); });
+    }
+    if (radarId == selectedRadarId_) {
+        lastVolumeTime_ = receivedAt;
+        recomputeRadarHealth();
     }
 }
 
@@ -2260,6 +2291,41 @@ void MainWindow::exportTimelineAnimation() {
 void MainWindow::closeEvent(QCloseEvent* event) {
     saveSettings();
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::setRadarHealth(RadarHealthState state, const QString& tooltip) {
+    if (radarHealthState_ == state && (tooltip.isEmpty() || (healthDot_ && healthDot_->toolTip() == tooltip))) return;
+    radarHealthState_ = state;
+    if (!healthDot_ || !healthLabel_) return;
+    QString color;
+    QString text;
+    switch (state) {
+        case RadarHealthState::Online:  color = QStringLiteral("#6fbf5a"); text = QStringLiteral("Online");  break;
+        case RadarHealthState::Stale:   color = QStringLiteral("#e0c14a"); text = QStringLiteral("Stale");   break;
+        case RadarHealthState::Offline: color = QStringLiteral("#d96d6d"); text = QStringLiteral("Offline"); break;
+        case RadarHealthState::Unknown: default: color = QStringLiteral("#7a7d85"); text = QStringLiteral("Unknown"); break;
+    }
+    healthDot_->setStyleSheet(QStringLiteral(
+        "background-color: %1; border: 1px solid #2b2d33; border-radius: 6px;").arg(color));
+    healthLabel_->setText(text);
+    if (!tooltip.isEmpty()) {
+        healthDot_->setToolTip(tooltip);
+        healthLabel_->setToolTip(tooltip);
+    }
+}
+
+RadarHealthState MainWindow::classifyHealth() const {
+    if (selectedRadarId_.isEmpty()) return RadarHealthState::Unknown;
+    if (radarStatus_.contains(QStringLiteral("error"), Qt::CaseInsensitive)) return RadarHealthState::Offline;
+    if (!lastVolumeTime_.isValid()) return RadarHealthState::Stale;
+    const auto ageSec = lastVolumeTime_.secsTo(QDateTime::currentDateTimeUtc());
+    if (ageSec <= 300) return RadarHealthState::Online;     // <= 5 min
+    if (ageSec <= 900) return RadarHealthState::Stale;      // 5-15 min
+    return RadarHealthState::Offline;
+}
+
+void MainWindow::recomputeRadarHealth() {
+    setRadarHealth(classifyHealth());
 }
 
 } // namespace cappedweather

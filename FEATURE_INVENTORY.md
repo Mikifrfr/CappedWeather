@@ -391,5 +391,8 @@ This is the most significant conditional feature in the codebase.
 | Per-panel overlay toggles | ✓ Added in P1 round 2: `RadarMapCanvas::OverlayVisibility` + a new "Active panel overlays" section in the control dock (Warnings / Storm reports / GLM lightning / Radar fusion + "Use global" reset). |
 | More loop speeds (0.5×, 8×, 16×) | ✓ Added in P1 round 2: speed combo expanded from 3 to 6 entries; legacy `timeline/speed` indices migrated so existing user prefs keep the same speed. |
 | Jump to earliest / latest + absolute time entry | ✓ Added in P1 round 2: `Home` / `End` shortcuts + a `QDateTimeEdit` with calendar popup that finds the closest loaded frame. |
+| Rubber-band measure preview | ✓ Already in place (mouseMoveEvent updates `measureEnd_` in measure/cross-section mode; `setCursor(Qt::CrossCursor)` is set by `setMeasureMode` / `setCrossSectionMode`). |
+| Radar health indicator | ✓ Added in P1 round 3: colored dot + label under the station summary, driven by `volumeReady`, `sourceFailed`, radar selection, and a 30 s `healthTimer_`. Online ≤ 5 min, Stale 5–15 min, Offline > 15 min or after a failed fetch. |
+| Multi pin cards | ✓ Added in P1 round 3: `P` toggles `RadarMapCanvas::setPinnedOverlayLocked`; locked cards survive comparison clicks. Lock glyph drawn in the card header. |
 | GPU volume rendering | ✗ Backlog only — no code |
 | Storm-scale nowcasting | ✗ Backlog only — no code |

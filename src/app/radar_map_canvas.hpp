@@ -116,6 +116,10 @@ public:
     const std::vector<LightningCellSnapshot>& lightningCells() const { return lightningCells_; }
     int radarFeatureCount() const;
     int lightningFusionCount() const;
+    // Pin lock: when true, new overlay clicks are ignored so the active
+    // card survives comparison clicks. Empties the card and clears the lock.
+    void setPinnedOverlayLocked(bool locked);
+    [[nodiscard]] bool pinnedOverlayLocked() const { return pinnedInfoLocked_; }
 
 signals:
     void radarClicked(const QString& radarId);
@@ -259,6 +263,7 @@ private:
     double pinnedInfoScrollTarget_ = 0.0;
     int pinnedInfoContentHeight_ = 0;
     bool draggingPinnedInfoCard_ = false;
+    bool pinnedInfoLocked_ = false;
     QPointF center_{-96.5, 38.5}; // longitude, latitude
     int zoom_ = 4;
     QPoint lastMousePosition_;

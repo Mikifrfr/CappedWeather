@@ -41,6 +41,8 @@ class RadarListModel;
 class WeatherOverlaySource;
 class AlertCenter;
 
+enum class RadarHealthState { Unknown, Online, Stale, Offline };
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -87,6 +89,9 @@ private:
     void activateMap(RadarMapCanvas* map);
     void synchronizeMapView(RadarMapCanvas* source);
     void refreshActivePanelOverlayUi();
+    void setRadarHealth(RadarHealthState state, const QString& tooltip = {});
+    void recomputeRadarHealth();
+    RadarHealthState classifyHealth() const;
     void updateVelocityControls();
     void showCrossSection(const QPointF& start, const QPointF& end);
     void importCustomPalette();
@@ -179,6 +184,14 @@ private:
     QCheckBox* activePanelLightning_ = nullptr;
     QCheckBox* activePanelFusion_ = nullptr;
     QToolButton* useGlobalButton_ = nullptr;
+    // Radar health indicator: a small colored dot next to the station
+    // summary label that reflects Online / Stale / Offline for the active
+    // radar session.
+    QLabel* healthDot_ = nullptr;
+    QLabel* healthLabel_ = nullptr;
+    QTimer* healthTimer_ = nullptr;
+    RadarHealthState radarHealthState_ = RadarHealthState::Unknown;
+    QDateTime lastVolumeTime_;
     NexradSource* source_ = nullptr;
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
