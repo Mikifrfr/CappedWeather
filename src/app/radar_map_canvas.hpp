@@ -77,6 +77,12 @@ public:
     };
     void setOverlayOverrides(std::optional<OverlayVisibility> overrides);
     [[nodiscard]] std::optional<OverlayVisibility> overlayOverrides() const { return overlayOverrides_; }
+    // Geographic proximity filter. When enabled, only warnings whose exterior
+    // ring is within `radiusKm` of the anchor lat/lon are shown. Empty vector
+    // (the default) means "show everything". Re-evaluated when the anchor or
+    // the radius changes.
+    void setProximityFilter(std::optional<QPointF> anchor, double radiusKm);
+    [[nodiscard]] bool proximityFilterActive() const { return proximityAnchor_.has_value(); }
     void setPalette(PaletteKind palette);
     void setCustomPalette(QVector<PaletteStop> stops);
     void setRadarOpacity(int percent);
@@ -276,6 +282,8 @@ private:
     bool lightningFusionVisible_ = true;
     std::array<bool, 3> stormReportKindsVisible_{true, true, true};
     std::optional<OverlayVisibility> overlayOverrides_;
+    std::optional<QPointF> proximityAnchor_; // longitude, latitude
+    double proximityRadiusKm_ = 200.0;
     PaletteKind palette_ = PaletteKind::Capped;
     QVector<PaletteStop> customPalette_;
     int radarOpacity_ = 80;

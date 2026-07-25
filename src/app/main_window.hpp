@@ -43,6 +43,14 @@ class AlertCenter;
 
 enum class RadarHealthState { Unknown, Online, Stale, Offline };
 
+struct LayoutPreset {
+    QString name;
+    int layoutIndex = 0; // 0=1x1, 1=1x2, 2=2x1, 3=2x2
+    int product[4] = {0, 0, 0, 0};
+    int tilt[4] = {-1, -1, -1, -1}; // -1 = any
+    bool builtIn = false;
+};
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -86,9 +94,15 @@ private:
     void showSettingsDialog();
     void selectNearestChaseRadar();
     void setPanelLayout(int layoutIndex);
+    void applyLayoutPreset(const QString& name);
+    void saveCurrentAsPreset();
+    void rebuildPresetsCombo();
+    QVector<LayoutPreset> builtInPresets() const;
+    LayoutPreset presetByName(const QString& name) const;
     void activateMap(RadarMapCanvas* map);
     void synchronizeMapView(RadarMapCanvas* source);
     void refreshActivePanelOverlayUi();
+    void pushProximityFilterToCanvases();
     void setRadarHealth(RadarHealthState state, const QString& tooltip = {});
     void recomputeRadarHealth();
     RadarHealthState classifyHealth() const;
@@ -144,6 +158,8 @@ private:
     QComboBox* warningFilterCombo_ = nullptr;
     QComboBox* paletteCombo_ = nullptr;
     QComboBox* panelLayoutCombo_ = nullptr;
+    QComboBox* presetsCombo_ = nullptr;
+    QToolButton* savePresetButton_ = nullptr;
     QComboBox* velocityModeCombo_ = nullptr;
     QDoubleSpinBox* nyquistSpin_ = nullptr;
     QDoubleSpinBox* stormDirectionSpin_ = nullptr;
@@ -159,6 +175,8 @@ private:
     QSlider* frameSlider_ = nullptr;
     QDateTimeEdit* timeJumpEdit_ = nullptr;
     QSlider* radarOpacitySlider_ = nullptr;
+    QCheckBox* proximityFilterCheck_ = nullptr;
+    QDoubleSpinBox* proximityFilterRadius_ = nullptr;
     QToolButton* previousButton_ = nullptr;
     QToolButton* playButton_ = nullptr;
     QToolButton* nextButton_ = nullptr;

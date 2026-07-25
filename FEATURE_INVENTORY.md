@@ -394,5 +394,7 @@ This is the most significant conditional feature in the codebase.
 | Rubber-band measure preview | ✓ Already in place (mouseMoveEvent updates `measureEnd_` in measure/cross-section mode; `setCursor(Qt::CrossCursor)` is set by `setMeasureMode` / `setCrossSectionMode`). |
 | Radar health indicator | ✓ Added in P1 round 3: colored dot + label under the station summary, driven by `volumeReady`, `sourceFailed`, radar selection, and a 30 s `healthTimer_`. Online ≤ 5 min, Stale 5–15 min, Offline > 15 min or after a failed fetch. |
 | Multi pin cards | ✓ Added in P1 round 3: `P` toggles `RadarMapCanvas::setPinnedOverlayLocked`; locked cards survive comparison clicks. Lock glyph drawn in the card header. |
+| CWA / selected-radar warning filter | ✓ Added in P1 round 4: `RadarMapCanvas::setProximityFilter(anchor, radiusKm)` plus a control-dock checkbox + radius spinbox. Anchor is the selected radar's coordinates, or the chase point when chase mode is on. |
+| Named layout presets | ✓ Added in P1 round 4: `presetsCombo_` + "Save..." button; three built-ins (Chase 1×1 / Analysis 2×2 dual-pol / Lightning scout 1×2) and user presets persisted under `presets/<name>` in QSettings. |
 | GPU volume rendering | ✗ Backlog only — no code |
 | Storm-scale nowcasting | ✗ Backlog only — no code |

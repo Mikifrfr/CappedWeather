@@ -31,6 +31,9 @@
 #include <QFont>
 #include <QFrame>
 #include <QGuiApplication>
+#include <QIcon>
+#include <QImage>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -633,6 +636,28 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     lightningFusionCheck_->setToolTip(QStringLiteral("Associate GLM jumps with reflectivity objects and azimuthal shear"));
     controlLayout->addWidget(lightningFusionCheck_);
 
+    proximityFilterCheck_ = new QCheckBox(QStringLiteral("Filter warnings to selected radar / chase point"), controlBody);
+    proximityFilterCheck_->setObjectName(QStringLiteral("proximityFilterCheck"));
+    proximityFilterCheck_->setToolTip(QStringLiteral("Hide warnings outside the radius below"));
+    controlLayout->addWidget(proximityFilterCheck_);
+    auto* proximityRow = new QHBoxLayout();
+    auto* proximityLabel = new QLabel(QStringLiteral("Proximity radius"), controlBody);
+    proximityFilterRadius_ = new QDoubleSpinBox(controlBody);
+    proximityFilterRadius_->setRange(10.0, 1500.0);
+    proximityFilterRadius_->setSuffix(QStringLiteral(" km"));
+    proximityFilterRadius_->setSingleStep(10.0);
+    proximityFilterRadius_->setValue(200.0);
+    proximityFilterRadius_->setEnabled(false);
+    proximityRow->addWidget(proximityLabel);
+    proximityRow->addWidget(proximityFilterRadius_, 1);
+    controlLayout->addLayout(proximityRow);
+    connect(proximityFilterCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        proximityFilterRadius_->setEnabled(enabled);
+        pushProximityFilterToCanvases();
+    });
+    connect(proximityFilterRadius_, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this](double) { pushProximityFilterToCanvases(); });
+
     // Per-panel overlay overrides. The four global checkboxes above remain the
     // default for every panel. Setting any checkbox here takes the active
     // panel out of the "follow global" pool and freezes its visibility state.
@@ -811,6 +836,26 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     controlLayout->addWidget(panelLayoutCombo_);
     connect(panelLayoutCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::setPanelLayout);
+    auto* presetRow = new QHBoxLayout();
+    presetsCombo_ = new QComboBox(controlBody);
+    presetsCombo_->setObjectName(QStringLiteral("presetsCombo"));
+    presetsCombo_->setToolTip(QStringLiteral("Named panel layout preset (built-in + user-saved)"));
+    savePresetButton_ = new QToolButton(controlBody);
+    savePresetButton_->setObjectName(QStringLiteral("savePresetButton"));
+    savePresetButton_->setText(QStringLiteral("Save…"));
+    savePresetButton_->setToolTip(QStringLiteral("Capture the current layout + per-panel products as a new preset"));
+    presetRow->addWidget(presetsCombo_, 1);
+    presetRow->addWidget(savePresetButton_);
+    controlLayout->addLayout(presetRow);
+    connect(presetsCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](const int index) {
+                if (index < 0) return;
+                const auto name = presetsCombo_->itemData(index).toString();
+                if (name.isEmpty()) return;
+                applyLayoutPreset(name);
+            });
+    connect(savePresetButton_, &QToolButton::clicked, this, &MainWindow::saveCurrentAsPreset);
+    rebuildPresetsCombo();
     controlLayout->addSpacing(10);
 
     addSection(QStringLiteral("NAVIGATION"));
@@ -1144,6 +1189,7 @@ void MainWindow::radarSelected(const QModelIndex& index) {
             }
         }
     }
+    pushProximityFilterToCanvases();
     loadingProgress_->setRange(0, 0);
     loadingProgress_->show();
     cancelButton_->show();
@@ -2004,6 +2050,7 @@ void MainWindow::showSettingsDialog() {
     if (chaseMode_) selectNearestChaseRadar();
     if (alertCenter_) {
         alertCenter_->setChaseMode(chaseMode_, chaseLatitude_, chaseLongitude_);
+        pushProximityFilterToCanvases();
         AlertConfig cfg = alertCenter_->config();
         cfg.enabled = alertsEnabled->isChecked();
         cfg.soundEnabled = alertsSound->isChecked();
@@ -2326,6 +2373,164 @@ RadarHealthState MainWindow::classifyHealth() const {
 
 void MainWindow::recomputeRadarHealth() {
     setRadarHealth(classifyHealth());
+}
+
+void MainWindow::pushProximityFilterToCanvases() {
+    if (!proximityFilterCheck_ || !proximityFilterRadius_) return;
+    std::optional<QPointF> anchor;
+    if (proximityFilterCheck_->isChecked()) {
+        if (chaseMode_) {
+            anchor = QPointF(chaseLongitude_, chaseLatitude_);
+        } else if (!selectedRadarId_.isEmpty()) {
+            const auto row = model_->rowForRadar(selectedRadarId_);
+            if (row >= 0) {
+                const auto& site = model_->siteAt(row);
+                if (site.latitude && site.longitude) {
+                    anchor = QPointF(*site.longitude, *site.latitude);
+                }
+            }
+        }
+    }
+    const auto radius = proximityFilterRadius_->value();
+    for (auto* panel : maps_) panel->setProximityFilter(anchor, radius);
+}
+
+QVector<LayoutPreset> MainWindow::builtInPresets() const {
+    QVector<LayoutPreset> presets;
+    {
+        LayoutPreset p;
+        p.name = QStringLiteral("Chase 1x1");
+        p.layoutIndex = 0; // 1x1
+        p.product[0] = static_cast<int>(ProductKind::Reflectivity);
+        p.tilt[0] = -1;
+        p.builtIn = true;
+        presets.push_back(p);
+    }
+    {
+        LayoutPreset p;
+        p.name = QStringLiteral("Analysis 2x2 dual-pol");
+        p.layoutIndex = 3; // 2x2
+        p.product[0] = static_cast<int>(ProductKind::Reflectivity);
+        p.product[1] = static_cast<int>(ProductKind::Velocity);
+        p.product[2] = static_cast<int>(ProductKind::CorrelationCoefficient);
+        p.product[3] = static_cast<int>(ProductKind::DifferentialReflectivity);
+        for (int i = 0; i < 4; ++i) p.tilt[i] = -1;
+        p.builtIn = true;
+        presets.push_back(p);
+    }
+    {
+        LayoutPreset p;
+        p.name = QStringLiteral("Lightning scout 1x2");
+        p.layoutIndex = 1; // 1x2
+        p.product[0] = static_cast<int>(ProductKind::Reflectivity);
+        p.product[1] = static_cast<int>(ProductKind::Reflectivity);
+        p.tilt[0] = -1;
+        p.tilt[1] = -1;
+        p.builtIn = true;
+        presets.push_back(p);
+    }
+    return presets;
+}
+
+LayoutPreset MainWindow::presetByName(const QString& name) const {
+    for (const auto& p : builtInPresets()) {
+        if (p.name == name) return p;
+    }
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("presets/") + name);
+    LayoutPreset p;
+    p.name = name;
+    p.layoutIndex = std::clamp(settings.value(QStringLiteral("layout"), 0).toInt(), 0, 3);
+    for (int i = 0; i < 4; ++i) {
+        p.product[i] = std::clamp(
+            settings.value(QStringLiteral("panel%1/product").arg(i),
+                           static_cast<int>(ProductKind::Reflectivity)).toInt(),
+            0, 5);
+        p.tilt[i] = settings.value(QStringLiteral("panel%1/tilt").arg(i), -1).toInt();
+    }
+    settings.endGroup();
+    p.builtIn = false;
+    return p;
+}
+
+void MainWindow::rebuildPresetsCombo() {
+    if (!presetsCombo_) return;
+    const QSignalBlocker blocker(presetsCombo_);
+    presetsCombo_->clear();
+    presetsCombo_->addItem(QStringLiteral("(none)"), QString());
+    for (const auto& p : builtInPresets()) {
+        presetsCombo_->addItem(p.name, p.name);
+    }
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("presets"));
+    const auto userPresets = settings.childGroups();
+    settings.endGroup();
+    QStringList userNames;
+    for (const auto& g : userPresets) userNames.push_back(g);
+    userNames.sort();
+    for (const auto& name : userNames) {
+        presetsCombo_->addItem(QStringLiteral("★ %1").arg(name), name);
+    }
+}
+
+void MainWindow::applyLayoutPreset(const QString& name) {
+    if (name.isEmpty()) return;
+    const auto preset = presetByName(name);
+    // 1. Switch the layout
+    if (panelLayoutCombo_ && panelLayoutCombo_->currentIndex() != preset.layoutIndex) {
+        const QSignalBlocker blocker(panelLayoutCombo_);
+        panelLayoutCombo_->setCurrentIndex(preset.layoutIndex);
+    }
+    setPanelLayout(preset.layoutIndex);
+    // 2. Apply per-panel product + tilt without changing radar sessions
+    for (int i = 0; i < maps_.size(); ++i) {
+        auto* panel = maps_.at(i);
+        panel->setProduct(static_cast<ProductKind>(preset.product[i]));
+        if (preset.tilt[i] > 0) panel->setElevationFilter(preset.tilt[i]);
+        else panel->setElevationFilter(std::nullopt);
+    }
+    if (map_) {
+        activateMap(map_);
+        rebuildTiltCombo();
+    }
+    saveSettings();
+}
+
+void MainWindow::saveCurrentAsPreset() {
+    bool ok = false;
+    const auto suggested = QStringLiteral("My preset %1")
+                                .arg(QDateTime::currentDateTime().toString(QStringLiteral("HHmm")));
+    const auto name = QInputDialog::getText(this, QStringLiteral("Save layout preset"),
+                                            QStringLiteral("Preset name:"), QLineEdit::Normal,
+                                            suggested, &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+    if (name == QStringLiteral("(none)")) return;
+    for (const auto& p : builtInPresets()) {
+        if (p.name.compare(name, Qt::CaseInsensitive) == 0) {
+            QMessageBox::warning(this, QStringLiteral("Preset name"),
+                                 QStringLiteral("'%1' is a built-in preset name; pick another.").arg(name));
+            return;
+        }
+    }
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("presets/") + name);
+    settings.setValue(QStringLiteral("layout"),
+                      panelLayoutCombo_ ? panelLayoutCombo_->currentIndex() : 0);
+    for (int i = 0; i < maps_.size() && i < 4; ++i) {
+        const auto* panel = maps_.at(i);
+        settings.setValue(QStringLiteral("panel%1/product").arg(i), static_cast<int>(panel->product()));
+        settings.setValue(QStringLiteral("panel%1/tilt").arg(i), panel->elevationFilter().value_or(-1));
+    }
+    settings.endGroup();
+    rebuildPresetsCombo();
+    // Re-select the saved preset by name.
+    for (int i = 0; i < presetsCombo_->count(); ++i) {
+        if (presetsCombo_->itemData(i).toString() == name) {
+            const QSignalBlocker blocker(presetsCombo_);
+            presetsCombo_->setCurrentIndex(i);
+            break;
+        }
+    }
 }
 
 } // namespace cappedweather

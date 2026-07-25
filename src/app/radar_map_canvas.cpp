@@ -594,6 +594,30 @@ void RadarMapCanvas::setOverlayOverrides(std::optional<OverlayVisibility> overri
     }
 }
 
+namespace {
+double haversineMeters(double lat1, double lon1, double lat2, double lon2) {
+    constexpr double earthRadiusMeters = 6371000.0;
+    const auto phi1 = qDegreesToRadians(lat1);
+    const auto phi2 = qDegreesToRadians(lat2);
+    const auto dPhi = qDegreesToRadians(lat2 - lat1);
+    const auto dLambda = qDegreesToRadians(lon2 - lon1);
+    const auto a = std::sin(dPhi / 2.0) * std::sin(dPhi / 2.0) +
+                   std::cos(phi1) * std::cos(phi2) * std::sin(dLambda / 2.0) *
+                       std::sin(dLambda / 2.0);
+    const auto c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(std::max(0.0, 1.0 - a)));
+    return earthRadiusMeters * c;
+}
+} // namespace
+
+void RadarMapCanvas::setProximityFilter(std::optional<QPointF> anchor, double radiusKm) {
+    proximityAnchor_ = std::move(anchor);
+    proximityRadiusKm_ = std::max(1.0, radiusKm);
+    ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
+    update();
+}
+
 void RadarMapCanvas::setPalette(const PaletteKind palette) {
     palette_ = palette;
     invalidateOverlay();
@@ -1351,11 +1375,26 @@ void RadarMapCanvas::ensureWeatherPaths() const {
     stormReportWorldPoints_.reserve(stormReports_.size());
     for (const auto& report : stormReports_)
         stormReportWorldPoints_.push_back(worldPoint(report.coordinate.y(), report.coordinate.x()));
+    const auto radiusMeters = proximityRadiusKm_ * 1000.0;
     for (int warningIndex = 0; warningIndex < warnings_.size(); ++warningIndex) {
         const auto& warning = warnings_.at(warningIndex);
         if (!warningFilter_.isEmpty() &&
             !warning.event.contains(warningFilter_, Qt::CaseInsensitive) &&
             !warning.severity.contains(warningFilter_, Qt::CaseInsensitive)) continue;
+        if (proximityAnchor_.has_value()) {
+            const auto anchor = *proximityAnchor_;
+            bool inRange = false;
+            for (const auto& polygon : warning.polygons) {
+                for (const auto& point : polygon.exterior) {
+                    if (haversineMeters(anchor.y(), anchor.x(), point.y(), point.x()) <= radiusMeters) {
+                        inRange = true;
+                        break;
+                    }
+                }
+                if (inRange) break;
+            }
+            if (!inRange) continue;
+        }
         const auto color = warning.alertColor.isValid()
                                ? warning.alertColor
                                : nwsAlertStyle(warning.event).color;
