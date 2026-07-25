@@ -18,6 +18,9 @@
 #include <QCloseEvent>
 #include <QCompleter>
 #include <QCoreApplication>
+#include <QDate>
+#include <QDateTime>
+#include <QDateTimeEdit>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -56,8 +59,10 @@
 #include <QStandardItemModel>
 #include <QSpinBox>
 #include <QStatusBar>
-#include <QTimer>
+#include <QThread>
 #include <QThreadPool>
+#include <QTime>
+#include <QTimer>
 #include <QToolButton>
 #include <QTextStream>
 #include <QVBoxLayout>
@@ -224,17 +229,25 @@ MainWindow::MainWindow(QWidget* parent)
         if (animationTimer_->isActive()) animationTimer_->setInterval(speedCombo_->currentData().toInt());
     });
     connect(warningsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setWarningsVisible(visible);
+        for (auto* panel : maps_) {
+            if (!panel->overlayOverrides().has_value()) panel->setWarningsVisible(visible);
+        }
     });
     connect(reportsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setStormReportsVisible(visible);
+        for (auto* panel : maps_) {
+            if (!panel->overlayOverrides().has_value()) panel->setStormReportsVisible(visible);
+        }
     });
     connect(lightningCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setLightningVisible(visible);
+        for (auto* panel : maps_) {
+            if (!panel->overlayOverrides().has_value()) panel->setLightningVisible(visible);
+        }
         lightningFusionCheck_->setEnabled(visible);
     });
     connect(lightningFusionCheck_, &QCheckBox::toggled, this, [this](bool visible) {
-        for (auto* panel : maps_) panel->setLightningFusionVisible(visible);
+        for (auto* panel : maps_) {
+            if (!panel->overlayOverrides().has_value()) panel->setLightningFusionVisible(visible);
+        }
     });
     connect(source_, &NexradSource::statusChanged, this, &MainWindow::sourceStatusChanged);
     connect(source_, &NexradSource::requestFailed, this, &MainWindow::sourceFailed);
@@ -298,6 +311,36 @@ MainWindow::MainWindow(QWidget* parent)
     addShortcut(QKeySequence(Qt::Key_Space), [this] { if (playButton_->isEnabled()) playButton_->toggle(); });
     addShortcut(QKeySequence(Qt::Key_Left), [this] { previousButton_->click(); });
     addShortcut(QKeySequence(Qt::Key_Right), [this] { nextButton_->click(); });
+    addShortcut(QKeySequence(Qt::Key_Home), [this] {
+        const auto session = activeSession();
+        if (!session || session->history.empty()) return;
+        stopAnimation();
+        session->followLatest = false;
+        showFrame(0);
+    });
+    addShortcut(QKeySequence(Qt::Key_End), [this] {
+        const auto session = activeSession();
+        if (!session || session->history.empty()) return;
+        session->followLatest = liveButton_->isChecked();
+        showFrame(static_cast<int>(session->history.size()) - 1);
+    });
+    connect(timeJumpEdit_, &QDateTimeEdit::editingFinished, this, [this] {
+        const auto session = activeSession();
+        if (!session || session->history.empty()) return;
+        const auto target = timeJumpEdit_->dateTime();
+        if (target <= timeJumpEdit_->minimumDateTime()) return; // special value
+        int bestIndex = 0;
+        qint64 bestDelta = std::numeric_limits<qint64>::max();
+        for (std::size_t i = 0; i < session->history.size(); ++i) {
+            const auto dt = session->history[i].dataTime;
+            if (!dt.isValid()) continue;
+            const auto delta = std::abs(dt.toSecsSinceEpoch() - target.toSecsSinceEpoch());
+            if (delta < bestDelta) { bestDelta = delta; bestIndex = static_cast<int>(i); }
+        }
+        stopAnimation();
+        session->followLatest = false;
+        showFrame(bestIndex);
+    });
     addShortcut(QKeySequence(Qt::Key_PageUp), [this] {
         tiltCombo_->setCurrentIndex(std::max(0, tiltCombo_->currentIndex() - 1));
     });
@@ -566,6 +609,51 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     lightningFusionCheck_->setChecked(true);
     lightningFusionCheck_->setToolTip(QStringLiteral("Associate GLM jumps with reflectivity objects and azimuthal shear"));
     controlLayout->addWidget(lightningFusionCheck_);
+
+    // Per-panel overlay overrides. The four global checkboxes above remain the
+    // default for every panel. Setting any checkbox here takes the active
+    // panel out of the "follow global" pool and freezes its visibility state.
+    addSection(QStringLiteral("Active panel overlays"));
+    activePanelOverlayLabel_ = new QLabel(QStringLiteral("(no panel)"), controlBody);
+    activePanelOverlayLabel_->setObjectName(QStringLiteral("activePanelOverlayLabel"));
+    activePanelOverlayLabel_->setToolTip(
+        QStringLiteral("Click a panel first; these controls then act on the active panel only."));
+    controlLayout->addWidget(activePanelOverlayLabel_);
+    activePanelWarnings_ = new QCheckBox(QStringLiteral("Warnings"), controlBody);
+    activePanelReports_ = new QCheckBox(QStringLiteral("Storm reports"), controlBody);
+    activePanelLightning_ = new QCheckBox(QStringLiteral("GLM lightning"), controlBody);
+    activePanelFusion_ = new QCheckBox(QStringLiteral("Radar fusion"), controlBody);
+    controlLayout->addWidget(activePanelWarnings_);
+    controlLayout->addWidget(activePanelReports_);
+    controlLayout->addWidget(activePanelLightning_);
+    controlLayout->addWidget(activePanelFusion_);
+    auto* perPanelRow = new QHBoxLayout();
+    useGlobalButton_ = new QToolButton(controlBody);
+    useGlobalButton_->setText(QStringLiteral("Use global"));
+    useGlobalButton_->setToolTip(QStringLiteral("Drop the per-panel override and follow the global toggles above"));
+    perPanelRow->addWidget(useGlobalButton_);
+    perPanelRow->addStretch(1);
+    controlLayout->addLayout(perPanelRow);
+    const auto applyActivePanelOverrides = [this]() {
+        if (!map_) return;
+        RadarMapCanvas::OverlayVisibility overrides;
+        overrides.warnings = activePanelWarnings_->isChecked();
+        overrides.stormReports = activePanelReports_->isChecked();
+        overrides.lightning = activePanelLightning_->isChecked();
+        overrides.lightningFusion = activePanelFusion_->isChecked();
+        map_->setOverlayOverrides(overrides);
+        if (useGlobalButton_) useGlobalButton_->setEnabled(true);
+    };
+    connect(activePanelWarnings_, &QCheckBox::toggled, this, applyActivePanelOverrides);
+    connect(activePanelReports_, &QCheckBox::toggled, this, applyActivePanelOverrides);
+    connect(activePanelLightning_, &QCheckBox::toggled, this, applyActivePanelOverrides);
+    connect(activePanelFusion_, &QCheckBox::toggled, this, applyActivePanelOverrides);
+    connect(useGlobalButton_, &QToolButton::clicked, this, [this]() {
+        if (!map_) return;
+        map_->setOverlayOverrides(std::nullopt);
+        refreshActivePanelOverlayUi();
+    });
+    refreshActivePanelOverlayUi();
     if (!cappedweather::glmL2ReaderAvailable()) {
         lightningCheck_->setEnabled(false);
         lightningCheck_->setChecked(false);
@@ -785,11 +873,24 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     transportRow->addWidget(frameSlider_, 1);
     speedCombo_ = new QComboBox(playbackBody);
     speedCombo_->setObjectName(QStringLiteral("speedCombo"));
+    speedCombo_->addItem(QStringLiteral("0.5x"), 2000);
     speedCombo_->addItem(QStringLiteral("1x"), 1000);
     speedCombo_->addItem(QStringLiteral("2x"), 500);
     speedCombo_->addItem(QStringLiteral("4x"), 250);
-    speedCombo_->setCurrentIndex(1);
+    speedCombo_->addItem(QStringLiteral("8x"), 125);
+    speedCombo_->addItem(QStringLiteral("16x"), 62);
+    speedCombo_->setCurrentIndex(2);
     transportRow->addWidget(speedCombo_);
+    timeJumpEdit_ = new QDateTimeEdit(playbackBody);
+    timeJumpEdit_->setObjectName(QStringLiteral("timeJumpEdit"));
+    timeJumpEdit_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
+    timeJumpEdit_->setCalendarPopup(true);
+    timeJumpEdit_->setToolTip(QStringLiteral("Jump to the closest loaded frame at this time (UTC)"));
+    timeJumpEdit_->setSpecialValueText(QStringLiteral("(jump to time)"));
+    timeJumpEdit_->setMinimumDateTime(QDateTime(QDate(2000, 1, 1), QTime(0, 0)));
+    timeJumpEdit_->setDateTime(QDateTime(QDate(2000, 1, 1), QTime(0, 0)));
+    timeJumpEdit_->setMaximumDateTime(QDateTime::currentDateTimeUtc().addYears(1));
+    transportRow->addWidget(timeJumpEdit_);
     playbackLayout->addLayout(transportRow);
 
     auto* detailsRow = new QHBoxLayout();
@@ -1579,8 +1680,13 @@ void MainWindow::restoreSettings() {
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
     if (lightningFusionCheck_->isEnabled())
         lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
-    speedCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("timeline/speed"), 1).toInt(),
-                                            0, speedCombo_->count() - 1));
+    // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
+    // speed combo. After the P1 round 2 expansion, 1x is at index 1, 2x at 2,
+    // 4x at 3, and we added 0.5x, 8x, 16x at 0, 4, 5.
+    const auto rawSpeed = settings.value(QStringLiteral("timeline/speed"), 2).toInt();
+    int migratedSpeed = rawSpeed;
+    if (rawSpeed >= 0 && rawSpeed <= 2) migratedSpeed = rawSpeed + 1;
+    speedCombo_->setCurrentIndex(std::clamp(migratedSpeed, 0, speedCombo_->count() - 1));
     panelLayoutCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("panels/layout"), 0).toInt(),
                                                   0, panelLayoutCombo_->count() - 1));
     activateMap(maps_.front());
@@ -1987,6 +2093,38 @@ void MainWindow::activateMap(RadarMapCanvas* map) {
         if (session->frameIndex < 0) session->frameIndex = static_cast<int>(session->history.size()) - 1;
         showFrame(session->frameIndex);
     }
+    refreshActivePanelOverlayUi();
+}
+
+void MainWindow::refreshActivePanelOverlayUi() {
+    if (!activePanelWarnings_) return; // not yet built
+    const auto index = map_ ? panelIndex(map_) : -1;
+    if (index < 0) {
+        activePanelOverlayLabel_->setText(QStringLiteral("(no active panel)"));
+        for (auto* c : {activePanelWarnings_, activePanelReports_, activePanelLightning_, activePanelFusion_}) {
+            const QSignalBlocker blocker(c);
+            c->setChecked(false);
+            c->setEnabled(false);
+        }
+        useGlobalButton_->setEnabled(false);
+        return;
+    }
+    auto* panel = maps_.at(index);
+    activePanelOverlayLabel_->setText(QStringLiteral("Panel %1 (radar %2)").arg(index + 1).arg(panel->radarId()));
+    const auto overrides = panel->overlayOverrides();
+    auto warningsValue = overrides ? overrides->warnings : warningsCheck_->isChecked();
+    auto reportsValue = overrides ? overrides->stormReports : reportsCheck_->isChecked();
+    auto lightningValue = overrides ? overrides->lightning : lightningCheck_->isChecked();
+    auto fusionValue = overrides ? overrides->lightningFusion : lightningFusionCheck_->isChecked();
+    for (auto* c : {activePanelWarnings_, activePanelReports_, activePanelLightning_, activePanelFusion_}) {
+        const QSignalBlocker blocker(c);
+        c->setEnabled(true);
+    }
+    activePanelWarnings_->setChecked(warningsValue);
+    activePanelReports_->setChecked(reportsValue);
+    activePanelLightning_->setChecked(lightningValue);
+    activePanelFusion_->setChecked(fusionValue);
+    useGlobalButton_->setEnabled(overrides.has_value());
 }
 
 void MainWindow::synchronizeMapView(RadarMapCanvas* source) {

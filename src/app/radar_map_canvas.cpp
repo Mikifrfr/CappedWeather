@@ -581,6 +581,19 @@ void RadarMapCanvas::setWarningFilter(const QString& filter) {
     update();
 }
 
+void RadarMapCanvas::setOverlayOverrides(std::optional<OverlayVisibility> overrides) {
+    overlayOverrides_ = std::move(overrides);
+    if (overlayOverrides_.has_value()) {
+        setWarningsVisible(overlayOverrides_->warnings);
+        setStormReportsVisible(overlayOverrides_->stormReports);
+        setLightningVisible(overlayOverrides_->lightning);
+        setLightningFusionVisible(overlayOverrides_->lightningFusion);
+    } else {
+        // Drop the override: the next global toggle will repaint the flags.
+        update();
+    }
+}
+
 void RadarMapCanvas::setPalette(const PaletteKind palette) {
     palette_ = palette;
     invalidateOverlay();

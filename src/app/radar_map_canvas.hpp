@@ -66,6 +66,17 @@ public:
     void setStormReportsVisible(bool visible);
     void setStormReportKindVisible(StormReportKind kind, bool visible);
     void setWarningFilter(const QString& filter);
+    // Per-panel overlay overrides. When `hasOverrides` is false, the global
+    // toggles from MainWindow drive visibility (the default for every panel).
+    // When `hasOverrides` is true, the four bools apply to this panel alone.
+    struct OverlayVisibility {
+        bool warnings = true;
+        bool stormReports = true;
+        bool lightning = true;
+        bool lightningFusion = true;
+    };
+    void setOverlayOverrides(std::optional<OverlayVisibility> overrides);
+    [[nodiscard]] std::optional<OverlayVisibility> overlayOverrides() const { return overlayOverrides_; }
     void setPalette(PaletteKind palette);
     void setCustomPalette(QVector<PaletteStop> stops);
     void setRadarOpacity(int percent);
@@ -259,6 +270,7 @@ private:
     bool lightningVisible_ = true;
     bool lightningFusionVisible_ = true;
     std::array<bool, 3> stormReportKindsVisible_{true, true, true};
+    std::optional<OverlayVisibility> overlayOverrides_;
     PaletteKind palette_ = PaletteKind::Capped;
     QVector<PaletteStop> customPalette_;
     int radarOpacity_ = 80;

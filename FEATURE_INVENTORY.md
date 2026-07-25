@@ -388,5 +388,8 @@ This is the most significant conditional feature in the codebase.
 | Persistent settings | ✓ Confirmed: `saveSettings()` covers all 21+ settings |
 | Warning / lightning jump alerts | ✓ Added in P1: `AlertCenter` (`src/app/alert_center.{hpp,cpp}`), sinks `overlaysReady` + `cellsUpdated`, plays sound (custom `.wav` via `QSoundEffect` when `Qt6::Multimedia` is available, system beep otherwise) and shows a tray balloon. NWS id + cell key dedupe with a configurable suppression window. |
 | Right-click map context menu | ✓ Added in P1: `RadarMapCanvas::contextMenuEvent` — select radar, recenter, national view, zoom in/out, copy lat/lon, inspect, and checkable measure / cross-section entries. |
+| Per-panel overlay toggles | ✓ Added in P1 round 2: `RadarMapCanvas::OverlayVisibility` + a new "Active panel overlays" section in the control dock (Warnings / Storm reports / GLM lightning / Radar fusion + "Use global" reset). |
+| More loop speeds (0.5×, 8×, 16×) | ✓ Added in P1 round 2: speed combo expanded from 3 to 6 entries; legacy `timeline/speed` indices migrated so existing user prefs keep the same speed. |
+| Jump to earliest / latest + absolute time entry | ✓ Added in P1 round 2: `Home` / `End` shortcuts + a `QDateTimeEdit` with calendar popup that finds the closest loaded frame. |
 | GPU volume rendering | ✗ Backlog only — no code |
 | Storm-scale nowcasting | ✗ Backlog only — no code |

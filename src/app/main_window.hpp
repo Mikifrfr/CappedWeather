@@ -14,7 +14,9 @@
 #include <memory>
 
 class QByteArray;
+class QCompleter;
 class QDateTime;
+class QDateTimeEdit;
 class QDockWidget;
 class QEvent;
 class QModelIndex;
@@ -84,6 +86,7 @@ private:
     void setPanelLayout(int layoutIndex);
     void activateMap(RadarMapCanvas* map);
     void synchronizeMapView(RadarMapCanvas* source);
+    void refreshActivePanelOverlayUi();
     void updateVelocityControls();
     void showCrossSection(const QPointF& start, const QPointF& end);
     void importCustomPalette();
@@ -149,6 +152,7 @@ private:
     QLabel* emptyStateHint_ = nullptr;
     QProgressBar* loadingProgress_ = nullptr;
     QSlider* frameSlider_ = nullptr;
+    QDateTimeEdit* timeJumpEdit_ = nullptr;
     QSlider* radarOpacitySlider_ = nullptr;
     QToolButton* previousButton_ = nullptr;
     QToolButton* playButton_ = nullptr;
@@ -168,6 +172,13 @@ private:
     QCheckBox* belowThresholdCheck_ = nullptr;
     QCheckBox* lightningCheck_ = nullptr;
     QCheckBox* lightningFusionCheck_ = nullptr;
+    // Per-panel overlay overrides (active panel only).
+    QLabel* activePanelOverlayLabel_ = nullptr;
+    QCheckBox* activePanelWarnings_ = nullptr;
+    QCheckBox* activePanelReports_ = nullptr;
+    QCheckBox* activePanelLightning_ = nullptr;
+    QCheckBox* activePanelFusion_ = nullptr;
+    QToolButton* useGlobalButton_ = nullptr;
     NexradSource* source_ = nullptr;
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;

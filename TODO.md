@@ -40,7 +40,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 - [ ] **Named layout presets** — e.g. “Chase 1×1”, “Analysis 2×2 dual-pol”, restore docks + panel products in one click.
 
 ### Overlays
-- [ ] **Per-panel overlay toggles** — warnings / reports / lightning / fusion independent per panel.
+- [x] **Per-panel overlay toggles** — new "Active panel overlays" section in the control dock with Warnings / Storm reports / GLM lightning / Radar fusion checkboxes plus a "Use global" reset. The four global checkboxes remain the default for every panel. Toggling any of the active-panel controls freezes the active panel's overlay state (`RadarMapCanvas::OverlayVisibility` stored as an `std::optional` on the canvas); the global toggles stop touching that panel until the user clicks "Use global".
 - [ ] **Overlay opacity + simple z-order** — especially warning polygons vs radar echo.
 - [ ] **SPC report declutter** — collision avoidance / density control in outbreak clusters.
 - [ ] **Single-card replace is OK as default** — but support “pin” lock so a card isn’t wiped by the next click.
@@ -52,8 +52,8 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 - [ ] **Low-bandwidth preset** — one-click: parallel chunks=1–2, shorter history, overlays throttled.
 
 ### Playback & export
-- [ ] **Jump to earliest / latest + absolute time entry** — type a UTC/local time; Home/End style shortcuts.
-- [ ] **More loop speeds** — 0.5×, 8×, 16× (and optional custom interval).
+- [x] **Jump to earliest / latest + absolute time entry** — `Home` jumps to the oldest frame in the active session, `End` jumps to the newest (and re-engages LIVE follow when the LIVE toggle is on). A `QDateTimeEdit` with calendar popup sits next to the frame slider; editing it finds the closest loaded frame by `dataTime` and shows it.
+- [x] **More loop speeds** — speed combo now offers 0.5×, 1×, 2×, 4×, 8×, 16×. Default is 2×. Legacy `timeline/speed` settings (0/1/2) are migrated to 1/2/3 so existing users' "2×" choice stays "2×".
 - [ ] **Non-blocking GIF/MP4 export** — worker thread; add MP4/WebM for chaser sharing (GIF kept).
 - [ ] **Frame bookmarks** — mark notable volumes in the short timeline and jump back.
 
