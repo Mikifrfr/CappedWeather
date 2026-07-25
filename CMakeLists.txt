@@ -92,6 +92,9 @@ if(CAPPEDWEATHER_BUILD_APP)
     find_package(Qt6 6.4 COMPONENTS Core Gui Widgets Network Xml QUIET)
     set(CAPPEDWEATHER_QT_FOUND ${Qt6_FOUND})
 
+    find_package(Qt6 6.4 COMPONENTS Multimedia QUIET)
+    set(CAPPEDWEATHER_QT_MULTIMEDIA ${Qt6_MULTIMEDIA_FOUND})
+
     find_package(BZip2 QUIET)
 
     if(CAPPEDWEATHER_QT_FOUND AND BZip2_FOUND)
@@ -99,6 +102,8 @@ if(CAPPEDWEATHER_BUILD_APP)
         get_filename_component(CAPPEDWEATHER_QT_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
 
         set(CAPPEDWEATHER_UI_SOURCES
+            src/app/alert_center.cpp
+            src/app/alert_center.hpp
             src/app/cross_section_widget.cpp
             src/app/cross_section_widget.hpp
             src/app/gif_writer.cpp
@@ -133,6 +138,10 @@ if(CAPPEDWEATHER_BUILD_APP)
             Qt6::Xml
             BZip2::BZip2
         )
+        if(CAPPEDWEATHER_QT_MULTIMEDIA)
+            target_link_libraries(CappedWeather PRIVATE Qt6::Multimedia)
+            target_compile_definitions(CappedWeather PRIVATE CAPPEDWEATHER_HAS_MULTIMEDIA=1)
+        endif()
 
         target_compile_definitions(CappedWeather PRIVATE
             CAPPEDWEATHER_HAS_BZIP2=1
@@ -186,6 +195,10 @@ if(CAPPEDWEATHER_BUILD_APP)
                 Qt6::Test
                 BZip2::BZip2
             )
+            if(CAPPEDWEATHER_QT_MULTIMEDIA)
+                target_link_libraries(cappedweather_ui_tests PRIVATE Qt6::Multimedia)
+                target_compile_definitions(cappedweather_ui_tests PRIVATE CAPPEDWEATHER_HAS_MULTIMEDIA=1)
+            endif()
             target_compile_definitions(cappedweather_ui_tests PRIVATE
                 CAPPEDWEATHER_HAS_BZIP2=1
                 CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
@@ -216,6 +229,10 @@ if(CAPPEDWEATHER_BUILD_APP)
                 Qt6::Xml
                 BZip2::BZip2
             )
+            if(CAPPEDWEATHER_QT_MULTIMEDIA)
+                target_link_libraries(cappedweather_live_gui_probe PRIVATE Qt6::Multimedia)
+                target_compile_definitions(cappedweather_live_gui_probe PRIVATE CAPPEDWEATHER_HAS_MULTIMEDIA=1)
+            endif()
             target_compile_definitions(cappedweather_live_gui_probe PRIVATE
                 CAPPEDWEATHER_HAS_BZIP2=1
                 CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"

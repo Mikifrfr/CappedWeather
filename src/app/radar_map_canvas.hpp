@@ -29,6 +29,7 @@ class QPainter;
 class QShowEvent;
 class QTimer;
 class QWheelEvent;
+class QContextMenuEvent;
 
 namespace cappedweather {
 
@@ -110,6 +111,10 @@ signals:
     void activated();
     void viewChanged(const QPointF& center, int zoom);
     void crossSectionRequested(const QPointF& start, const QPointF& end);
+    // Emitted when the context menu toggles a tool mode so the toolbar state
+    // can stay in sync with the canvas.
+    void measureModeToggled(bool enabled);
+    void crossSectionModeToggled(bool enabled);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -119,6 +124,7 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void leaveEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
 
 private:
     enum class PinnedInfoKind {

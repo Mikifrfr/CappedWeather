@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/level2_decoder.hpp"
+#include "app/alert_center.hpp"
 #include "app/weather_overlay_source.hpp"
 
 #include <QMainWindow>
@@ -36,6 +37,7 @@ class GlmSource;
 class RadarMapCanvas;
 class RadarListModel;
 class WeatherOverlaySource;
+class AlertCenter;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -169,6 +171,7 @@ private:
     NexradSource* source_ = nullptr;
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
+    AlertCenter* alertCenter_ = nullptr;
     QTimer* refreshTimer_ = nullptr;
     QTimer* overlayRefreshTimer_ = nullptr;
     QTimer* animationTimer_ = nullptr;

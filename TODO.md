@@ -8,6 +8,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 ## Done / nearly done
 
 - [x] **Lightning-jump engine (GLM L2 + Level II fusion)** — open-source real-time 2σ LJA on GOES GLM, fused with NEXRAD. Spec: `docs/lightning-jump-engine.md`. Code + M5 verification exist; mark complete when netCDF production builds are the default path and TODO status is cleaned up.
+- [x] **P1 first slice — alerts + right-click context menu** — `AlertCenter` sinks `WeatherOverlaySource::overlaysReady` and `GlmSource::cellsUpdated`, plays a sound (custom `.wav` via `QSoundEffect` or system beep fallback) and shows a tray balloon when a new NWS alert or a high-σ lightning jump is observed. Dedupe keyed by NWS `@id` and lightning cell id, with a configurable suppression window. `RadarMapCanvas::contextMenuEvent` exposes select / recenter / national view / zoom in/out / copy lat-lon / inspect / measure / cross-section. Both new behaviors gated by a `Qt6::Multimedia` opt-in (cleanly degrades to tray + beep otherwise).
 
 ---
 
@@ -24,13 +25,13 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 ## P1 — Live ops & chase ergonomics (highest ROI vs GR2A without cloning it)
 
 ### Alerts & situational awareness
-- [ ] **Warning / jump audio + system notifications** — optional sound + tray/OS notify when a TOR/SVR/FFW (or configurable filter) intersects selected radar domain or chase position; same for new high-σ lightning jumps.
+- [x] **Warning / jump audio + system notifications** — `AlertCenter` (sinks `WeatherOverlaySource::overlaysReady` + `GlmSource::cellsUpdated`) plays a sound (system beep fallback, or a user-selected `.wav` via `QSoundEffect` when `Qt6::Multimedia` is available) and shows a system tray balloon notification. Dedupe is keyed by NWS `@id` / lightning cell key with a configurable suppression window. Settings dialog has enable / sound / notification toggles, a geo filter around the selected radar or chase point, a comma-separated NWS event allowlist, lightning sigma threshold, suppression minutes, custom sound file picker, and a Test button.
 - [ ] **Radar health indicator** — clear online / stale / offline affordance (not only status text).
 - [ ] **CWA / selected-radar warning filter** — reduce national noise; “warnings near active radar / chase point” mode.
 - [ ] **Multi pin cards** — pin more than one warning/report/lightning card at once for comparison.
 
 ### Map & tool UX
-- [ ] **Right-click map context menu** — copy lat/lon, select radar, favorite, start measure/cross-section, recenter, open warning details.
+- [x] **Right-click map context menu** — `RadarMapCanvas::contextMenuEvent` exposes: Select radar (when over a station), Recenter on selected, National view, Zoom in/out, Copy lat/lon (formatted to 4 dp; clipboard copy to 6 dp), Inspect at cursor, and checkable Measure / Cross-section entries. The two tool toggles emit `measureModeToggled` / `crossSectionModeToggled` so the toolbar buttons stay in sync.
 - [ ] **Nav history undo/redo** — pan/zoom stack (misclick recovery).
 - [ ] **Rubber-band measure preview** — live range/bearing line while placing the second point; crosshair cursor in measure/XS modes.
 - [ ] **Modeless cross-section window** — replace modal `QDialog::exec()` so live radar stays usable beside the XS view.

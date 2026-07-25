@@ -268,6 +268,7 @@ QVector<WeatherWarning> WeatherOverlaySource::parseAlerts(const QByteArray& data
         const auto geometryValue = feature.value(QStringLiteral("geometry"));
         const auto properties = feature.value(QStringLiteral("properties")).toObject();
         WeatherWarning warning;
+        warning.id = feature.value(QStringLiteral("id")).toString();
         warning.event = properties.value(QStringLiteral("event")).toString();
         warning.headline = properties.value(QStringLiteral("headline")).toString();
         warning.severity = properties.value(QStringLiteral("severity")).toString();

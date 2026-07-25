@@ -6,10 +6,15 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QNetworkDiskCache>
+#include <QAction>
 #include <QApplication>
 #include <QCache>
+#include <QClipboard>
+#include <QContextMenuEvent>
+#include <QGuiApplication>
 #include <QPointer>
 #include <QLineF>
+#include <QMenu>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QMouseEvent>
@@ -2387,6 +2392,76 @@ void RadarMapCanvas::showEvent(QShowEvent* event) {
         velocityOptions_.mode != VelocityProcessingMode::Native && !processedVelocity_)
         refreshVelocityProcessing();
     update();
+}
+
+void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
+    // Translate the right-click into a canvas-space point and build a menu
+    // tailored to whatever the cursor is over. Right-click on a station mark
+    // offers a "Select this radar" path; right-click on the map offers
+    // copy-lat/lon, recenter, zoom, and tool toggles.
+    const auto point = event->pos();
+    const auto geographic = geographicPoint(point);
+    const auto radarId = radarAt(point);
+    QMenu menu(this);
+
+    if (!radarId.isEmpty()) {
+        const auto selectAction = menu.addAction(tr("Select radar %1").arg(radarId));
+        connect(selectAction, &QAction::triggered, this, [this, radarId] { emit radarClicked(radarId); });
+        menu.addSeparator();
+    }
+
+    if (!selectedRadar_.isEmpty()) {
+        const auto recenterAction = menu.addAction(tr("Recenter on %1").arg(selectedRadar_));
+        connect(recenterAction, &QAction::triggered, this, [this] { recenterSelected(); });
+    }
+    const auto homeAction = menu.addAction(tr("National view"));
+    connect(homeAction, &QAction::triggered, this, [this] { showNationalView(); });
+
+    menu.addSeparator();
+    const auto zoomInAction = menu.addAction(tr("Zoom in"));
+    connect(zoomInAction, &QAction::triggered, this, [this] { zoomIn(); });
+    const auto zoomOutAction = menu.addAction(tr("Zoom out"));
+    connect(zoomOutAction, &QAction::triggered, this, [this] { zoomOut(); });
+
+    menu.addSeparator();
+    const auto copyLatLonAction = menu.addAction(tr("Copy lat/lon (%1, %2)")
+                                                     .arg(geographic.y(), 0, 'f', 4)
+                                                     .arg(geographic.x(), 0, 'f', 4));
+    connect(copyLatLonAction, &QAction::triggered, this, [geographic] {
+        const auto text = QStringLiteral("%1, %2")
+                              .arg(geographic.y(), 0, 'f', 6)
+                              .arg(geographic.x(), 0, 'f', 6);
+        if (auto* clipboard = QGuiApplication::clipboard()) clipboard->setText(text);
+    });
+    const auto inspectAction = menu.addAction(tr("Inspect at cursor"));
+    connect(inspectAction, &QAction::triggered, this, [this, point] { inspectAt(point); });
+
+    menu.addSeparator();
+    const auto measureAction = menu.addAction(tr("Measure (two-click)"));
+    measureAction->setCheckable(true);
+    measureAction->setChecked(measureMode_);
+    connect(measureAction, &QAction::toggled, this, [this](bool enabled) {
+        if (crossSectionMode_) {
+            setCrossSectionMode(false);
+            emit crossSectionModeToggled(false);
+        }
+        setMeasureMode(enabled);
+        emit measureModeToggled(enabled);
+    });
+    const auto xsAction = menu.addAction(tr("Cross-section (two-click)"));
+    xsAction->setCheckable(true);
+    xsAction->setChecked(crossSectionMode_);
+    connect(xsAction, &QAction::toggled, this, [this](bool enabled) {
+        if (measureMode_) {
+            setMeasureMode(false);
+            emit measureModeToggled(false);
+        }
+        setCrossSectionMode(enabled);
+        emit crossSectionModeToggled(enabled);
+    });
+
+    menu.exec(event->globalPos());
+    event->accept();
 }
 
 } // namespace cappedweather

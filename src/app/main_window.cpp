@@ -37,6 +37,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -99,6 +100,7 @@ MainWindow::MainWindow(QWidget* parent)
       source_(new NexradSource(this)),
       glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
+      alertCenter_(new AlertCenter(this)),
       refreshTimer_(new QTimer(this)),
       overlayRefreshTimer_(new QTimer(this)),
       animationTimer_(new QTimer(this)) {
@@ -125,6 +127,20 @@ MainWindow::MainWindow(QWidget* parent)
                     crossSectionButton_->setChecked(false);
                     panel->setCrossSectionMode(false);
                     showCrossSection(start, end);
+                });
+        connect(panel, &RadarMapCanvas::measureModeToggled, this,
+                [this, panel](bool enabled) {
+                    if (measureButton_) {
+                        const QSignalBlocker blocker(measureButton_);
+                        measureButton_->setChecked(enabled);
+                    }
+                });
+        connect(panel, &RadarMapCanvas::crossSectionModeToggled, this,
+                [this, panel](bool enabled) {
+                    if (crossSectionButton_) {
+                        const QSignalBlocker blocker(crossSectionButton_);
+                        crossSectionButton_->setChecked(enabled);
+                    }
                 });
     }
     connect(stationCombo_, qOverload<int>(&QComboBox::activated), this, [this](const int index) {
@@ -230,6 +246,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(overlaySource_, &WeatherOverlaySource::overlaysReady, this,
             [this](QVector<WeatherWarning> warnings, QVector<StormReport> reports, const QDateTime&) {
                 for (auto* panel : maps_) panel->setWeatherOverlays(warnings, reports);
+                if (alertCenter_) alertCenter_->ingestWarnings(warnings);
             });
     connect(overlaySource_, &WeatherOverlaySource::statusChanged, this, [this](const QString& status) {
         overlayStatus_ = status;
@@ -239,6 +256,7 @@ MainWindow::MainWindow(QWidget* parent)
             [this](QVector<LightningCellSnapshot> cells, const QDateTime&, int, int) {
                 std::vector<LightningCellSnapshot> snapshots(cells.begin(), cells.end());
                 for (auto* panel : maps_) panel->setLightningCells(snapshots);
+                if (alertCenter_) alertCenter_->ingestLightningCells(snapshots);
             });
     connect(glmSource_, &GlmSource::statusChanged, this, [this](const QString& status) {
         lightningStatus_ = status;
@@ -990,6 +1008,16 @@ void MainWindow::radarSelected(const QModelIndex& index) {
         panel->setLoading(session->history.empty(), QStringLiteral("Loading %1 radar data").arg(radarId));
         panel->setVolumeQuality(0, 0, 0);
     }
+    if (alertCenter_) {
+        const auto row = model_->rowForRadar(radarId);
+        if (row >= 0) {
+            const auto& site = model_->siteAt(row);
+            if (site.latitude && site.longitude) {
+                const GeographicCoordinate coord{*site.latitude, *site.longitude};
+                alertCenter_->setSelectedRadar(coord);
+            }
+        }
+    }
     loadingProgress_->setRange(0, 0);
     loadingProgress_->show();
     cancelButton_->show();
@@ -1484,6 +1512,27 @@ void MainWindow::restoreSettings() {
     chaseLatitude_ = std::clamp(settings.value(QStringLiteral("chase/latitude"), 35.0).toDouble(), -90.0, 90.0);
     chaseLongitude_ = std::clamp(settings.value(QStringLiteral("chase/longitude"), -97.0).toDouble(), -180.0, 180.0);
     synchronizePanels_ = settings.value(QStringLiteral("panels/synchronizeNavigation"), true).toBool();
+    if (alertCenter_) {
+        AlertConfig alertConfig = alertCenter_->config();
+        alertConfig.enabled = settings.value(QStringLiteral("alerts/enabled"), alertConfig.enabled).toBool();
+        alertConfig.soundEnabled = settings.value(QStringLiteral("alerts/sound"), alertConfig.soundEnabled).toBool();
+        alertConfig.systemNotificationEnabled = settings.value(QStringLiteral("alerts/notification"), alertConfig.systemNotificationEnabled).toBool();
+        alertConfig.geographicFilterEnabled = settings.value(QStringLiteral("alerts/geoFilter"), alertConfig.geographicFilterEnabled).toBool();
+        alertConfig.geographicFilterRadiusKm = std::clamp(
+            settings.value(QStringLiteral("alerts/geoRadiusKm"), alertConfig.geographicFilterRadiusKm).toDouble(),
+            10.0, 1500.0);
+        alertConfig.eventFilterEnabled = settings.value(QStringLiteral("alerts/eventFilterEnabled"), alertConfig.eventFilterEnabled).toBool();
+        alertConfig.eventFilter = settings.value(QStringLiteral("alerts/eventFilter"), alertConfig.eventFilter).toStringList();
+        alertConfig.lightningSigmaThreshold = std::clamp(
+            settings.value(QStringLiteral("alerts/lightningSigma"), alertConfig.lightningSigmaThreshold).toDouble(),
+            1.0, 10.0);
+        alertConfig.repeatSuppressionMinutes = std::clamp(
+            settings.value(QStringLiteral("alerts/repeatSuppressionMinutes"), alertConfig.repeatSuppressionMinutes).toInt(),
+            1, 240);
+        alertConfig.customSoundPath = settings.value(QStringLiteral("alerts/customSoundPath"), alertConfig.customSoundPath).toString();
+        alertCenter_->setConfig(alertConfig);
+        alertCenter_->setChaseMode(chaseMode_, chaseLatitude_, chaseLongitude_);
+    }
     for (int panel = 0; panel < maps_.size(); ++panel) {
         const auto defaultProduct = static_cast<int>(maps_.at(panel)->product());
         const auto product = std::clamp(settings.value(QStringLiteral("panels/product%1").arg(panel),
@@ -1578,6 +1627,19 @@ void MainWindow::saveSettings() const {
         settings.setValue(QStringLiteral("panels/stormDirection%1").arg(panel), velocity.stormMotionDirectionDegrees);
         settings.setValue(QStringLiteral("panels/stormSpeed%1").arg(panel), velocity.stormMotionSpeedMetersPerSecond);
         settings.setValue(QStringLiteral("panels/radar%1").arg(panel), maps_.at(panel)->radarId());
+    }
+    if (alertCenter_) {
+        const auto alertConfig = alertCenter_->config();
+        settings.setValue(QStringLiteral("alerts/enabled"), alertConfig.enabled);
+        settings.setValue(QStringLiteral("alerts/sound"), alertConfig.soundEnabled);
+        settings.setValue(QStringLiteral("alerts/notification"), alertConfig.systemNotificationEnabled);
+        settings.setValue(QStringLiteral("alerts/geoFilter"), alertConfig.geographicFilterEnabled);
+        settings.setValue(QStringLiteral("alerts/geoRadiusKm"), alertConfig.geographicFilterRadiusKm);
+        settings.setValue(QStringLiteral("alerts/eventFilterEnabled"), alertConfig.eventFilterEnabled);
+        settings.setValue(QStringLiteral("alerts/eventFilter"), alertConfig.eventFilter);
+        settings.setValue(QStringLiteral("alerts/lightningSigma"), alertConfig.lightningSigmaThreshold);
+        settings.setValue(QStringLiteral("alerts/repeatSuppressionMinutes"), alertConfig.repeatSuppressionMinutes);
+        settings.setValue(QStringLiteral("alerts/customSoundPath"), alertConfig.customSoundPath);
     }
 }
 
@@ -1686,11 +1748,85 @@ void MainWindow::showSettingsDialog() {
     form->addRow(QStringLiteral("Map disk cache (restart)"), diskCache);
     form->addRow(QStringLiteral("Multi-panel"), synchronize);
     layout->addLayout(form);
-    auto* note = new QLabel(QStringLiteral(
-        "Chase mode uses the configured position and automatically selects the nearest operational radar. "
-        "The position can be updated whenever the chase moves."), &dialog);
-    note->setWordWrap(true);
-    layout->addWidget(note);
+
+    // ---- Alerts section --------------------------------------------------
+    auto* alertsGroup = new QGroupBox(QStringLiteral("Alerts"), &dialog);
+    auto* alertsLayout = new QFormLayout(alertsGroup);
+    auto* alertsEnabled = new QCheckBox(QStringLiteral("Enable warning and lightning jump alerts"), &dialog);
+    auto* alertsSound = new QCheckBox(QStringLiteral("Play sound on alert"), &dialog);
+    auto* alertsNotification = new QCheckBox(QStringLiteral("Show system notification (tray balloon)"), &dialog);
+    auto* alertsGeo = new QCheckBox(QStringLiteral("Only alert when near selected radar or chase point"), &dialog);
+    auto* alertsGeoRadius = new QDoubleSpinBox(&dialog);
+    alertsGeoRadius->setRange(10.0, 1500.0);
+    alertsGeoRadius->setSuffix(QStringLiteral(" km"));
+    alertsGeoRadius->setSingleStep(10.0);
+    auto* alertsEventFilter = new QCheckBox(QStringLiteral("Only alert on selected NWS event types"), &dialog);
+    auto* alertsEventList = new QLineEdit(&dialog);
+    alertsEventList->setPlaceholderText(
+        QStringLiteral("Comma-separated, e.g. Tornado Warning, Severe Thunderstorm Warning, Flash Flood Warning"));
+    auto* alertsSigma = new QDoubleSpinBox(&dialog);
+    alertsSigma->setRange(1.0, 10.0);
+    alertsSigma->setSuffix(QStringLiteral(" sigma"));
+    alertsSigma->setSingleStep(0.25);
+    auto* alertsSuppression = new QSpinBox(&dialog);
+    alertsSuppression->setRange(1, 240);
+    alertsSuppression->setSuffix(QStringLiteral(" min"));
+    auto* alertsSoundPath = new QLineEdit(&dialog);
+    alertsSoundPath->setPlaceholderText(QStringLiteral("(uses system beep when empty)"));
+    auto* alertsBrowseButton = new QToolButton(&dialog);
+    alertsBrowseButton->setText(QStringLiteral("Browse…"));
+    auto* alertsTestButton = new QPushButton(QStringLiteral("Test alert"), &dialog);
+
+    // Populate from AlertCenter's current config.
+    if (alertCenter_) {
+        const auto cfg = alertCenter_->config();
+        alertsEnabled->setChecked(cfg.enabled);
+        alertsSound->setChecked(cfg.soundEnabled);
+        alertsNotification->setChecked(cfg.systemNotificationEnabled);
+        alertsGeo->setChecked(cfg.geographicFilterEnabled);
+        alertsGeoRadius->setValue(cfg.geographicFilterRadiusKm);
+        alertsEventFilter->setChecked(cfg.eventFilterEnabled);
+        alertsEventList->setText(cfg.eventFilter.join(QStringLiteral(", ")));
+        alertsSigma->setValue(cfg.lightningSigmaThreshold);
+        alertsSuppression->setValue(cfg.repeatSuppressionMinutes);
+        alertsSoundPath->setText(cfg.customSoundPath);
+    }
+
+    auto* alertsSoundRow = new QHBoxLayout();
+    alertsSoundRow->addWidget(alertsSoundPath, 1);
+    alertsSoundRow->addWidget(alertsBrowseButton);
+    auto* alertsSoundContainer = new QWidget(&dialog);
+    alertsSoundContainer->setLayout(alertsSoundRow);
+
+    alertsLayout->addRow(alertsEnabled);
+    alertsLayout->addRow(alertsSound);
+    alertsLayout->addRow(alertsNotification);
+    alertsLayout->addRow(alertsGeo);
+    alertsLayout->addRow(QStringLiteral("Geo filter radius"), alertsGeoRadius);
+    alertsLayout->addRow(alertsEventFilter);
+    alertsLayout->addRow(QStringLiteral("Event filter list"), alertsEventList);
+    alertsLayout->addRow(QStringLiteral("Lightning jump threshold"), alertsSigma);
+    alertsLayout->addRow(QStringLiteral("Suppress repeats for"), alertsSuppression);
+    alertsLayout->addRow(QStringLiteral("Custom sound (.wav)"), alertsSoundContainer);
+    alertsLayout->addRow(alertsTestButton);
+    layout->addWidget(alertsGroup);
+
+    connect(alertsBrowseButton, &QToolButton::clicked, &dialog, [&dialog, alertsSoundPath]() {
+        const auto path = QFileDialog::getOpenFileName(&dialog, QStringLiteral("Choose alert sound"),
+                                                       {}, QStringLiteral("WAV files (*.wav)"));
+        if (!path.isEmpty()) alertsSoundPath->setText(path);
+    });
+    connect(alertsTestButton, &QPushButton::clicked, &dialog, [this]() {
+        if (alertCenter_) alertCenter_->triggerTestAlert();
+    });
+
+    auto* alertNote = new QLabel(QStringLiteral(
+        "Alerts are deduplicated by NWS alert id and lightning cell key for the suppression window. "
+        "The geo filter uses the selected radar's location, or the chase point when chase mode is on."),
+        &dialog);
+    alertNote->setWordWrap(true);
+    layout->addWidget(alertNote);
+
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -1729,6 +1865,27 @@ void MainWindow::showSettingsDialog() {
     }
     saveSettings();
     if (chaseMode_) selectNearestChaseRadar();
+    if (alertCenter_) {
+        alertCenter_->setChaseMode(chaseMode_, chaseLatitude_, chaseLongitude_);
+        AlertConfig cfg = alertCenter_->config();
+        cfg.enabled = alertsEnabled->isChecked();
+        cfg.soundEnabled = alertsSound->isChecked();
+        cfg.systemNotificationEnabled = alertsNotification->isChecked();
+        cfg.geographicFilterEnabled = alertsGeo->isChecked();
+        cfg.geographicFilterRadiusKm = alertsGeoRadius->value();
+        cfg.eventFilterEnabled = alertsEventFilter->isChecked();
+        cfg.lightningSigmaThreshold = alertsSigma->value();
+        cfg.repeatSuppressionMinutes = alertsSuppression->value();
+        cfg.customSoundPath = alertsSoundPath->text().trimmed();
+        QStringList events;
+        for (const auto& token : alertsEventList->text().split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+            const auto trimmed = token.trimmed();
+            if (!trimmed.isEmpty()) events.push_back(trimmed);
+        }
+        cfg.eventFilter = events;
+        alertCenter_->setConfig(cfg);
+        alertCenter_->clearMemory(); // so old suppressions don't carry over the new config silently
+    }
 }
 
 void MainWindow::selectNearestChaseRadar() {

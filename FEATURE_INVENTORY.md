@@ -1,0 +1,392 @@
+# CappedWeather v0.3.0 — Feature & UI Inventory
+
+> **Source-ground analysis**: every item below is confirmed in the actual C++20/Qt6 source code at `src/`. This is not a README summary; it is a direct code audit.
+
+---
+
+## 1. Data / Products Supported
+
+### 1.1 Level II Radar Products (6)
+Defined in `core/product.hpp` (`ProductKind` enum) and `core/product.cpp` (`productDescriptors()`):
+
+| Index | Enum | Short Name | Label in UI | Unit | Range |
+|-------|------|-----------|-------------|------|-------|
+| 0 | `Reflectivity` | REF | Reflectivity | dBZ | -32 to +95 |
+| 1 | `Velocity` | VEL | Radial Velocity | m/s | configurable |
+| 2 | `SpectrumWidth` | SW | Spectrum Width | m/s | 0–32 |
+| 3 | `DifferentialReflectivity` | ZDR | Differential Reflectivity | dB | -8 to +8 |
+| 4 | `CorrelationCoefficient` | CC | Correlation Coefficient | — | 0–1 |
+| 5 | `DifferentialPhase` | PHI | Differential Phase | deg | 0–360 |
+
+- The product combo (`productCombo_` in `MainWindow::buildUi()`, line 489–496) is populated from `productDescriptors()`.
+- Each decoded ray carries one gate array per product (6 fields: `DecodedRay::fields` in `level2_decoder.hpp`).
+- TDWR volumes *automatically* disable unavailable dual-polarization products (Reflectivity, Velocity, Spectrum Width only — via `updateProductAvailability()` at line 1352–1372).
+
+### 1.2 GLM Lightning Data (GOES-18/19)
+- `GlmSource` class (`src/app/glm_source.hpp`) ingests GLM L2 LCFA netCDF-4 files from anonymous NOAA S3 buckets.
+- `LightningFlash` struct (`core/lightning_flash.hpp`): id, timeEpochSec, lat/lon deg, energy in joules, area in km².
+- `LightningCellSnapshot` (`core/lightning_overlay.hpp`): renderable LJA cell with sigma level, flash rate, event time, cell coordinates.
+- Feeding: `GlmSource::cellsUpdated` signal → `MainWindow` → `RadarMapCanvas::setLightningCells()` → `paintLightningOverlay()`.
+
+### 1.3 Weather Overlays
+`WeatherOverlaySource` (`src/app/weather_overlay_source.hpp`) fetches:
+- **NWS Active Warnings**: from `api.weather.gov/alerts/active`. Results include `WeatherWarning` with polygons (exterior + holes), event name, severity, onset/expiry, sender, description, instructions.
+- **SPC Storm Reports**: from `spc.noaa.gov/climo/reports/`. Three kinds (`StormReportKind`): Tornado, Hail, Wind. Parsed with 12Z convective-day handling.
+- Zone geometries resolved separately from `api.weather.gov` to get polygon shapes for zone-only alerts.
+
+### 1.4 Radar Catalog
+- `RadarCatalog` (`core/radar_catalog.hpp`): embedded fallback list of real WSR-88D and TDWR sites via `defaultSites()`.
+- `NexradSource` fetches live catalog from `api.weather.gov/radar/stations`, filtering to `WSR-88D` and `TDWR` only (lines 1002–1004 in `main_window.cpp`).
+- `RadarListModel` (`app/radar_list_model.hpp`): Qt list model with roles for id, name, owner, status, age.
+
+---
+
+## 2. Panel / Layout System
+
+### 2.1 Configurable Layouts
+Managed in `MainWindow::setPanelLayout()` (lines 1686–1717): four layouts via `panelLayoutCombo_`:
+- **1×1** (index 0): single panel spans 2×2 grid cells (full window).
+- **1×2** (index 1): two panels side by side (row 0, col 0–1).
+- **2×1** (index 2): two panels stacked (col 0, rows 0–1).
+- **2×2** (index 3): four panels in a grid.
+
+Four `RadarMapCanvas` instances (`maps_[0..3]`) are pre-created at `buildUi()` line 423–429. Panels are shown/hidden per layout.
+
+### 2.2 Multi-Panel Independence
+- **Each panel** can have its own radar, product, tilt, velocity mode (`restoreSettings()` lines 1408–1467 saves per-panel state).
+- By default all panels share the same radar on initial selection (`radarSelected()` sets all `panelRadarIds_` to the same value, line 902).
+- Panel navigation can be **linked or independent** (`synchronizePanels_` setting, line 184), controlled via checkbox in Settings.
+
+### 2.3 Active Panel
+- Clicking a panel calls `activateMap()` (line 1719–1762), which makes it the "active" panel.
+- The control dock (product, tilt, velocity) reflects the active panel's state.
+- `setActivePanel(true)` draws a blue accent border; `setActivePanel(false)` removes it.
+- Only one panel can be in measure/cross-section mode at a time.
+
+### 2.4 Dock-Based Console Layout
+- **Control Dock** (`QDockWidget`, objectName `"controlDock"`): left side, contains Station, Product, Tilt, Overlays, Velocity, Panels, Navigation sections. Movable.
+- **Playback Dock** (`QDockWidget`, objectName `"playbackDock"`): bottom, contains transport controls, timeline slider, speed, export buttons. Movable.
+- `saveState(1)` / `restoreState(dockState, 1)` persist dock positions.
+
+### 2.5 Dark Theme
+Full Qt stylesheet in `buildUi()` (lines 361–416): dark background (`#1a1b1e`, `#131416`), light text (`#d4d6d9`), blue accents (`#7ea6c9`). Font stack: IBM Plex Sans → Segoe UI → Noto Sans → DejaVu Sans (line 336). Monospace: IBM Plex Mono → Cascadia Mono → Consolas (line 340).
+
+---
+
+## 3. Navigation & Radar Selection
+
+### 3.1 Searchable Radar Picker
+`stationCombo_` (`QComboBox`, editable, line 461–468):
+- Autocompletion via `QCompleter` with case-insensitive `MatchContains` (line 816–820).
+- Search by radar ID (4-letter), city, or state.
+- Enter key triggers selection (`returnPressed` handler at line 132–141).
+
+### 3.2 Favorites & Recents
+- **Favorite button** (`favoriteButton_`): toggle star (☆/★), persisted to `QSettings("favoriteRadars")` (line 147).
+- **Recent list**: up to 8 recent radar IDs (`recentRadarIds_`), prepended on selection, persisted (lines 905–910).
+- Station picker rebuild order: favorites → recents → all stations (`rebuildStationPicker()` lines 809–815).
+
+### 3.3 Chase Mode
+Settings dialog checkbox `"Select the nearest radar to the chase position"`:
+- Configured latitude/longitude (`chaseMode_`, `chaseLatitude_`, `chaseLongitude_`).
+- `selectNearestChaseRadar()` (lines 1663–1684): uses haversine distance to pick closest operational radar.
+- Auto-fires on catalog load and settings change.
+
+### 3.4 Map Navigation Buttons
+In the Navigation section (lines 648–687):
+- **Home** (`showNationalView()`): recenters to national-scale view.
+- **Recenter** (`recenterSelected()`): centers on selected radar (keyboard shortcut: R).
+- **+ / −** zoom buttons (keyboard shortcuts: +/-).
+- Keyboard shortcuts also: `Space` (play/pause), `Left`/`Right` (prev/next frame), `PageUp`/`PageDown` (tilt), `1`–`6` (product).
+
+### 3.5 Zoom-Aware Station Decluttering
+`paintEvent()` in `RadarMapCanvas` (line 2145): at zoom ≤ 4, only the selected radar shows as a labeled marker; others are small dots. At higher zooms, all stations in view get labels. TDWR stations get a purple color (`#BC69DF`).
+
+---
+
+## 4. Playback / Timeline
+
+### 4.1 Volume History
+- `RadarSession` (lines 102–121 in `main_window.hpp`): per-radar session with `std::vector<RadarFrame> history`.
+- Up to `maximumHistoryFrames_` frames kept in memory (default 12, configurable 2–24 in Settings).
+- Volumes sorted by `dataTime` on insertion (line 1130–1132), oldest pruned when limit exceeded (line 1133–1137).
+- Each `RadarFrame` holds: `volumeId`, shared_ptr to `DecodedChunk`, `dataTime`, chunk counts.
+
+### 4.2 Transport Controls
+In Playback Dock (lines 701–736):
+- **Previous** / **Next** frame buttons (with auto-repeated keyboard Left/Right).
+- **Play/Pause** toggle (`playButton_`): looping animation at configurable speed.
+- **LIVE** toggle (`liveButton_`): `followLatest` mode — always shows newest frame. Green accent when active (#6fbf5a, line 386).
+- **Frame slider** (`frameSlider_`): scrubbing through history. Tooltip shows frame position, datetime, volume completeness.
+- **Speed combo** (`speedCombo_`): 1× (1000ms), 2× (500ms), 4× (250ms). Default 2×.
+
+### 4.3 History Loading
+- By default, only the latest volume is requested (`requestLatest()`).
+- Clicking the frame slider or pressing Play when < 2 frames: triggers `ensureHistoryLoaded()` → `requestRecent()` → loads up to `historyVolumeCount_` previous volumes (default 8, configurable 2–12).
+- History loads incrementally: one `volumeReady` triggers the next `requestRecent` call (lines 1176–1188).
+
+### 4.4 Multi-Panel Playback Sync
+`showFrame()` (lines 1295–1350): when the active panel steps to frame N, non-active panels find their temporally-closest frame (`bestDifference` search, lines 1307–1316).
+
+### 4.5 Frame Metadata
+`frameLabel_` shows: frame index / total, local time, age (e.g. "3m ago"), and "LIVE" indicator (lines 1334–1338).
+
+---
+
+## 5. Overlays
+
+### 5.1 NWS Warnings
+- **Toggle**: `warningsCheck_` checkbox.
+- **Rendering**: `RadarMapCanvas::paintWeatherOverlays()` (line 1367). Polygons are cached in `weatherOverlayImage_` (rasterized off UI thread via `rebuildWeatherOverlay()`).
+- **Filter**: `warningFilterCombo_` with options: All, Tornado, Severe Thunderstorm, Flash Flood, Extreme (lines 529–537).
+- **Interaction**: Click a warning polygon to pin an info card showing event, severity, onset, expiry, sender, description, instructions. (`PinnedInfoKind::Warning`, draggable card with scroll).
+- **Styles**: `nwsAlertStyle()` function maps event type to colors and priorities.
+
+### 5.2 SPC Storm Reports
+- **Toggle**: `reportsCheck_` checkbox.
+- **Kind filters**: Tornado, Hail, Wind checkboxes (three separate `QCheckBox`).
+- **Data**: Rolling 24 hours from SPC, 12Z convective-day boundary handling.
+- **Interaction**: Click a report marker to pin a detail card with kind, magnitude, location, state, time, comments.
+- **Legend**: Symbol legend painted by `paintWeatherOverlays()`.
+
+### 5.3 GLM Lightning Jumps
+- **Toggle**: `lightningCheck_` checkbox, tooltip: "Live GOES-18/19 total-lightning jump cells".
+- **Rendering**: `paintLightningOverlay()` (line 1390). Each `LightningCellSnapshot` rendered as cell-sized rectangles color-coded by sigma level. Active jumps and recent cessations both shown.
+- **Interaction**: Click a cell to pin an info card showing sigma level, flash rate, cell coordinates, satellite, age. (`PinnedInfoKind::Lightning`).
+- **Disabled when**: `glmL2ReaderAvailable() == false` (no netCDF-C in build). Emits status "GLM disabled (netCDF-C unavailable)" and stops the GLM timer.
+
+### 5.4 Lightning-Radar Fusion
+- **Toggle**: `lightningFusionCheck_` checkbox, tooltip: "Associate GLM jumps with reflectivity objects and azimuthal shear".
+- Enabled only when lightning is visible (line 215–216).
+- **Algorithm**: `extractRadarStormFeatures()` → `associateLightningWithRadar()` in `core/radar_lightning_fusion.hpp`.
+  - Extracts low-tilt reflectivity objects (≥35 dBZ threshold) and collocated azimuthal shear couplets.
+  - Associates each lightning cell with the nearest radar feature within 45 km.
+- `RadarStormFeature`: id, lat/lon, max reflectivity, velocity span, azimuthal shear rate, area, rotating flag.
+- Rendered as small markers connected to lightning cells.
+
+### 5.5 Cursor Probe / Sampling
+- `RadarMapCanvas::updateProbe()` (called on mouse move): shows value, range (km), azimuth (deg), elevation tilt number at cursor position.
+- `probeText_` displayed by `paintProbe()` in the corner of each panel.
+- **Below-threshold visibility**: `belowThresholdCheck_` toggles rendering of gates below the product's minimum valid value.
+- Range-folded gates (encoded value 1) are specifically excluded.
+
+### 5.6 Measure Tool
+- `measureButton_` (checkable), sets `measureMode_` on active panel.
+- Two-click gesture: click start point, click end point.
+- `paintMeasurement()` draws a line with distance (km/mi) and bearing (deg) labels.
+- Uses great-circle math from `core/radar_geometry.hpp` (`rangeAndBearing()`).
+
+### 5.7 Cross-Section
+- `crossSectionButton_` (checkable), sets `crossSectionMode_` on active panel.
+- Same two-point gesture as measure. On completion, emits `crossSectionRequested`.
+- Opens a `QDialog` containing `CrossSectionWidget` (980×620 px).
+- See §6.3 for details.
+
+---
+
+## 6. Export / Output Features
+
+### 6.1 PNG Snapshot
+`MainWindow::exportSnapshot()` (lines 1857–1866):
+- Uses `QWidget::grab()` on the active map panel.
+- Saves as PNG, auto-generated filename: `{radarId}-{product}-{yyyyMMdd-HHmmss}.png`.
+
+### 6.2 Animated Timeline GIF
+`MainWindow::exportTimelineAnimation()` (lines 1868–1892):
+- Iterates through all loaded frames for the active radar.
+- Grabs each frame via `QWidget::grab()`, calls `QCoreApplication::processEvents()` between frames.
+- Uses `writeAnimatedGif()` from `app/gif_writer.hpp` (line 1887).
+- Delay derived from current speed setting (ms/10 in centiseconds).
+- Auto-generated filename: `{radarId}-{product}-timeline.gif`.
+- Exports **only currently loaded frames** — does not retrieve archive data.
+
+### 6.3 Cross-Section CSV Export
+`CrossSectionWidget::exportCsv()` (lines 32–42 in `cross_section_widget.cpp`):
+- Columns: `distance_km`, `height_msl_km`, `value`, `{unit}`.
+- Exports valid (finite) cell values.
+- Available via "Export CSV" button in cross-section dialog.
+- Hardcoded filename suggestion: `cross-section.csv`.
+
+### 6.4 Custom Palette Import
+`MainWindow::importCustomPalette()` (lines 1818–1855):
+- File format: one `value,#RRGGBB` pair per line (comma-separated).
+- Lines starting with `#` (without comma) are treated as comments.
+- Minimum 2 stops required.
+- Applies to all panels, switches palette to Custom.
+
+---
+
+## 7. Settings / Customization
+
+### 7.1 Settings Dialog
+`MainWindow::showSettingsDialog()` (lines 1513–1661), 21 settings fields:
+
+| Category | Setting | Key | Default | Range |
+|----------|---------|-----|---------|-------|
+| **Chase** | Enabled | `chase/enabled` | false | — |
+| | Latitude | `chase/latitude` | 35.0 | ±90° |
+| | Longitude | `chase/longitude` | -97.0 | ±180° |
+| **Timeline** | Frames kept | `timeline/maximumFrames` | 12 | 2–24 |
+| | Volumes loaded | `timeline/historyVolumes` | 8 | 2–12 |
+| **Network** | Contact | `network/contact` | "" | text |
+| | Parallel chunks | `network/parallelChunks` | 6 | 1–12 |
+| | Timeout | `network/timeoutSeconds` | 30s | 5–120s |
+| | Retries | `network/retries` | 2 | 0–5 |
+| | Backoff | `network/retryBackoffMs` | 250ms | 100–5000ms |
+| | Radar refresh | `network/radarRefreshSeconds` | 60s | 30–600s |
+| | Overlay refresh | `network/overlayRefreshSeconds` | 60s | 30–600s |
+| **Lightning** | Refresh | `lightning/refreshSeconds` | 20s | 10–300s |
+| | Backfill | `lightning/backfillMinutes` | 18min | 13–60min |
+| | Cell size | `lightning/cellSizeDeg` | 0.25° | 0.05–1.0° |
+| | Min flash rate | `lightning/minFlashRate` | 12 fpm | 1–100 |
+| | Jump sigma | `lightning/sigmaThreshold` | 2.0σ | 1.0–10.0 |
+| | Sigma window | `lightning/sigmaWindowMinutes` | 10min | 5–30min |
+| **Cache** | Memory cache | `cache/memoryMbPerPanel` | 32MB | 8–256MB |
+| | Disk cache | `cache/diskMbPerPanel` | 64MB | 16–1024MB |
+| **Panels** | Synchronize nav | `panels/synchronizeNavigation` | true | — |
+
+### 7.2 Persisted State (QSettings)
+Saved in `MainWindow::saveSettings()` (lines 1469–1511):
+- Window geometry + dock state + control dock width.
+- Per-panel: product, tilt, velocity mode, nyquist, storm direction, storm speed, radar ID.
+- Global: product index, palette, radar opacity, below-threshold, warning filter, all overlay toggles, custom palette stops.
+
+### 7.3 Palettes
+`PaletteKind` enum (4 modes, in `RadarMapCanvas`):
+- **Capped** (index 0): custom CappedWeather palette.
+- **Operational** (index 1): native product-specific operational palettes.
+- **ColorSafe** (index 2): color-blind-friendly palette.
+- **Custom** (index 3): user-imported palette with discrete `native_value,#RRGGBB` stops.
+
+### 7.4 Radar Opacity
+`radarOpacitySlider_`: 20–100% (default 80%), applied to all panels via `setRadarOpacity()`.
+
+### 7.5 Velocity Controls
+Three modes via `velocityModeCombo_` (in `VelocityProcessingMode`):
+1. **Native velocity**: raw gate values.
+2. **Dealiased velocity**: uses configurable Nyquist velocity (`nyquistSpin_`, 1–80 m/s).
+3. **Storm-relative velocity**: uses storm motion direction (toward which storm moves, 0–359.9°) and speed (0–80 m/s).
+
+Velocity controls enabled only when product is Velocity (`updateVelocityControls()`, lines 1773–1782). Dealiased and storm-relative modes enable Nyquist spin; only storm-relative enables direction/speed spinners. Velocity processing is done per-panel via `processVelocity()` in `core/velocity_processing.hpp`.
+
+---
+
+## 8. Performance / Caching Architecture
+
+### 8.1 Radar Overlay Caching
+- `RadarMapCanvas::rebuildOverlay()` rasterizes gate geometry off the UI thread.
+- Result stored in `overlayImage_` (QImage), reused across paints.
+- Cache keyed by: zoom level + center position + chunk content generation.
+- Zoom transitions: old cache is scaled on-screen until rebuild completes (`invalidateOverlay(true)` with `preserveForZoomTransition` flag).
+- README claims: "Gate geometry is color-batched and rasterized into a cached overlay image off the UI thread."
+
+### 8.2 Weather Overlay Caching
+- Separate `weatherOverlayImage_` cache with its own generation counter (`weatherOverlayImageGeneration_`).
+- `weatherOverlayBuildPending_` flag prevents duplicate rebuilds.
+- `warningPaths_` cached per zoom level.
+
+### 8.3 Lightning Fusion Caching
+- `lightningFusionGeneration_` / `lightningFusionComputedGeneration_`: lazy recomputation only when lightning cells change.
+- `lightningFusionBuildPending_` flag.
+
+### 8.4 Velocity Processing Caching
+- `velocityGeneration_` / `velocityBuildPending_`: velocity field recomputed only when options or chunk changes.
+
+### 8.5 Basemap Tiles
+- Uses CARTO dark OSM tiles from a tile store (referenced as `tileStore()` in `paintEvent()`).
+- Tiles fetched asynchronously (`requestVisibleTiles()`), rendered as QImages.
+- Bounded memory cache (configurable `cache/memoryMbPerPanel`) and disk cache (`cache/diskMbPerPanel`).
+
+### 8.6 Shared Decoded Volumes
+- One `DecodedChunk` (via `std::shared_ptr<const DecodedChunk>`) feeds all four panels.
+- Not four separate decodes for a 2×2 layout.
+
+### 8.7 Download Architecture
+- `NexradSource`: bounded parallel chunk downloads with `activeObjectRequests_` limit (configurable, default 6).
+- Per-chunk retries with exponential backoff (`network/retries`, `network/retryBackoffMs`).
+- Transfer timeouts per request.
+- `QThreadPool processingPool_` for background decoding.
+- `GlmSource`: similarly bounded downloads (`maximumConcurrentDownloads`, default 4), with 1-thread processing pool (netCDF not thread-safe on Windows, line 45).
+- Separate timers for radar refresh (`refreshTimer_`, default 60s), overlay refresh (`overlayRefreshTimer_`, default 60s), GLM refresh (default 20s).
+
+### 8.8 Progressive Publishing
+- `WeatherOverlaySource`: publishes warnings/reports as each HTTP response arrives, not waiting for slowest. Failed requests keep last-known-good overlay instead of blanking.
+- `GlmSource`: `schedulePublish()` batches cell updates.
+
+### 8.9 Station Decluttering
+- `ensureSiteWorldPoints()` pre-computes station screen positions, cached per zoom.
+
+---
+
+## 9. Half-Finished / Stubbed / Gated Features
+
+### 9.1 netCDF-C Gating for GLM L2 Reader
+This is the most significant conditional feature in the codebase.
+
+**CMake mechanism** (`CMakeLists.txt`, lines 46–65):
+- `find_package(netCDF QUIET)` searches for netCDF-C.
+- If found: defines `CAPPEDWEATHER_HAS_NETCDF=1`, links `netCDF::netcdf` to `cappedweather_core`.
+- If NOT found: no error (unless `CAPPEDWEATHER_REQUIRE_NETCDF=ON`), just prints a warning status message.
+
+**Code impact** (`core/glm_l2_reader.cpp`):
+- `glmL2ReaderAvailable()` returns `true` only when `CAPPEDWEATHER_HAS_NETCDF` is defined.
+- `readGlmLcfa()`: the entire netCDF parsing body (lines 111–168) is inside `#ifdef CAPPEDWEATHER_HAS_NETCDF`. When not defined, it returns `std::nullopt` (line 167).
+- The S3 key helper functions (`glmLcfaPrefix()`, `parseGlmLcfaStartTime()`) are **always available** (no netCDF dependency — pure string parsing, unit-tested).
+
+**Runtime impact** (`app/glm_source.cpp`, lines 89–96):
+- `GlmSource::refresh()` checks `glmL2ReaderAvailable()` immediately.
+- If false: emits "GLM live view unavailable: this build has no netCDF-C support", emits "GLM disabled (netCDF-C unavailable)", stops timer, sets `running_ = false`.
+- The `GlmSource` remains instantiated in `MainWindow` but will never produce data.
+- The lightning checkbox remains visible but receives no cells.
+
+**Production recommendation** (README line 52): set `CAPPEDWEATHER_REQUIRE_NETCDF=ON` so the build fails rather than silently shipping without GLM support.
+
+### 9.2 TODO.md Status
+
+**Active (in-progress)**:
+- **Lightning-jump engine**: TODO says "pretty much complete, should be marked done." The code supports this claim: `LightningJumpDetector` (full 2σ algorithm with DFRDT, sigma window, minimum rate threshold), `FlashRateGrid` (spatial binning), `GlmSource` (live ingestion), `extractRadarStormFeatures` + `associateLightningWithRadar` (fusion), and full UI integration (checkbox toggles, rendering, info cards). All appear fully implemented and active.
+
+**Backlog (not built)**:
+1. **GPU volume rendering** — "ray-marched 3D dual-pol volumes at interactive framerates." Purely speculative, no code exists.
+2. **Storm-scale severe nowcasting** — "0–60 min nowcast of mesocyclone tracks / azimuthal shear." Purely speculative, no code exists.
+
+### 9.3 Stubs and Conditional Code
+- No `TODO`, `FIXME`, `HACK`, or `stub` comments found in source code (search confirmed).
+- No dead code paths or `#if 0` blocks found.
+- The GLM netCDF `#else` branch is the only meaningful stub: `readGlmLcfa()` returns `std::nullopt`, which is a clean, intentional stub, not an oversight.
+
+### 9.4 What the Backup Radar Catalog Is
+- `RadarCatalog::defaultSites()` (`core/radar_catalog.cpp`): real, hardcoded WSR-88D and TDWR sites — not synthetic/generated.
+- If the live `api.weather.gov/radar/stations` catalog fails, the embedded fallback is used. The fallback contains only real station classes.
+
+---
+
+## Summary: What Exists vs. What's Claimed
+
+| README Claim | Source Ground Truth |
+|-------------|-------------------|
+| Six Level II products | ✓ Confirmed: `ProductKind` enum, `productDescriptors()`, 6 field arrays in `DecodedRay` |
+| 1×1/1×2/2×1/2×2 layouts | ✓ Confirmed: `setPanelLayout()` with 4 grid arrangements |
+| Per-panel independent radar/product/tilt/velocity | ✓ Confirmed: per-panel settings in `restoreSettings()`/`saveSettings()` |
+| TDWR dual-pol auto-disable | ✓ Confirmed: `updateProductAvailability()` disables unavailable products |
+| Searchable radar + favorites + recents | ✓ Confirmed: `stationCombo_` with completer, `favoriteButton_`, `recentRadarIds_` |
+| Cursor probe with value/range/azimuth/tilt | ✓ Confirmed: `updateProbe()`, `paintProbe()` |
+| Up to 8 recent volumes, live-follow, looping playback, 1x/2x/4x speeds | ✓ Confirmed: `RadarSession::history`, `speedCombo_`, `followLatest`, `animationTimer_` |
+| Non-blocking chunk progress, retry/cancel, per-chunk retries, partial-volume recovery | ✓ Confirmed: `NexradSource` with queued objects, retries, backoff |
+| NWS warnings with polygon+hole geometry, zone resolution | ✓ Confirmed: `WeatherOverlaySource` with `parseAlerts()`, `parseZone()` |
+| SPC tornado/hail/wind reports with 12Z convective-day handling | ✓ Confirmed: `StormReportKind`, `parseStormReports()` with convective date |
+| Native/dealiased/storm-relative velocity | ✓ Confirmed: `VelocityProcessingMode` enum, `processVelocity()` |
+| Great-circle range/bearing, beam height, scan diagnostics | ✓ Confirmed: `radar_geometry.hpp` functions, `analyzeScan()` |
+| Multi-tilt vertical cross-sections | ✓ Confirmed: `CrossSectionWidget` with 220 samples, all-tilt sampling |
+| PNG snapshots, animated GIF, cross-section CSV | ✓ Confirmed: `exportSnapshot()`, `exportTimelineAnimation()`, `exportCsv()` |
+| Cached color-batched radar geometry off UI thread | ✓ Confirmed: `overlayImage_` cache, `overlayBuildPending_`, thread pool |
+| Shared decoded frames across panels | ✓ Confirmed: `std::shared_ptr<const DecodedChunk>` |
+| Dock-based layout, dark theme, CARTO basemap | ✓ Confirmed: dock widgets, QSS, tile store |
+| Lightning-jump engine (GOES GLM) | ✓ Confirmed: full LJA implementation — *but requires netCDF-C at build time* |
+| Lightning-radar fusion | ✓ Confirmed: `extractRadarStormFeatures()` + `associateLightningWithRadar()` |
+| Parse diagnostics + randomized malformed-input tests | ✓ Confirmed: `rejectedMessages`/`rejectedBlocks` tracking, test suite |
+| Persistent settings | ✓ Confirmed: `saveSettings()` covers all 21+ settings |
+| Warning / lightning jump alerts | ✓ Added in P1: `AlertCenter` (`src/app/alert_center.{hpp,cpp}`), sinks `overlaysReady` + `cellsUpdated`, plays sound (custom `.wav` via `QSoundEffect` when `Qt6::Multimedia` is available, system beep otherwise) and shows a tray balloon. NWS id + cell key dedupe with a configurable suppression window. |
+| Right-click map context menu | ✓ Added in P1: `RadarMapCanvas::contextMenuEvent` — select radar, recenter, national view, zoom in/out, copy lat/lon, inspect, and checkable measure / cross-section entries. |
+| GPU volume rendering | ✗ Backlog only — no code |
+| Storm-scale nowcasting | ✗ Backlog only — no code |

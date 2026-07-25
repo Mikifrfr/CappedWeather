@@ -11,3 +11,4 @@
 /data/verification/results/
 __pycache__/
 *.py[cod]
+/aqtinstall.log

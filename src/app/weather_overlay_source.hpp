@@ -33,6 +33,9 @@ struct WarningPolygon {
 };
 
 struct WeatherWarning {
+    // Stable NWS @id from the alert feature. Used by AlertCenter to dedupe
+    // updates that reissue the same alert. Empty when the API omits the field.
+    QString id;
     QString event;
     QString headline;
     QString severity;
