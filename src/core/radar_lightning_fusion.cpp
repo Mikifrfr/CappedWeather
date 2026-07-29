@@ -74,8 +74,7 @@ std::vector<RadarStormFeature> extractRadarStormFeatures(
                 if (!value) continue;
                 if (product == ProductKind::Reflectivity && *value < config.minimumReflectivityDbz)
                     continue;
-                const double slantRange = static_cast<double>(firstGate) +
-                                          (static_cast<double>(gate) + 0.5) * spacing;
+                const double slantRange = gateCenterSlantRange(firstGate, spacing, gate);
                 if (slantRange <= 0.0 || slantRange > 300000.0) continue;
                 const auto beam = standardBeamGeometry(slantRange, ray.elevationDegrees);
                 const auto coordinate = destinationPoint(origin, ray.azimuthDegrees,

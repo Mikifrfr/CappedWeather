@@ -182,6 +182,18 @@ QColor productColor(const ProductKind product, const double normalized,
                 {0, QColor("#73c95b")}, {45, QColor("#e0cf48")}, {90, QColor("#ed7b45")},
                 {135, QColor("#b94399")},
             }, value, alpha);
+        case ProductKind::EchoTop:
+            return discretePalette({
+                {0, QColor("#16232b")}, {10, QColor("#1b6a83")}, {20, QColor("#2ebc9a")},
+                {30, QColor("#c7dd52")}, {40, QColor("#ffb13b")}, {50, QColor("#ef4b4f")},
+                {60, QColor("#c63eb5")}, {70, QColor("#f4f1ff")},
+            }, value, alpha);
+        case ProductKind::VerticallyIntegratedLiquid:
+            return discretePalette({
+                {0, QColor("#16232b")}, {5, QColor("#225ea8")}, {10, QColor("#22a6a1")},
+                {20, QColor("#67c95c")}, {30, QColor("#e6d64a")}, {40, QColor("#f28b35")},
+                {60, QColor("#df365f")}, {80, QColor("#e9e4ff")},
+            }, value, alpha);
         }
     }
     switch (product) {
@@ -227,6 +239,20 @@ QColor productColor(const ProductKind product, const double normalized,
             {0.36, QColor("#9cd65f")}, {0.52, QColor("#f2cf58")},
             {0.68, QColor("#ee7454")}, {0.84, QColor("#bd4ca5")},
             {1.00, QColor("#51418d")},
+        }, normalized, alpha);
+    case ProductKind::EchoTop:
+        return interpolatePalette({
+            {0.00, QColor("#16232b")}, {0.18, QColor("#1f708d")},
+            {0.36, QColor("#31bc94")}, {0.54, QColor("#d7dc52")},
+            {0.70, QColor("#ff9a3d")}, {0.84, QColor("#e54562")},
+            {1.00, QColor("#eee9ff")},
+        }, normalized, alpha);
+    case ProductKind::VerticallyIntegratedLiquid:
+        return interpolatePalette({
+            {0.00, QColor("#16232b")}, {0.15, QColor("#2450a4")},
+            {0.30, QColor("#20a7ad")}, {0.45, QColor("#69c75c")},
+            {0.60, QColor("#e5d24b")}, {0.75, QColor("#ef8538")},
+            {0.88, QColor("#d93467")}, {1.00, QColor("#eee9ff")},
         }, normalized, alpha);
     }
     return QColor("#d7e2e6");
@@ -431,6 +457,10 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
 
 void RadarMapCanvas::setProduct(const ProductKind product) {
     product_ = product;
+    if (isDerivedProduct(product_)) {
+        elevationFilter_.reset();
+        setCrossSectionMode(false);
+    }
     refreshVelocityProcessing();
     rebuildProbeIndex();
     invalidateOverlay(true);
@@ -707,13 +737,13 @@ void RadarMapCanvas::setMeasureMode(const bool enabled) {
 }
 
 void RadarMapCanvas::setCrossSectionMode(const bool enabled) {
-    crossSectionMode_ = enabled;
-    if (enabled) measureMode_ = false;
-    if (!enabled) {
+    crossSectionMode_ = enabled && !isDerivedProduct(product_);
+    if (crossSectionMode_) measureMode_ = false;
+    if (!crossSectionMode_) {
         measureStart_.reset();
         measureEnd_.reset();
     }
-    setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);
+    setCursor(crossSectionMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
     update();
 }
 
@@ -1230,7 +1260,7 @@ void RadarMapCanvas::rebuildOverlay() {
             maximumRangeMeters = std::max(
                 maximumRangeMeters,
                 static_cast<double>(firstGateMeters) +
-                    static_cast<double>(values.size()) * gateSpacingMeters);
+                    std::max(0.0, static_cast<double>(values.size()) - 0.5) * gateSpacingMeters);
             const auto halfAzimuth = std::clamp(
                 static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
             const auto halfRange = static_cast<double>(gateSpacingMeters) * 0.5;
@@ -1255,7 +1285,7 @@ void RadarMapCanvas::rebuildOverlay() {
                     ? productColor(product, std::round(normalized * 63.0) / 63.0, palette, opacity, customPalette)
                     : rangeFolded ? QColor(150, 150, 160, 95) : QColor(45, 70, 78, 55);
                 const auto rangeCenter = static_cast<double>(firstGateMeters) +
-                                         (static_cast<double>(gate) + 0.5) * gateSpacingMeters;
+                                         static_cast<double>(gate) * gateSpacingMeters;
                 const auto lowerRange = std::max(0.0, rangeCenter - halfRange);
                 const auto upperRange = rangeCenter + halfRange;
                 if (upperRange <= 0.0) continue;
@@ -2130,15 +2160,14 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
     const auto firstGate = nearestRay->firstGateByProduct.at(index);
     const auto slantRangeMeters = slantRangeForSurfaceDistance(groundRangeMeters,
                                                                nearestRay->elevationDegrees);
-    const auto gatePosition = (slantRangeMeters - firstGate) / spacing - 0.5;
-    const auto gate = static_cast<long long>(std::llround(gatePosition));
     const auto& values = nearestRay->fields.at(index);
-    if (gate < 0 || static_cast<std::size_t>(gate) >= values.size()) {
+    const auto gate = gateIndexForSlantRange(slantRangeMeters, firstGate, spacing, values.size());
+    if (!gate) {
         update();
         return;
     }
 
-    const auto encoded = values.at(static_cast<std::size_t>(gate));
+    const auto encoded = values.at(*gate);
     QString valueText;
     if (encoded == 0) {
         valueText = QStringLiteral("Below threshold");
@@ -2148,9 +2177,9 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
         std::optional<double> value;
         if (product_ == ProductKind::Velocity && processedVelocity_ &&
             nearestRayIndex < processedVelocity_->size() &&
-            static_cast<std::size_t>(gate) < processedVelocity_->at(nearestRayIndex).size() &&
-            std::isfinite(processedVelocity_->at(nearestRayIndex)[static_cast<std::size_t>(gate)])) {
-            value = processedVelocity_->at(nearestRayIndex)[static_cast<std::size_t>(gate)];
+            *gate < processedVelocity_->at(nearestRayIndex).size() &&
+            std::isfinite(processedVelocity_->at(nearestRayIndex)[*gate])) {
+            value = processedVelocity_->at(nearestRayIndex)[*gate];
         } else {
             value = nativeValue(encoded, nearestRay->scaleByProduct.at(index),
                                 nearestRay->offsetByProduct.at(index));
@@ -2528,6 +2557,7 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     const auto xsAction = menu.addAction(tr("Cross-section (two-click)"));
     xsAction->setCheckable(true);
     xsAction->setChecked(crossSectionMode_);
+    xsAction->setEnabled(!isDerivedProduct(product_));
     connect(xsAction, &QAction::toggled, this, [this](bool enabled) {
         if (measureMode_) {
             setMeasureMode(false);

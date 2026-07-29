@@ -12,6 +12,8 @@ const std::vector<ProductDescriptor> kProducts{
     {ProductKind::DifferentialReflectivity, "ZDR", "Differential reflectivity", "dB", -8.0, 8.0},
     {ProductKind::CorrelationCoefficient, "RHOHV", "Correlation coefficient", "", 0.0, 1.05},
     {ProductKind::DifferentialPhase, "PHIDP", "Differential phase", "deg", -180.0, 180.0},
+    {ProductKind::EchoTop, "ET18", "Echo top (18 dBZ)", "kft MSL", 0.0, 70.0},
+    {ProductKind::VerticallyIntegratedLiquid, "VIL", "Vertically integrated liquid", "kg/m2", 0.0, 100.0},
 };
 }
 

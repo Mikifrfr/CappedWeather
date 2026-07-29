@@ -5,6 +5,8 @@
 #include "app/weather_overlay_source.hpp"
 
 #include <QMainWindow>
+#include <QMap>
+#include <QDateTime>
 #include <QSet>
 #include <QHash>
 #include <QStringList>
@@ -89,6 +91,10 @@ private:
     void ensureHistoryLoaded(bool playWhenReady = false);
     void stopAnimation();
     void acceptDecodedChunk(const QString& radarId, const QString& volumeId, DecodedChunk decoded);
+    void finalizeVolumeReady(const QString& radarId, const QString& volumeId, int chunkCount,
+                             int failedChunks, const QDateTime& receivedAt,
+                             std::shared_ptr<DecodedChunk> volume);
+    void updateCrossSectionAvailability();
     void restoreSettings();
     void saveSettings() const;
     void showSettingsDialog();
@@ -133,6 +139,7 @@ private:
         int pendingFailedChunks = 0;
         int pendingDecodeTasks = 0;
         bool pendingVolumeNetworkReady = false;
+        QSet<QString> derivingVolumeIds;
         QString pendingReadyVolumeId;
         int pendingReadyChunkCount = 0;
         int pendingReadyFailedChunks = 0;

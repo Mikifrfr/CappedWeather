@@ -27,6 +27,7 @@ option(CAPPEDWEATHER_REQUIRE_NETCDF
 include(CTest)
 
 add_library(cappedweather_core STATIC
+    src/core/derived_products.cpp
     src/core/level2_primitives.cpp
     src/core/level2_decoder.cpp
     src/core/product.cpp

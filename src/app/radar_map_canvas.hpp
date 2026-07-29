@@ -90,6 +90,7 @@ public:
     void setVelocityProcessing(VelocityProcessingOptions options);
     void setMeasureMode(bool enabled);
     void setCrossSectionMode(bool enabled);
+    bool crossSectionMode() const { return crossSectionMode_; }
     void setVolumeQuality(int decodedChunks, int totalChunks, int failedChunks,
                           std::size_t rejectedMessages = 0, std::size_t rejectedBlocks = 0);
     void setLoading(bool loading, const QString& message = {});

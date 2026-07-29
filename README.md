@@ -83,11 +83,11 @@ cmake -S . -B build
 
 The application uses public HTTPS listing and download requests, with no cloud SDK. The official NWS station catalog is filtered to `WSR-88D` and `TDWR` stations; the embedded fallback contains the same real station classes and no generated stations.
 
-The viewer exposes the decoded product fields and the elevation tilts present in the received volume. It does not render an echo until a real Level II chunk has been downloaded and decoded.
+The viewer exposes the decoded native moment fields and elevation tilts present in the received volume, then derives Echo Tops and VIL only from assembled real reflectivity volumes. It does not render an echo until real Level II data has been downloaded and decoded.
 
 ## Current viewer features
 
-- Six native Level II products with product-specific color scales and units.
+- Six native Level II moments plus two volume-derived 2D products: 18 dBZ Echo Tops (kft MSL) and VIL (kg/m²), each with product-specific scales, palettes, probing, panel persistence, and timeline rendering. See `docs/derived-products.md` for formulas and quality limits.
 - Switchable 1x1, 1x2, 2x1, and 2x2 radar layouts. Every panel can use its own radar, product, tilt, and velocity mode; map navigation can remain linked.
 - Discrete native operational palettes for all six products, with improved legend labels.
 - Importable, persistent custom palettes using `native_value,#RRGGBB` lines, plus Capped and color-safe presets.

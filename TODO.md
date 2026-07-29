@@ -18,7 +18,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 - [x] **Surface GLM disabled state in UI** — when netCDF missing or GLM dead, disable lightning/fusion controls and show a clear status (not a quiet empty overlay).
 - [x] **Mark LJA complete in docs** — flip this TODO + `docs/lightning-jump-engine.md` status once the above is true.
 - [x] **First-run / empty-state guidance** — replace bare “Waiting for NOAA radar data” with a short workflow hint (pick station → LIVE → timeline → overlays).
-- [x] **In-app keyboard shortcut reference** — Help menu or `?` overlay (Space, arrows, PgUp/Dn, 1–6, R, ±, L, etc.).
+- [x] **In-app keyboard shortcut reference** — Help menu or `?` overlay (Space, arrows, PgUp/Dn, 1–8, R, ±, L, etc.).
 
 ---
 
@@ -70,7 +70,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 
 Prefer a **small set of high-signal products**, not a full user-defined-product language.
 
-- [ ] **Core derived products (2D)** — start with Echo Tops + VIL (then VILD / MEHS if solid). Update live as tilts arrive when possible.
+- [x] **Core derived products (2D), first slice** — Echo Tops (18 dBZ, kft MSL) + VIL (kg/m²) are materialized from every completed multi-tilt reflectivity volume, rendered/probed as first-class per-panel products, persisted in layouts, and covered by core + UI tests. Uses same-ground-range beam sampling, 4/3-earth geometry, an interpolated 18 dBZ crossing, and capped-56 dBZ VIL integration. Honest limits are documented in `docs/derived-products.md`; incremental incomplete-sweep updates and VILD/MEHS remain possible follow-ons rather than being faked here.
 - [ ] **Azimuthal shear / rotation tracker display** — surface existing fusion shear ideas as a first-class product or overlay (path toward meso awareness without full NEXRAD RPG clone).
 - [ ] **Max-value trails (simple)** — trail of max REF or ZDR over loaded history (poor-man’s GR max trails).
 - [ ] **Deeper in-memory / on-disk volume history** — raise practical loop depth; optional spill-to-disk for long events without full archive UI.

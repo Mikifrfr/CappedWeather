@@ -5,6 +5,7 @@
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
 #include "app/weather_overlay_source.hpp"
+#include "core/derived_products.hpp"
 #include "app/cross_section_widget.hpp"
 #include "app/gif_writer.hpp"
 #include "app/shortcut_help_dialog.hpp"
@@ -185,6 +186,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(productCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](const int index) {
         map_->setProduct(static_cast<ProductKind>(productCombo_->itemData(index).toInt()));
+        updateCrossSectionAvailability();
         rebuildTiltCombo();
         updateVelocityControls();
     });
@@ -909,6 +911,7 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     });
     crossSectionButton_ = addMapButton(QStringLiteral("Cross-section"),
                                        QStringLiteral("Draw a vertical cross-section through all tilts"));
+    crossSectionButton_->setObjectName(QStringLiteral("crossSectionButton"));
     crossSectionButton_->setCheckable(true);
     connect(crossSectionButton_, &QToolButton::toggled, this, [this](bool enabled) {
         if (enabled) measureButton_->setChecked(false);
@@ -1346,6 +1349,7 @@ void MainWindow::volumeStarted(const QString& radarId, const QString& volumeId, 
     session->pendingFailedChunks = 0;
     session->pendingDecodeTasks = 0;
     session->pendingVolumeNetworkReady = false;
+
     for (auto* panel : maps_) {
         if (panel->radarId() == radarId && session->history.empty())
             panel->setLoading(true, QStringLiteral("Downloading and decoding %1").arg(radarId));
@@ -1404,7 +1408,44 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
         return;
     }
     session->pendingVolumeNetworkReady = false;
-    model_->setStatus(radarId, QStringLiteral("received"), receivedAt);
+    if (session->derivingVolumeIds.contains(volumeId)) return;
+    session->derivingVolumeIds.insert(volumeId);
+    auto volume = std::make_shared<DecodedChunk>(std::move(session->pendingVolume));
+    double radarElevationMeters = 0.0;
+    const auto radarRow = model_->rowForRadar(radarId);
+    if (radarRow >= 0) radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
+    for (auto* panel : maps_) {
+        if (panel->radarId() == radarId)
+            panel->setLoading(true, QStringLiteral("%1 deriving ET18 + VIL").arg(radarId));
+    }
+    if (radarId == selectedRadarId()) {
+        radarStatus_ = QStringLiteral("%1 deriving Echo Tops + VIL in background").arg(radarId);
+        updateUnifiedStatus();
+    }
+    const QPointer<MainWindow> guard(this);
+    QThreadPool::globalInstance()->start(
+        [guard, volume, radarId, volumeId, chunkCount, failedChunks, receivedAt,
+         radarElevationMeters] {
+            appendDerivedProducts(*volume, radarElevationMeters);
+            if (!guard) return;
+            QMetaObject::invokeMethod(
+                guard.data(),
+                [guard, volume, radarId, volumeId, chunkCount, failedChunks, receivedAt] {
+                    if (guard)
+                        guard->finalizeVolumeReady(radarId, volumeId, chunkCount, failedChunks,
+                                                   receivedAt, volume);
+                },
+                Qt::QueuedConnection);
+        });
+}
+
+void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volumeId,
+                                     const int chunkCount, const int failedChunks,
+                                     const QDateTime& receivedAt,
+                                     std::shared_ptr<DecodedChunk> volume) {
+    const auto session = sessionFor(radarId, false);
+    if (!session || !session->derivingVolumeIds.remove(volumeId)) return;
+    const auto isCurrentVolume = volumeId == session->pendingVolumeId;
     const auto followLatest = session->history.empty() || session->followLatest;
     const auto selectedVolume = session->frameIndex >= 0 &&
                                 session->frameIndex < static_cast<int>(session->history.size())
@@ -1414,20 +1455,18 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
         return frame.volumeId == volumeId;
     });
     if (duplicate == session->history.end()) {
-        session->history.push_back({volumeId,
-                                    std::make_shared<DecodedChunk>(std::move(session->pendingVolume)),
-                                    receivedAt, chunkCount, failedChunks});
+        session->history.push_back({volumeId, std::move(volume), receivedAt, chunkCount, failedChunks});
     }
     std::sort(session->history.begin(), session->history.end(), [](const RadarFrame& left, const RadarFrame& right) {
-        return left.dataTime < right.dataTime;
+        return left.dataTime == right.dataTime ? left.volumeId < right.volumeId
+                                               : left.dataTime < right.dataTime;
     });
     const auto maximumHistory = static_cast<std::size_t>(std::max(2, maximumHistoryFrames_));
     if (session->history.size() > maximumHistory) {
         session->history.erase(session->history.begin(), session->history.begin() +
             static_cast<std::ptrdiff_t>(session->history.size() - maximumHistory));
     }
-    session->pendingVolumeId.clear();
-    session->requestActive = false;
+    if (isCurrentVolume) session->pendingVolumeId.clear();
     for (auto* panel : maps_) if (panel->radarId() == radarId) panel->setLoading(false);
     if (followLatest) {
         session->frameIndex = static_cast<int>(session->history.size()) - 1;
@@ -1439,9 +1478,11 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
             : static_cast<int>(std::distance(session->history.begin(), selected));
     }
     if (radarId == selectedRadarId()) {
-        loadingProgress_->hide();
-        cancelButton_->hide();
-        retryButton_->hide();
+        if (isCurrentVolume) {
+            loadingProgress_->hide();
+            cancelButton_->hide();
+            retryButton_->hide();
+        }
         updatePlaybackControls();
         showFrame(session->frameIndex);
     } else if (!session->history.empty()) {
@@ -1453,13 +1494,15 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
                                     frame.chunk->rejectedMessages, frame.chunk->rejectedBlocks);
         }
     }
-    radarStatus_ = QStringLiteral("%1 · %2 real volume%3 · %4")
-                       .arg(radarId).arg(session->history.size())
-                       .arg(session->history.size() == 1 ? QString{} : QStringLiteral("s"))
-                       .arg(failedChunks == 0 ? QStringLiteral("complete")
-                                              : QStringLiteral("partial: %1 chunk%2 unavailable")
-                                                    .arg(failedChunks)
-                                                    .arg(failedChunks == 1 ? QString{} : QStringLiteral("s")));
+    if (!session->requestActive) {
+        radarStatus_ = QStringLiteral("%1 · %2 real volume%3 · %4")
+                           .arg(radarId).arg(session->history.size())
+                           .arg(session->history.size() == 1 ? QString{} : QStringLiteral("s"))
+                           .arg(failedChunks == 0 ? QStringLiteral("complete")
+                                                  : QStringLiteral("partial: %1 chunk%2 unavailable")
+                                                        .arg(failedChunks)
+                                                        .arg(failedChunks == 1 ? QString{} : QStringLiteral("s")));
+    }
     if (radarId == selectedRadarId()) {
         updateStationSummary();
         updateUnifiedStatus();
@@ -1482,7 +1525,7 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
         QTimer::singleShot(0, this, [this] { playButton_->setChecked(true); });
     }
     if (radarId == selectedRadarId_) {
-        lastVolumeTime_ = receivedAt;
+        if (!lastVolumeTime_.isValid() || receivedAt > lastVolumeTime_) lastVolumeTime_ = receivedAt;
         recomputeRadarHealth();
     }
 }
@@ -1527,6 +1570,14 @@ void MainWindow::rebuildTiltCombo() {
         int rayCount = 0;
     };
     const auto previousElevation = map_->elevationFilter().value_or(-1);
+    if (isDerivedProduct(map_->product())) {
+        const QSignalBlocker blocker(tiltCombo_);
+        tiltCombo_->clear();
+        tiltCombo_->addItem(QStringLiteral("All tilts (volume derived)"));
+        tiltCombo_->setEnabled(false);
+        map_->setElevationFilter(std::nullopt);
+        return;
+    }
     std::vector<TiltSummary> tilts;
     const auto session = activeSession();
     if (!session || session->frameIndex < 0 ||
@@ -1737,7 +1788,8 @@ void MainWindow::restoreSettings() {
     for (int panel = 0; panel < maps_.size(); ++panel) {
         const auto defaultProduct = static_cast<int>(maps_.at(panel)->product());
         const auto product = std::clamp(settings.value(QStringLiteral("panels/product%1").arg(panel),
-                                                        defaultProduct).toInt(), 0, 5);
+                                                        defaultProduct).toInt(), 0,
+                                  static_cast<int>(kProductCount) - 1);
         maps_.at(panel)->setProduct(static_cast<ProductKind>(product));
         const auto savedTilt = settings.value(QStringLiteral("panels/tilt%1").arg(panel), -1).toInt();
         maps_.at(panel)->setElevationFilter(savedTilt > 0 ? std::optional<int>(savedTilt) : std::nullopt);
@@ -2257,6 +2309,7 @@ void MainWindow::activateMap(RadarMapCanvas* map) {
     const QSignalBlocker crossSectionBlocker(crossSectionButton_);
     measureButton_->setChecked(false);
     crossSectionButton_->setChecked(false);
+    updateCrossSectionAvailability();
     selectedRadarId_ = map_->radarId();
     rebuildStationPicker();
     updateStationSummary();
@@ -2323,7 +2376,18 @@ void MainWindow::updateVelocityControls() {
     stormSpeedSpin_->setEnabled(stormRelative);
 }
 
+void MainWindow::updateCrossSectionAvailability() {
+    if (!crossSectionButton_ || !map_) return;
+    const auto available = !isDerivedProduct(map_->product());
+    if (!available && crossSectionButton_->isChecked()) crossSectionButton_->setChecked(false);
+    crossSectionButton_->setEnabled(available);
+    crossSectionButton_->setToolTip(
+        available ? QStringLiteral("Draw a vertical cross-section through all tilts")
+                  : QStringLiteral("Cross-sections require a native tilt product"));
+}
+
 void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
+    if (isDerivedProduct(map_->product())) return;
     const auto session = activeSession();
     if (!session || session->frameIndex < 0 ||
         session->frameIndex >= static_cast<int>(session->history.size())) return;
@@ -2543,7 +2607,7 @@ LayoutPreset MainWindow::presetByName(const QString& name) const {
         p.product[i] = std::clamp(
             settings.value(QStringLiteral("panel%1/product").arg(i),
                            static_cast<int>(ProductKind::Reflectivity)).toInt(),
-            0, 5);
+            0, static_cast<int>(kProductCount) - 1);
         p.tilt[i] = settings.value(QStringLiteral("panel%1/tilt").arg(i), -1).toInt();
     }
     settings.endGroup();

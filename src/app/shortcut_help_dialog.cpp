@@ -42,7 +42,7 @@ void ShortcutHelpDialog::populateShortcutsInto(QTextEdit* text) {
         {"+ / -",        "Zoom in / out"},
         {"R",            "Recenter on selected radar"},
         {"L",            "Jump to LIVE (latest volume)"},
-        {"1 - 6",        "Switch product (REF, VEL, SW, ZDR, CC, PHI)"},
+        {"1 - 8",        "Switch product (REF, VEL, SW, ZDR, CC, PHI, ET18, VIL)"},
         {"?",            "Show this help dialog"},
         {"Esc",          "Close this dialog"},
         {"F1",           "Show this help dialog"},

@@ -77,19 +77,19 @@ void CrossSectionWidget::buildCells() {
             const auto spacing = ray.gateSpacingByProduct.at(productIndex);
             if (spacing == 0) continue;
             const auto slantRange = slantRangeForSurfaceDistance(fromRadar.distanceMeters, ray.elevationDegrees);
-            const auto gatePosition = (slantRange - ray.firstGateByProduct.at(productIndex)) / spacing - 0.5;
-            const auto gate = static_cast<long long>(std::llround(gatePosition));
             const auto& encoded = ray.fields.at(productIndex);
-            if (gate < 0 || static_cast<std::size_t>(gate) >= encoded.size()) continue;
+            const auto gate = gateIndexForSlantRange(
+                slantRange, ray.firstGateByProduct.at(productIndex), spacing, encoded.size());
+            if (!gate) continue;
             const auto beam = standardBeamGeometry(slantRange, ray.elevationDegrees);
             const auto height = beam.heightAboveRadarMeters + radarElevationMeters_;
             std::optional<double> value;
-            if (encoded[gate] > 1 && product_ == ProductKind::Velocity && rayIndex < velocity.size() &&
-                static_cast<std::size_t>(gate) < velocity[rayIndex].size() &&
-                std::isfinite(velocity[rayIndex][gate])) {
-                value = velocity[rayIndex][gate];
-            } else if (encoded[gate] > 1) {
-                value = nativeValue(encoded[gate], ray.scaleByProduct.at(productIndex),
+            if (encoded[*gate] > 1 && product_ == ProductKind::Velocity && rayIndex < velocity.size() &&
+                *gate < velocity[rayIndex].size() &&
+                std::isfinite(velocity[rayIndex][*gate])) {
+                value = velocity[rayIndex][*gate];
+            } else if (encoded[*gate] > 1) {
+                value = nativeValue(encoded[*gate], ray.scaleByProduct.at(productIndex),
                                     ray.offsetByProduct.at(productIndex));
             }
             cells_.push_back({sample, along, height,

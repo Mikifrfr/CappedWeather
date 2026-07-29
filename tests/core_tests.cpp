@@ -10,6 +10,7 @@
 #include "core/flash_rate_grid.hpp"
 #include "core/glm_l2_reader.hpp"
 #include "core/radar_lightning_fusion.hpp"
+#include "core/derived_products.hpp"
 
 #include <array>
 #include <algorithm>
@@ -40,9 +41,116 @@ void check(const bool condition, const char* expression, const char* file, const
 #define assert(expression) check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 void testProducts() {
-    assert(productDescriptors().size() == 6);
+    assert(productDescriptors().size() == 8);
     assert(productDescriptor(ProductKind::Reflectivity).unit == "dBZ");
     assert(productDescriptor(ProductKind::CorrelationCoefficient).maximum == 1.05);
+    assert(productDescriptor(ProductKind::EchoTop).unit == "kft MSL");
+    assert(productDescriptor(ProductKind::VerticallyIntegratedLiquid).unit == "kg/m2");
+    assert(isDerivedProduct(ProductKind::EchoTop));
+    assert(isDerivedProduct(ProductKind::VerticallyIntegratedLiquid));
+    assert(!isDerivedProduct(ProductKind::Reflectivity));
+}
+
+DecodedRay syntheticDerivedRay(const float azimuth, const std::uint8_t elevationNumber,
+                               const float elevationDegrees, const double reflectivityDbz) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto encoded = static_cast<std::uint16_t>(std::lround(reflectivityDbz * 2.0 + 66.0));
+    ray.fields.at(index).assign(32, encoded);
+    ray.firstGateByProduct.at(index) = 0;
+    ray.gateSpacingByProduct.at(index) = 1000;
+    ray.scaleByProduct.at(index) = 2.0F;
+    ray.offsetByProduct.at(index) = 66.0F;
+    return ray;
+}
+
+void testDerivedProducts() {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 2, 5.0F, 10.0));
+
+    const auto summary = appendDerivedProducts(chunk, 370.0);
+    assert(summary.sourceTiltCount == 2);
+    assert(summary.outputRayCount == 1);
+    assert(summary.echoTopGateCount > 0);
+    assert(summary.vilGateCount > 0);
+
+    const auto echoIndex = static_cast<std::size_t>(ProductKind::EchoTop);
+    const auto vilIndex = static_cast<std::size_t>(ProductKind::VerticallyIntegratedLiquid);
+    const auto& output = chunk.rays.front();
+    assert(output.has(ProductKind::EchoTop));
+    assert(output.has(ProductKind::VerticallyIntegratedLiquid));
+    assert(!chunk.rays.back().has(ProductKind::EchoTop));
+
+    constexpr std::size_t gate = 10;
+    const auto echoTopKft = nativeValue(output.fields.at(echoIndex).at(gate),
+                                        output.scaleByProduct.at(echoIndex),
+                                        output.offsetByProduct.at(echoIndex));
+    const auto vil = nativeValue(output.fields.at(vilIndex).at(gate),
+                                 output.scaleByProduct.at(vilIndex),
+                                 output.offsetByProduct.at(vilIndex));
+    assert(echoTopKft.has_value());
+    assert(vil.has_value());
+
+    const auto groundRange = standardBeamGeometry(10000.0, 0.5).surfaceDistanceMeters;
+    const auto lowSlant = slantRangeForSurfaceDistance(groundRange, 0.5);
+    const auto highSlant = slantRangeForSurfaceDistance(groundRange, 5.0);
+    const auto lowHeight = standardBeamGeometry(lowSlant, 0.5).heightAboveRadarMeters + 370.0;
+    const auto highHeight = standardBeamGeometry(highSlant, 5.0).heightAboveRadarMeters + 370.0;
+    const auto expectedEchoTopKft = (lowHeight + 0.6 * (highHeight - lowHeight)) / 304.8;
+    assert(std::abs(*echoTopKft - expectedEchoTopKft) < 0.11);
+    const auto averageLinearReflectivity = 0.5 * (std::pow(10.0, 3.0) + std::pow(10.0, 1.0));
+    const auto expectedVil = 3.44e-6 * std::pow(averageLinearReflectivity, 4.0 / 7.0) *
+                             (highHeight - lowHeight);
+    assert(std::abs(*vil - expectedVil) < 0.11);
+}
+
+void testDerivedEchoTopLowerBoundWithMissingUpperData() {
+    DecodedChunk chunk;
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    auto upper = syntheticDerivedRay(90.0F, 2, 5.0F, 10.0);
+    upper.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).assign(32, 0);
+    chunk.rays.push_back(std::move(upper));
+
+    const auto summary = appendDerivedProducts(chunk, 370.0);
+    const auto echoIndex = static_cast<std::size_t>(ProductKind::EchoTop);
+    const auto vilIndex = static_cast<std::size_t>(ProductKind::VerticallyIntegratedLiquid);
+    assert(summary.echoTopLowerBoundGateCount > 0);
+    assert(chunk.rays.front().fields.at(echoIndex).at(10) > 1);
+    assert(chunk.rays.front().fields.at(vilIndex).at(10) == 0);
+}
+
+void testDerivedProductsRequireVolumeDepth() {
+    DecodedChunk chunk;
+    chunk.rays.push_back(syntheticDerivedRay(45.0F, 1, 0.5F, 40.0));
+    const auto summary = appendDerivedProducts(chunk, 100.0);
+    assert(summary.sourceTiltCount == 1);
+    assert(summary.outputRayCount == 0);
+    assert(!chunk.rays.front().has(ProductKind::EchoTop));
+    assert(!chunk.rays.front().has(ProductKind::VerticallyIntegratedLiquid));
+}
+
+void testDerivedProductsSupportNegativeFirstGate() {
+    DecodedChunk chunk;
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 2, 5.0F, 10.0));
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    for (auto& ray : chunk.rays) {
+        ray.firstGateByProduct.at(reflectivityIndex) = -375;
+        ray.gateSpacingByProduct.at(reflectivityIndex) = 250;
+    }
+    const auto summary = appendDerivedProducts(chunk, 370.0);
+    const auto echoIndex = static_cast<std::size_t>(ProductKind::EchoTop);
+    const auto vilIndex = static_cast<std::size_t>(ProductKind::VerticallyIntegratedLiquid);
+    assert(summary.echoTopGateCount > 0);
+    assert(summary.vilGateCount > 0);
+    assert(chunk.rays.front().fields.at(echoIndex).at(8) > 1);
+    assert(chunk.rays.front().fields.at(vilIndex).at(8) > 1);
 }
 
 void testCatalog() {
@@ -106,6 +214,13 @@ void testRadarGeometry() {
     const auto beam = standardBeamGeometry(100000.0, 0.5);
     assert(beam.heightAboveRadarMeters > 1400.0 && beam.heightAboveRadarMeters < 1550.0);
     assert(std::abs(slantRangeForSurfaceDistance(beam.surfaceDistanceMeters, 0.5) - 100000.0) < 0.1);
+    assert(gateCenterSlantRange(-375, 250, 0) == -375.0);
+    assert(gateCenterSlantRange(-375, 250, 2) == 125.0);
+    assert(gateIndexForSlantRange(5000.0, 5000, 1000, 32).value() == 0);
+    assert(gateIndexForSlantRange(6000.0, 5000, 1000, 32).value() == 1);
+    assert(gateIndexForSlantRange(5490.0, 5000, 1000, 32).value() == 0);
+    assert(gateIndexForSlantRange(5510.0, 5000, 1000, 32).value() == 1);
+    assert(!gateIndexForSlantRange(5000.0, 5000, 0, 32).has_value());
 }
 
 void testScanDiagnostics() {
@@ -123,7 +238,7 @@ void testScanDiagnostics() {
     assert(diagnostics.rayCount == 4);
     assert(diagnostics.tiltCount == 1);
     assert(std::abs(diagnostics.largestAzimuthGapDegrees - 90.0) < 0.01);
-    assert(std::abs(diagnostics.maximumRangeMeters - 25000.0) < 0.01);
+    assert(std::abs(diagnostics.maximumRangeMeters - 24875.0) < 0.01);
 }
 
 void testVelocityProcessing() {
@@ -428,6 +543,18 @@ void testRadarLightningFusion() {
     assert(associations.size() == 1);
     assert(associations.front().distanceKm < 0.1);
     assert(associations.front().radarFeatureIndex == 0);
+
+    DecodedChunk centered;
+    auto singleGate = syntheticFusionRay(90.0F, ProductKind::Reflectivity, 156);
+    singleGate.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).resize(1);
+    centered.rays.push_back(std::move(singleGate));
+    const auto centeredFeatures = extractRadarStormFeatures(centered, 35.333, -97.278, config);
+    assert(centeredFeatures.size() == 1);
+    const auto measured = rangeAndBearing(
+        {35.333, -97.278},
+        {centeredFeatures.front().latitudeDeg, centeredFeatures.front().longitudeDeg});
+    const auto expected = standardBeamGeometry(5000.0, 0.5).surfaceDistanceMeters;
+    assert(std::abs(measured.distanceMeters - expected) < 1.0);
 }
 
 void testGlmL2Keys() {
@@ -452,6 +579,10 @@ void testGlmReaderBuildContract() {
 
 int main() {
     testProducts();
+    testDerivedProducts();
+    testDerivedEchoTopLowerBoundWithMissingUpperData();
+    testDerivedProductsRequireVolumeDepth();
+    testDerivedProductsSupportNegativeFirstGate();
     testCatalog();
     testS3Selection();
     testBinaryPrimitives();

@@ -38,6 +38,8 @@ int main(int argc, char** argv) {
     auto* map = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
     auto* secondMap = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
     auto* products = window.findChild<QComboBox*>(QStringLiteral("productCombo"));
+    auto* tiltCombo = window.findChild<QComboBox*>(QStringLiteral("tiltCombo"));
+    auto* crossSectionButton = window.findChild<QToolButton*>(QStringLiteral("crossSectionButton"));
     auto* frameSlider = window.findChild<QSlider*>(QStringLiteral("frameSlider"));
     auto* frameLabel = window.findChild<QLabel*>(QStringLiteral("frameLabel"));
     auto* playButton = window.findChild<QToolButton*>(QStringLiteral("playButton"));
@@ -56,7 +58,10 @@ int main(int argc, char** argv) {
     const auto radarPanels = window.findChildren<RadarMapCanvas*>();
     auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
-    if (!map || !secondMap || !products || !frameSlider || !frameLabel || !playButton ||
+    if (!map || !secondMap || !products || products->count() != 8 ||
+        products->findData(static_cast<int>(ProductKind::EchoTop)) < 0 ||
+        products->findData(static_cast<int>(ProductKind::VerticallyIntegratedLiquid)) < 0 ||
+        !tiltCombo || !crossSectionButton || !frameSlider || !frameLabel || !playButton ||
         !snapshotButton || !timelineButton || !warningsCheck || !reportsCheck ||
         !lightningCheck || !lightningFusionCheck ||
         !belowThresholdCheck ||
@@ -70,6 +75,21 @@ int main(int argc, char** argv) {
     auto* emptyStateHint = window.findChild<QLabel*>(QStringLiteral("emptyStateHint"));
     if (!emptyStateHint || emptyStateHint->text().isEmpty()) {
         std::cerr << "Empty-state hint is missing or empty\n";
+        return 1;
+    }
+
+    products->setCurrentIndex(products->findData(static_cast<int>(ProductKind::EchoTop)));
+    application.processEvents();
+    if (map->product() != ProductKind::EchoTop || tiltCombo->isEnabled() ||
+        tiltCombo->currentText() != QStringLiteral("All tilts (volume derived)") ||
+        crossSectionButton->isEnabled()) {
+        std::cerr << "Derived product controls did not switch to all-tilt 2D mode\n";
+        return 1;
+    }
+    products->setCurrentIndex(products->findData(static_cast<int>(ProductKind::Reflectivity)));
+    application.processEvents();
+    if (!crossSectionButton->isEnabled()) {
+        std::cerr << "Cross-section control did not recover for native products\n";
         return 1;
     }
 
@@ -114,7 +134,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    secondMap->setProduct(ProductKind::EchoTop);
+    secondMap->setCrossSectionMode(true);
     secondMap->activated();
+    application.processEvents();
+    if (crossSectionButton->isEnabled() || secondMap->crossSectionMode()) {
+        std::cerr << "Derived-product panel activation exposed cross-section controls\n";
+        return 1;
+    }
     const auto secondRadarIndex = stationCombo->findData(QStringLiteral("KTLX"));
     if (secondRadarIndex < 0) {
         std::cerr << "Shared panel radar was not available in the station picker\n";
@@ -128,6 +155,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     map->activated();
+    application.processEvents();
+    if (!crossSectionButton->isEnabled()) {
+        std::cerr << "Native-product panel activation did not restore cross-section controls\n";
+        return 1;
+    }
     panelLayout->setCurrentIndex(0);
     application.processEvents();
 

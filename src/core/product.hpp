@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string_view>
 #include <vector>
 
@@ -12,7 +13,11 @@ enum class ProductKind {
     DifferentialReflectivity,
     CorrelationCoefficient,
     DifferentialPhase,
+    EchoTop,
+    VerticallyIntegratedLiquid,
 };
+
+inline constexpr std::size_t kProductCount = 8;
 
 struct ProductDescriptor {
     ProductKind kind;
@@ -25,5 +30,8 @@ struct ProductDescriptor {
 
 const ProductDescriptor& productDescriptor(ProductKind kind);
 const std::vector<ProductDescriptor>& productDescriptors();
+constexpr bool isDerivedProduct(const ProductKind kind) {
+    return kind == ProductKind::EchoTop || kind == ProductKind::VerticallyIntegratedLiquid;
+}
 
 } // namespace cappedweather

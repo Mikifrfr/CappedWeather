@@ -77,4 +77,23 @@ double slantRangeForSurfaceDistance(const double surfaceDistanceMeters, const do
     return (lower + upper) * 0.5;
 }
 
+double gateCenterSlantRange(const int firstGateMeters, const int gateSpacingMeters,
+                            const std::size_t gate) {
+    return static_cast<double>(firstGateMeters) +
+           static_cast<double>(gate) * static_cast<double>(gateSpacingMeters);
+}
+
+std::optional<std::size_t> gateIndexForSlantRange(const double slantRangeMeters,
+                                                  const int firstGateMeters,
+                                                  const int gateSpacingMeters,
+                                                  const std::size_t gateCount) {
+    if (!std::isfinite(slantRangeMeters) || gateSpacingMeters <= 0 || gateCount == 0)
+        return std::nullopt;
+    const auto position = (slantRangeMeters - static_cast<double>(firstGateMeters)) /
+                          static_cast<double>(gateSpacingMeters);
+    const auto gate = static_cast<long long>(std::llround(position));
+    if (gate < 0 || static_cast<std::size_t>(gate) >= gateCount) return std::nullopt;
+    return static_cast<std::size_t>(gate);
+}
+
 } // namespace cappedweather

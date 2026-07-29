@@ -20,11 +20,11 @@ struct DecodedRay {
     std::uint16_t gateCount = 0;
     std::int16_t firstGateMeters = 0;
     std::uint16_t gateSpacingMeters = 0;
-    std::array<std::vector<std::uint16_t>, 6> fields;
-    std::array<std::int16_t, 6> firstGateByProduct{};
-    std::array<std::uint16_t, 6> gateSpacingByProduct{};
-    std::array<float, 6> scaleByProduct{};
-    std::array<float, 6> offsetByProduct{};
+    std::array<std::vector<std::uint16_t>, kProductCount> fields;
+    std::array<std::int16_t, kProductCount> firstGateByProduct{};
+    std::array<std::uint16_t, kProductCount> gateSpacingByProduct{};
+    std::array<float, kProductCount> scaleByProduct{};
+    std::array<float, kProductCount> offsetByProduct{};
 
     bool has(ProductKind kind) const;
 };

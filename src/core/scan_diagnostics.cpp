@@ -1,4 +1,5 @@
 #include "core/scan_diagnostics.hpp"
+#include "core/radar_geometry.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,11 +21,15 @@ ScanDiagnostics analyzeScan(const DecodedChunk& chunk, const ProductKind product
         tilts.insert(ray.elevationNumber);
         auto azimuth = std::fmod(static_cast<double>(ray.azimuthDegrees) + 360.0, 360.0);
         azimuths.push_back(azimuth);
-        result.maximumRangeMeters = std::max(
-            result.maximumRangeMeters,
-            static_cast<double>(ray.firstGateByProduct.at(productIndex)) +
-                static_cast<double>(ray.fields.at(productIndex).size()) *
-                    ray.gateSpacingByProduct.at(productIndex));
+        const auto& values = ray.fields.at(productIndex);
+        const auto spacing = ray.gateSpacingByProduct.at(productIndex);
+        if (!values.empty() && spacing > 0) {
+            const auto outerEdge = gateCenterSlantRange(
+                                       ray.firstGateByProduct.at(productIndex), spacing,
+                                       values.size() - 1) +
+                                   spacing * 0.5;
+            result.maximumRangeMeters = std::max(result.maximumRangeMeters, outerEdge);
+        }
     }
     result.tiltCount = static_cast<int>(tilts.size());
     if (azimuths.empty()) return result;
