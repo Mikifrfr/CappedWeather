@@ -1,4 +1,5 @@
 #include "app/nexrad_source.hpp"
+#include "app/archive_level2.hpp"
 
 #include "core/radar_catalog.hpp"
 
@@ -11,13 +12,8 @@
 #include <QXmlStreamReader>
 
 #include <algorithm>
-#include <array>
 #include <limits>
 #include <utility>
-
-#ifdef CAPPEDWEATHER_HAS_BZIP2
-#include <bzlib.h>
-#endif
 
 namespace cappedweather {
 
@@ -53,50 +49,6 @@ void configureRequest(QNetworkRequest& request) {
     request.setHeader(QNetworkRequest::UserAgentHeader, userAgent());
     request.setTransferTimeout(networkTimeoutMilliseconds());
 }
-
-#ifdef CAPPEDWEATHER_HAS_BZIP2
-std::optional<QByteArray> decompressChunk(const QByteArray& input, QString& error) {
-    if (input.size() <= 6 || input[4] != 'B' || input[5] != 'Z' || input[6] != 'h') {
-        error = QStringLiteral("NOAA object is not a bzip2 Level II chunk");
-        return std::nullopt;
-    }
-
-    bz_stream stream{};
-    stream.next_in = const_cast<char*>(input.constData() + 4);
-    stream.avail_in = static_cast<unsigned int>(input.size() - 4);
-    const auto initialized = BZ2_bzDecompressInit(&stream, 0, 0);
-    if (initialized != BZ_OK) {
-        error = QStringLiteral("bzip2 initialization failed (%1)").arg(initialized);
-        return std::nullopt;
-    }
-
-    constexpr qsizetype kOutputBlockSize = 256 * 1024;
-    constexpr qsizetype kMaximumOutputSize = 64 * 1024 * 1024;
-    std::array<char, kOutputBlockSize> block{};
-    QByteArray output;
-    output.reserve(std::min<qsizetype>(kMaximumOutputSize,
-                                       std::max<qsizetype>(1 << 20, input.size() * 6)));
-    int result = BZ_OK;
-    while (result == BZ_OK) {
-        stream.next_out = block.data();
-        stream.avail_out = static_cast<unsigned int>(block.size());
-        result = BZ2_bzDecompress(&stream);
-        const auto produced = static_cast<qsizetype>(block.size() - stream.avail_out);
-        if (produced > 0) output.append(block.data(), produced);
-        if (output.size() > kMaximumOutputSize) {
-            BZ2_bzDecompressEnd(&stream);
-            error = QStringLiteral("bzip2 output exceeded the 64 MB safety limit");
-            return std::nullopt;
-        }
-    }
-    BZ2_bzDecompressEnd(&stream);
-    if (result != BZ_STREAM_END) {
-        error = QStringLiteral("bzip2 decompression failed (%1)").arg(result);
-        return std::nullopt;
-    }
-    return output;
-}
-#endif
 
 QUrl listingUrl(const QString& prefix, const QString& delimiter, const QString& startAfter) {
     QUrlQuery query;
@@ -506,19 +458,17 @@ void NexradSource::objectFinished(QNetworkReply* reply) {
     processingPool_.start([guard, context = std::move(context), data = std::move(data), receivedAt]() mutable {
         QString failure;
         std::optional<DecodedChunk> decoded;
-#ifdef CAPPEDWEATHER_HAS_BZIP2
-        if (const auto decompressed = decompressChunk(data, failure); decompressed.has_value()) {
-            const auto* raw = reinterpret_cast<const std::byte*>(decompressed->constData());
-            decoded = decodeMessage31Chunk(
-                std::span<const std::byte>(raw, static_cast<std::size_t>(decompressed->size())),
-                context.object.radarId.toStdString());
+        if (data.size() > 4) {
+            const auto decompressed = decompressLevel2BzipBlock(data.mid(4), &failure);
+            if (decompressed.has_value()) {
+                const auto* raw = reinterpret_cast<const std::byte*>(decompressed->constData());
+                decoded = decodeMessage31Chunk(
+                    std::span<const std::byte>(raw, static_cast<std::size_t>(decompressed->size())),
+                    context.object.radarId.toStdString());
+            }
         } else {
-            decoded.reset();
+            failure = QStringLiteral("NOAA Level II chunk is shorter than its framing header");
         }
-#else
-        Q_UNUSED(data);
-        failure = QStringLiteral("bzip2 support unavailable");
-#endif
         if (!guard) return;
         QMetaObject::invokeMethod(guard, [guard, context = std::move(context), receivedAt,
                                           decoded = std::move(decoded), failure = std::move(failure)]() mutable {

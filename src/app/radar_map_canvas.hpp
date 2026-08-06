@@ -7,6 +7,7 @@
 #include "core/lightning_overlay.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "app/weather_overlay_source.hpp"
+#include "app/placefile.hpp"
 
 #include <QColor>
 #include <QDateTime>
@@ -59,6 +60,8 @@ public:
     void setDecodedChunk(DecodedChunk chunk, const QDateTime& dataTime);
     void setDecodedChunk(std::shared_ptr<const DecodedChunk> chunk, const QDateTime& dataTime);
     void setWeatherOverlays(QVector<WeatherWarning> warnings, QVector<StormReport> reports);
+    void setPlacefiles(QVector<PlacefileDocument> documents);
+    void setPlacefilesVisible(bool visible);
     void setLightningCells(std::vector<LightningCellSnapshot> cells);
     void setLightningVisible(bool visible);
     void setLightningFusionVisible(bool visible);
@@ -119,6 +122,8 @@ public:
     QPoint lightningCellScreenPoint(int index) const;
     int warningCount() const;
     int stormReportCount() const;
+    int placefileElementCount() const;
+    bool placefilesVisible() const { return placefilesVisible_; }
     int lightningCellCount() const;
     const std::vector<LightningCellSnapshot>& lightningCells() const { return lightningCells_; }
     int radarFeatureCount() const;
@@ -165,6 +170,7 @@ private:
         Warning,
         StormReport,
         Lightning,
+        Placefile,
     };
 
     struct OverlayHit {
@@ -194,6 +200,7 @@ private:
     void invalidateOverlay(bool preserveForZoomTransition = false);
     void paintRadarOverlay(QPainter& painter);
     void paintWeatherOverlays(QPainter& painter);
+    void paintPlacefiles(QPainter& painter);
     void paintLightningOverlay(QPainter& painter);
     void paintLegend(QPainter& painter);
     void paintProbe(QPainter& painter);
@@ -245,6 +252,7 @@ private:
     bool weatherOverlayBuildPending_ = false;
     QVector<WeatherWarning> warnings_;
     QVector<StormReport> stormReports_;
+    QVector<PlacefileDocument> placefiles_;
     std::vector<LightningCellSnapshot> lightningCells_;
     std::vector<RadarStormFeature> radarFeatures_;
     std::vector<LightningRadarAssociation> lightningAssociations_;
@@ -296,6 +304,7 @@ private:
     bool loading_ = false;
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;
+    bool placefilesVisible_ = true;
     bool lightningVisible_ = true;
     bool lightningFusionVisible_ = true;
     std::array<bool, 3> stormReportKindsVisible_{true, true, true};

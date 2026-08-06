@@ -5,6 +5,8 @@
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
 #include "app/weather_overlay_source.hpp"
+#include "app/placefile_source.hpp"
+#include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
 #include "app/cross_section_widget.hpp"
 #include "app/gif_writer.hpp"
@@ -69,6 +71,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTextStream>
+#include <QUrlQuery>
 #include <QVBoxLayout>
 #include <QtMath>
 
@@ -101,6 +104,18 @@ GlmLiveConfig glmConfigFromSettings() {
     return config;
 }
 
+bool placefileUrlContainsCredentials(const QUrl& url) {
+    if (!url.userName().isEmpty() || !url.password().isEmpty()) return true;
+    const auto items = QUrlQuery(url).queryItems(QUrl::FullyDecoded);
+    return std::any_of(items.cbegin(), items.cend(), [](const auto& item) {
+        const auto key = item.first.toLower();
+        return key.contains(QStringLiteral("token")) || key.contains(QStringLiteral("secret")) ||
+            key.contains(QStringLiteral("password")) || key == QStringLiteral("key") ||
+            key.contains(QStringLiteral("api_key")) || key.contains(QStringLiteral("apikey")) ||
+            key.contains(QStringLiteral("auth"));
+    });
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -109,6 +124,8 @@ MainWindow::MainWindow(QWidget* parent)
       source_(new NexradSource(this)),
       glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
+      placefileSource_(new PlacefileSource(this)),
+      archiveSource_(new ArchiveSource(this)),
       alertCenter_(new AlertCenter(this)),
       refreshTimer_(new QTimer(this)),
       overlayRefreshTimer_(new QTimer(this)),
@@ -267,6 +284,20 @@ MainWindow::MainWindow(QWidget* parent)
             if (!panel->overlayOverrides().has_value()) panel->setLightningFusionVisible(visible);
         }
     });
+    connect(placefilesCheck_, &QCheckBox::toggled, this, [this](const bool visible) {
+        for (auto* panel : maps_) panel->setPlacefilesVisible(visible);
+    });
+    connect(addPlacefileButton_, &QToolButton::clicked, this, &MainWindow::openLocalPlacefile);
+    connect(addPlacefileUrlButton_, &QToolButton::clicked, this, &MainWindow::addPlacefileUrl);
+    connect(clearPlacefilesButton_, &QToolButton::clicked, this, &MainWindow::clearPlacefiles);
+    connect(placefileSource_, &PlacefileSource::documentsChanged, this,
+            [this](QVector<PlacefileDocument> documents) {
+                for (auto* panel : maps_) panel->setPlacefiles(documents);
+                clearPlacefilesButton_->setEnabled(!documents.isEmpty());
+            });
+    connect(placefileSource_, &PlacefileSource::statusChanged, this, [this](const QString& status) {
+        statusBar()->showMessage(status, 8000);
+    });
     connect(source_, &NexradSource::statusChanged, this, &MainWindow::sourceStatusChanged);
     connect(source_, &NexradSource::requestFailed, this, &MainWindow::sourceFailed);
     connect(source_, &NexradSource::catalogReceived, this, &MainWindow::catalogReceived);
@@ -274,6 +305,18 @@ MainWindow::MainWindow(QWidget* parent)
     connect(source_, &NexradSource::volumeProgress, this, &MainWindow::volumeProgress);
     connect(source_, &NexradSource::chunkDecoded, this, &MainWindow::chunkDecoded);
     connect(source_, &NexradSource::volumeReady, this, &MainWindow::volumeReady);
+    connect(archiveSource_, &ArchiveSource::statusChanged, this, &MainWindow::sourceStatusChanged);
+    connect(archiveSource_, &ArchiveSource::requestFailed, this,
+            [this](const QString& radarId, const QString& message) {
+                if (radarId != selectedRadarId()) return;
+                radarStatus_ = QStringLiteral("%1 archive: %2").arg(radarId, message);
+                updateUnifiedStatus();
+                statusBar()->showMessage(radarStatus_, 8000);
+            });
+    connect(archiveSource_, &ArchiveSource::volumeStarted, this, &MainWindow::volumeStarted);
+    connect(archiveSource_, &ArchiveSource::volumeProgress, this, &MainWindow::volumeProgress);
+    connect(archiveSource_, &ArchiveSource::chunkDecoded, this, &MainWindow::chunkDecoded);
+    connect(archiveSource_, &ArchiveSource::volumeReady, this, &MainWindow::volumeReady);
     connect(overlaySource_, &WeatherOverlaySource::overlaysReady, this,
             [this](QVector<WeatherWarning> warnings, QVector<StormReport> reports, const QDateTime&) {
                 for (auto* panel : maps_) panel->setWeatherOverlays(warnings, reports);
@@ -313,6 +356,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(cancelButton_, &QToolButton::clicked, this, [this] {
         const auto session = activeSession();
         source_->cancel(selectedRadarId_);
+        archiveSource_->cancel();
         if (session) {
             session->requestActive = false;
             session->playWhenHistoryReady = false;
@@ -399,6 +443,12 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     restoreSettings();
+    remotePlacefileUrls_ = QSettings().value(QStringLiteral("placefiles/urls")).toStringList();
+    remotePlacefileUrls_.erase(
+        std::remove_if(remotePlacefileUrls_.begin(), remotePlacefileUrls_.end(),
+                       [](const QString& value) { return placefileUrlContainsCredentials(QUrl(value)); }),
+        remotePlacefileUrls_.end());
+    QSettings().setValue(QStringLiteral("placefiles/urls"), remotePlacefileUrls_);
 
     for (auto* panel : maps_) panel->setSites(model_->sites());
     if (model_->rowCount() > 0) {
@@ -409,6 +459,7 @@ MainWindow::MainWindow(QWidget* parent)
         radarSelected(model_->index(row, 0));
         if (chaseMode_) selectNearestChaseRadar();
     }
+    for (const auto& sourceUrl : remotePlacefileUrls_) placefileSource_->addUrl(QUrl(sourceUrl));
     source_->requestCatalog();
     refreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/radarRefreshSeconds"), 60).toInt(),
                                     30, 600) * 1000);
@@ -657,6 +708,30 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     lightningFusionCheck_->setChecked(true);
     lightningFusionCheck_->setToolTip(QStringLiteral("Associate GLM jumps with reflectivity objects and azimuthal shear"));
     controlLayout->addWidget(lightningFusionCheck_);
+    placefilesCheck_ = new QCheckBox(QStringLiteral("GR placefiles"), controlBody);
+    placefilesCheck_->setObjectName(QStringLiteral("placefilesCheck"));
+    placefilesCheck_->setChecked(true);
+    placefilesCheck_->setToolTip(QStringLiteral("Show loaded GR-compatible placefile markers and boundaries"));
+    controlLayout->addWidget(placefilesCheck_);
+    auto* placefileRow = new QHBoxLayout();
+    placefileRow->setSpacing(4);
+    addPlacefileButton_ = new QToolButton(controlBody);
+    addPlacefileButton_->setObjectName(QStringLiteral("addPlacefileButton"));
+    addPlacefileButton_->setText(QStringLiteral("File…"));
+    addPlacefileButton_->setToolTip(QStringLiteral("Open a local GR placefile"));
+    placefileRow->addWidget(addPlacefileButton_);
+    addPlacefileUrlButton_ = new QToolButton(controlBody);
+    addPlacefileUrlButton_->setObjectName(QStringLiteral("addPlacefileUrlButton"));
+    addPlacefileUrlButton_->setText(QStringLiteral("URL…"));
+    addPlacefileUrlButton_->setToolTip(QStringLiteral("Fetch a GR placefile URL with automatic refresh"));
+    placefileRow->addWidget(addPlacefileUrlButton_);
+    clearPlacefilesButton_ = new QToolButton(controlBody);
+    clearPlacefilesButton_->setObjectName(QStringLiteral("clearPlacefilesButton"));
+    clearPlacefilesButton_->setText(QStringLiteral("Clear"));
+    clearPlacefilesButton_->setEnabled(false);
+    clearPlacefilesButton_->setToolTip(QStringLiteral("Remove all loaded placefiles"));
+    placefileRow->addWidget(clearPlacefilesButton_);
+    controlLayout->addLayout(placefileRow);
 
     proximityFilterCheck_ = new QCheckBox(QStringLiteral("Filter warnings to selected radar / chase point"), controlBody);
     proximityFilterCheck_->setObjectName(QStringLiteral("proximityFilterCheck"));
@@ -1005,6 +1080,32 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
     connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
     detailsRow->addWidget(timelineButton);
     playbackLayout->addLayout(detailsRow);
+    auto* archiveRow = new QHBoxLayout();
+    archiveRow->setContentsMargins(0, 0, 0, 0);
+    archiveRow->setSpacing(4);
+    auto* archiveLabel = new QLabel(QStringLiteral("OFFLINE / ARCHIVE"), playbackBody);
+    archiveLabel->setObjectName(QStringLiteral("section"));
+    archiveRow->addWidget(archiveLabel);
+    archiveRow->addStretch(1);
+    openArchiveFilesButton_ = new QToolButton(playbackBody);
+    openArchiveFilesButton_->setObjectName(QStringLiteral("openArchiveFilesButton"));
+    openArchiveFilesButton_->setText(QStringLiteral("L2 files…"));
+    openArchiveFilesButton_->setToolTip(QStringLiteral("Load local NOAA Archive-II Level II files for the selected radar"));
+    connect(openArchiveFilesButton_, &QToolButton::clicked, this, &MainWindow::openArchiveFiles);
+    archiveRow->addWidget(openArchiveFilesButton_);
+    openArchiveFolderButton_ = new QToolButton(playbackBody);
+    openArchiveFolderButton_->setObjectName(QStringLiteral("openArchiveFolderButton"));
+    openArchiveFolderButton_->setText(QStringLiteral("L2 folder…"));
+    openArchiveFolderButton_->setToolTip(QStringLiteral("Load all Archive-II Level II files in a local folder"));
+    connect(openArchiveFolderButton_, &QToolButton::clicked, this, &MainWindow::openArchiveFolder);
+    archiveRow->addWidget(openArchiveFolderButton_);
+    awsArchiveButton_ = new QToolButton(playbackBody);
+    awsArchiveButton_->setObjectName(QStringLiteral("awsArchiveButton"));
+    awsArchiveButton_->setText(QStringLiteral("AWS archive…"));
+    awsArchiveButton_->setToolTip(QStringLiteral("Load historical Level II volumes from the public NOAA/Unidata AWS archive"));
+    connect(awsArchiveButton_, &QToolButton::clicked, this, &MainWindow::openAwsArchive);
+    archiveRow->addWidget(awsArchiveButton_);
+    playbackLayout->addLayout(archiveRow);
     overlayStatusLabel_ = new QLabel(playbackBody);
     overlayStatusLabel_->setObjectName(QStringLiteral("section"));
     overlayStatusLabel_->hide();
@@ -1202,11 +1303,12 @@ void MainWindow::radarSelected(const QModelIndex& index) {
         panel->setLoading(session->history.empty(), QStringLiteral("Loading %1 radar data").arg(radarId));
         panel->setVolumeQuality(0, 0, 0);
     }
-    if (alertCenter_) {
-        const auto row = model_->rowForRadar(radarId);
-        if (row >= 0) {
-            const auto& site = model_->siteAt(row);
-            if (site.latitude && site.longitude) {
+    const auto contextRow = model_->rowForRadar(radarId);
+    if (contextRow >= 0) {
+        const auto& site = model_->siteAt(contextRow);
+        if (site.latitude && site.longitude) {
+            placefileSource_->setContext(*site.latitude, *site.longitude);
+            if (alertCenter_) {
                 const GeographicCoordinate coord{*site.latitude, *site.longitude};
                 alertCenter_->setSelectedRadar(coord);
             }
@@ -1832,6 +1934,7 @@ void MainWindow::restoreSettings() {
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
     if (lightningFusionCheck_->isEnabled())
         lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
+    placefilesCheck_->setChecked(settings.value(QStringLiteral("overlays/placefiles"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
     // speed combo. After the P1 round 2 expansion, 1x is at index 1, 2x at 2,
     // 4x at 3, and we added 0.5x, 8x, 16x at 0, 4, 5.
@@ -1866,6 +1969,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/warningFilter"), warningFilterCombo_->currentIndex());
     settings.setValue(QStringLiteral("overlays/lightning"), lightningCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/lightningFusion"), lightningFusionCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/placefiles"), placefilesCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
     settings.setValue(QStringLiteral("timeline/maximumFrames"), maximumHistoryFrames_);
     settings.setValue(QStringLiteral("timeline/historyVolumes"), historyVolumeCount_);
@@ -2495,6 +2599,164 @@ void MainWindow::exportTimelineAnimation() {
         return;
     }
     statusBar()->showMessage(QStringLiteral("Animated timeline exported to %1").arg(path), 5000);
+}
+
+void MainWindow::openLocalPlacefile() {
+    const auto paths = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Open GR placefile"), {},
+        QStringLiteral("GR placefiles (*.txt *.placefile);;Text files (*.txt);;All files (*.*)"));
+    if (paths.isEmpty()) return;
+    QStringList failures;
+    for (const auto& path : paths) {
+        QString error;
+        if (!placefileSource_->addLocalFile(path, &error))
+            failures.push_back(QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), error));
+    }
+    clearPlacefilesButton_->setEnabled(placefileSource_->sourceCount() > 0);
+    if (!failures.isEmpty())
+        QMessageBox::warning(this, QStringLiteral("Placefile import"), failures.join(QLatin1Char('\n')));
+}
+
+void MainWindow::addPlacefileUrl() {
+    bool accepted = false;
+    const auto text = QInputDialog::getText(
+        this, QStringLiteral("Add placefile URL"),
+        QStringLiteral("HTTP(S) URL (refresh cadence is read from the placefile):"),
+        QLineEdit::Normal, {}, &accepted).trimmed();
+    if (!accepted || text.isEmpty()) return;
+    QString error;
+    const QUrl url = QUrl::fromUserInput(text);
+    if (!placefileSource_->addUrl(url, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Placefile URL"), error);
+        return;
+    }
+    if (!placefileUrlContainsCredentials(url)) {
+        const auto stored = url.adjusted(QUrl::NormalizePathSegments | QUrl::RemoveUserInfo |
+                                         QUrl::RemoveFragment).toString();
+        if (!remotePlacefileUrls_.contains(stored)) remotePlacefileUrls_.push_back(stored);
+        QSettings().setValue(QStringLiteral("placefiles/urls"), remotePlacefileUrls_);
+    } else {
+        statusBar()->showMessage(
+            QStringLiteral("Credential-bearing placefile URL added for this session only"), 6000);
+    }
+    clearPlacefilesButton_->setEnabled(true);
+}
+
+void MainWindow::clearPlacefiles() {
+    placefileSource_->clear();
+    remotePlacefileUrls_.clear();
+    QSettings().remove(QStringLiteral("placefiles/urls"));
+    clearPlacefilesButton_->setEnabled(false);
+}
+
+void MainWindow::prepareArchiveCase(const int requestedFrames) {
+    stopAnimation();
+    liveButton_->setChecked(false);
+    source_->cancel(selectedRadarId_);
+    archiveSource_->cancel();
+    maximumHistoryFrames_ = std::max(maximumHistoryFrames_, std::clamp(requestedFrames, 2, 24));
+    if (const auto session = activeSession()) {
+        session->pendingVolumeId.clear();
+        session->pendingVolume = {};
+        session->pendingChunkCount = 0;
+        session->pendingFailedChunks = 0;
+        session->pendingDecodeTasks = 0;
+        session->pendingVolumeNetworkReady = false;
+        session->derivingVolumeIds.clear();
+        session->history.clear();
+        session->frameIndex = -1;
+        session->followLatest = false;
+        session->requestActive = false;
+        session->historyRequested = false;
+        session->historyLoadStarted = false;
+        session->playWhenHistoryReady = false;
+    }
+    updatePlaybackControls();
+}
+
+void MainWindow::openArchiveFiles() {
+    if (selectedRadarId_.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Level II archive"),
+                                 QStringLiteral("Select a radar before loading its Archive-II files."));
+        return;
+    }
+    auto paths = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Open NOAA Archive-II Level II files"), {},
+        QStringLiteral("NEXRAD Level II (*_V03 *_V04 *_V05 *_V06 *_V07 *_V08);;All files (*.*)"));
+    if (paths.isEmpty()) return;
+    std::sort(paths.begin(), paths.end());
+    if (paths.size() > 24) paths = paths.sliced(paths.size() - 24);
+    prepareArchiveCase(paths.size());
+    archiveSource_->loadFiles(selectedRadarId_, paths);
+}
+
+void MainWindow::openArchiveFolder() {
+    if (selectedRadarId_.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Level II archive"),
+                                 QStringLiteral("Select a radar before loading an Archive-II folder."));
+        return;
+    }
+    const auto path = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Open NOAA Archive-II Level II folder"));
+    if (path.isEmpty()) return;
+    const QDir directory(path);
+    QStringList paths;
+    for (const auto& file : directory.entryInfoList(QDir::Files | QDir::NoSymLinks, QDir::Name))
+        paths.push_back(file.absoluteFilePath());
+    if (paths.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Level II archive"),
+                                 QStringLiteral("The selected folder contains no files."));
+        return;
+    }
+    if (paths.size() > 24) paths = paths.sliced(paths.size() - 24);
+    prepareArchiveCase(paths.size());
+    archiveSource_->loadFiles(selectedRadarId_, paths);
+}
+
+void MainWindow::openAwsArchive() {
+    if (selectedRadarId_.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("AWS Level II archive"),
+                                 QStringLiteral("Select a radar before choosing an archive window."));
+        return;
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Public AWS Level II archive"));
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* note = new QLabel(
+        QStringLiteral("Load NOAA/Unidata public Archive-II volumes for %1. Times are UTC.")
+            .arg(selectedRadarId_), &dialog);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+    auto* form = new QFormLayout();
+    auto* start = new QDateTimeEdit(QDateTime::currentDateTimeUtc().addSecs(-6 * 3600), &dialog);
+    start->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm 'UTC'"));
+    start->setCalendarPopup(true);
+    auto* end = new QDateTimeEdit(QDateTime::currentDateTimeUtc(), &dialog);
+    end->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm 'UTC'"));
+    end->setCalendarPopup(true);
+    auto* maximum = new QSpinBox(&dialog);
+    maximum->setRange(1, 24);
+    maximum->setValue(24);
+    maximum->setToolTip(QStringLiteral(
+        "Matching volumes are evenly sampled into the 24-frame in-memory case timeline"));
+    form->addRow(QStringLiteral("Start"), start);
+    form->addRow(QStringLiteral("End"), end);
+    form->addRow(QStringLiteral("Maximum volumes"), maximum);
+    layout->addLayout(form);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const auto startUtc = start->dateTime().toUTC();
+    const auto endUtc = end->dateTime().toUTC();
+    if (startUtc > endUtc) {
+        QMessageBox::warning(this, QStringLiteral("AWS Level II archive"),
+                             QStringLiteral("The start time must not be after the end time."));
+        return;
+    }
+    prepareArchiveCase(maximum->value());
+    archiveSource_->requestAws(selectedRadarId_, startUtc, endUtc, maximum->value());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {

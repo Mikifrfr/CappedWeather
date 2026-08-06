@@ -66,6 +66,14 @@ QString elapsedText(const std::int64_t epochSec, const std::int64_t nowEpochSec)
     return QStringLiteral("%1h %2m").arg(seconds / 3600).arg((seconds % 3600) / 60);
 }
 
+double distanceToSegment(const QPointF& point, const QPointF& start, const QPointF& end) {
+    const auto segment = end - start;
+    const auto lengthSquared = QPointF::dotProduct(segment, segment);
+    if (lengthSquared <= 0.0) return QLineF(point, start).length();
+    const auto amount = std::clamp(QPointF::dotProduct(point - start, segment) / lengthSquared, 0.0, 1.0);
+    return QLineF(point, start + segment * amount).length();
+}
+
 struct ColorStop {
     double position;
     QColor color;
@@ -500,6 +508,23 @@ void RadarMapCanvas::setWeatherOverlays(QVector<WeatherWarning> warnings,
     update();
 }
 
+void RadarMapCanvas::setPlacefiles(QVector<PlacefileDocument> documents) {
+    placefiles_ = std::move(documents);
+    if (pinnedInfoKind_ == PinnedInfoKind::Placefile) {
+        pinnedInfoKind_ = PinnedInfoKind::None;
+        pinnedInfo_.clear();
+    }
+    update();
+}
+
+void RadarMapCanvas::setPlacefilesVisible(const bool visible) {
+    if (placefilesVisible_ == visible) return;
+    placefilesVisible_ = visible;
+    if (!visible && pinnedInfoKind_ == PinnedInfoKind::Placefile)
+        setPinnedOverlay({}, probePosition_);
+    update();
+}
+
 void RadarMapCanvas::setLightningCells(std::vector<LightningCellSnapshot> cells) {
     lightningCells_ = std::move(cells);
     invalidateLightningFusion();
@@ -891,6 +916,12 @@ int RadarMapCanvas::warningCount() const {
 
 int RadarMapCanvas::stormReportCount() const {
     return stormReports_.size();
+}
+
+int RadarMapCanvas::placefileElementCount() const {
+    int count = 0;
+    for (const auto& document : placefiles_) count += document.elements.size();
+    return count;
 }
 
 QPointF RadarMapCanvas::worldPoint(const double latitude, const double longitude) const {
@@ -1474,6 +1505,62 @@ void RadarMapCanvas::paintWeatherOverlays(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintPlacefiles(QPainter& painter) {
+    if (!placefilesVisible_ || placefiles_.isEmpty() || width() <= 0 || height() <= 0) return;
+    const auto edge = geographicPoint(QPointF(width(), height() / 2.0));
+    const auto visibleRadiusNauticalMiles =
+        rangeAndBearing({center_.y(), center_.x()}, {edge.y(), edge.x()}).distanceMeters / 1852.0;
+    const auto viewport = QRectF(rect()).adjusted(-80.0, -80.0, 80.0, 80.0);
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setFont(hudFont(8, QFont::DemiBold));
+    for (const auto& document : placefiles_) {
+        for (const auto& element : document.elements) {
+            if (visibleRadiusNauticalMiles > element.thresholdNauticalMiles || element.points.isEmpty())
+                continue;
+            QPolygonF polygon;
+            polygon.reserve(element.points.size());
+            for (const auto& coordinate : element.points)
+                polygon.push_back(screenPoint(coordinate.y(), coordinate.x()));
+            if (!viewport.intersects(polygon.boundingRect().adjusted(-12.0, -12.0, 12.0, 12.0))) continue;
+
+            auto color = element.color.isValid() ? element.color : QColor(Qt::white);
+            painter.setPen(QPen(color, std::max(1, element.lineWidth), Qt::SolidLine,
+                                Qt::RoundCap, Qt::RoundJoin));
+            painter.setBrush(Qt::NoBrush);
+            if (element.kind == PlacefileElementKind::Line) {
+                painter.drawPolyline(polygon);
+            } else if (element.kind == PlacefileElementKind::Polygon) {
+                auto fill = color;
+                fill.setAlpha(48);
+                painter.setBrush(fill);
+                painter.drawPolygon(polygon, Qt::OddEvenFill);
+            } else {
+                const auto point = polygon.constFirst();
+                if (element.kind == PlacefileElementKind::Icon) {
+                    painter.save();
+                    painter.translate(point);
+                    painter.rotate(element.rotationDegrees);
+                    painter.setBrush(color);
+                    painter.drawPolygon(QPolygonF{{0.0, -7.0}, {-5.0, 5.0}, {5.0, 5.0}});
+                    painter.restore();
+                } else if (element.kind == PlacefileElementKind::Marker) {
+                    painter.setBrush(color);
+                    painter.drawEllipse(point, 4.5, 4.5);
+                }
+                if (!element.text.isEmpty() && zoom_ >= 7) {
+                    painter.setPen(QPen(QColor(8, 15, 19, 230), 3.0));
+                    painter.drawText(point + QPointF(8.0, 4.0), element.text);
+                    painter.setPen(color);
+                    painter.drawText(point + QPointF(8.0, 4.0), element.text);
+                }
+            }
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
     if (!lightningVisible_) return;
     if (lightningFusionComputedGeneration_ != lightningFusionGeneration_)
@@ -2049,6 +2136,45 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
     if (const auto lightning = lightningCellAt(point)) {
         return {lightningInfo(*lightning), PinnedInfoKind::Lightning, lightning};
     }
+    if (placefilesVisible_ && !placefiles_.isEmpty()) {
+        const auto edge = geographicPoint(QPointF(width(), height() / 2.0));
+        const auto visibleRadiusNauticalMiles =
+            rangeAndBearing({center_.y(), center_.x()}, {edge.y(), edge.x()}).distanceMeters / 1852.0;
+        for (auto document = placefiles_.crbegin(); document != placefiles_.crend(); ++document) {
+            for (auto item = document->elements.crbegin(); item != document->elements.crend(); ++item) {
+                if (visibleRadiusNauticalMiles > item->thresholdNauticalMiles || item->points.isEmpty())
+                    continue;
+                QPolygonF polygon;
+                polygon.reserve(item->points.size());
+                for (const auto& coordinate : item->points)
+                    polygon.push_back(screenPoint(coordinate.y(), coordinate.x()));
+                bool hit = false;
+                if (item->kind == PlacefileElementKind::Polygon) {
+                    hit = polygon.containsPoint(point, Qt::OddEvenFill);
+                } else if (item->kind == PlacefileElementKind::Line) {
+                    for (qsizetype index = 1; index < polygon.size(); ++index) {
+                        if (distanceToSegment(point, polygon.at(index - 1), polygon.at(index)) <=
+                            std::max(6.0, item->lineWidth + 3.0)) {
+                            hit = true;
+                            break;
+                        }
+                    }
+                } else {
+                    hit = QLineF(point, polygon.constFirst()).length() <= 11.0;
+                }
+                if (!hit) continue;
+                const auto title = document->title.isEmpty() ? QStringLiteral("PLACEFILE")
+                                                              : document->title;
+                auto detail = !item->hoverText.isEmpty() ? item->hoverText : item->text;
+                if (detail.isEmpty()) detail = QStringLiteral("GR placefile overlay feature");
+                const auto source = document->source.isEmpty()
+                                        ? QStringLiteral("source unavailable")
+                                        : document->source;
+                return {QStringLiteral("%1\n%2\nSource: %3").arg(title, detail, source),
+                        PinnedInfoKind::Placefile, std::nullopt};
+            }
+        }
+    }
     ensureWeatherPaths();
     if (stormReportsVisible_) {
         for (qsizetype reportIndex = 0; reportIndex < stormReports_.size(); ++reportIndex) {
@@ -2238,6 +2364,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     requestVisibleTiles();
     paintRadarOverlay(painter);
     paintWeatherOverlays(painter);
+    paintPlacefiles(painter);
     paintLightningOverlay(painter);
 
     painter.setFont(hudFont(8, QFont::DemiBold));

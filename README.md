@@ -76,6 +76,7 @@ cmake -S . -B build
 ## Data sources
 
 - Real-time Level II chunks: `https://unidata-nexrad-level2-chunks.s3.amazonaws.com/`
+- Historical Archive-II volumes: `https://unidata-nexrad-level2.s3.amazonaws.com/`
 - Live official station catalog: `https://api.weather.gov/radar/stations`
 - Active warning GeoJSON and zone geometry: `https://api.weather.gov/alerts/active`
 - Preliminary storm reports: `https://www.spc.noaa.gov/climo/reports/`
@@ -95,6 +96,8 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Searchable radar selection with persistent favorites, recent sites, optional manual-position chase mode, zoom-aware station decluttering, station details, and national/recenter controls.
 - Cursor sampling for value, range, azimuth, and elevation tilt, including below-threshold and range-folded gates.
 - Up to eight recent NOAA volumes per radar session in memory, with explicit live-follow mode, timestamped frame stepping, looping playback, 1x/2x/4x speeds, and repeated supplemental tilts retained separately.
+- Scoped Archive-II case-study loading from local files/folders or a selected radar/time window in the public AWS archive. Bzip records decode off the UI thread and join the normal timeline/product pipeline.
+- GR-compatible placefile file/URL loading with automatic refresh, labels, chaser/spotter markers, lines, polygons, threshold-aware rendering, and interactive hover details. See `docs/placefiles-and-archives.md` for the supported subset and honest limits.
 - Non-blocking chunk progress, retry/cancel controls, per-chunk automatic retries, partial-volume recovery, and visible completeness metadata.
 - Bounded parallel chunk downloads, transfer timeouts, retry backoff, last-known-good overlay retention, and bounded memory/disk map caches.
 - Active NWS warnings, including zone-only alerts resolved to official zone geometry and polygons with holes. Details include onset, expiry, sender, description, and instructions.
@@ -121,5 +124,5 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - `Measure` reports great-circle distance and bearing. `Cross-section` uses the same two-point gesture and opens a distance/height view across all available tilts.
 - The velocity controls apply to the active panel. Storm direction is the direction toward which the storm moves; speed and Nyquist are in m/s.
 - Custom palettes are discrete native-value thresholds. Example: `20,#02fd02` followed by `30,#008e00`.
-- `Timeline GIF` exports every currently loaded frame for the active radar. It intentionally does not retrieve an archive; load depth is controlled in Settings.
+- `Timeline GIF` exports every currently loaded frame for the active radar. Use the playback dock's `L2 files`, `L2 folder`, or `AWS archive` actions first when exporting a historical case.
 - Network Settings provide request concurrency, retries, timeouts, cache limits, contact information, chase position, history depth, and panel-navigation linking.

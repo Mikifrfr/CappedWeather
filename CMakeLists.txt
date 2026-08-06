@@ -103,6 +103,10 @@ if(CAPPEDWEATHER_BUILD_APP)
         get_filename_component(CAPPEDWEATHER_QT_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
 
         set(CAPPEDWEATHER_UI_SOURCES
+            src/app/archive_level2.cpp
+            src/app/archive_level2.hpp
+            src/app/archive_source.cpp
+            src/app/archive_source.hpp
             src/app/alert_center.cpp
             src/app/alert_center.hpp
             src/app/cross_section_widget.cpp
@@ -115,6 +119,10 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/main_window.hpp
             src/app/nexrad_source.cpp
             src/app/nexrad_source.hpp
+            src/app/placefile.cpp
+            src/app/placefile.hpp
+            src/app/placefile_source.cpp
+            src/app/placefile_source.hpp
             src/app/radar_map_canvas.cpp
             src/app/radar_map_canvas.hpp
             src/app/radar_list_model.cpp

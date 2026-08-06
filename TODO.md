@@ -74,8 +74,8 @@ Prefer a **small set of high-signal products**, not a full user-defined-product 
 - [ ] **Azimuthal shear / rotation tracker display** — surface existing fusion shear ideas as a first-class product or overlay (path toward meso awareness without full NEXRAD RPG clone).
 - [ ] **Max-value trails (simple)** — trail of max REF or ZDR over loaded history (poor-man’s GR max trails).
 - [ ] **Deeper in-memory / on-disk volume history** — raise practical loop depth; optional spill-to-disk for long events without full archive UI.
-- [ ] **Archive load (scoped)** — open local Level II file/folder **or** fetch a time window from public AWS archive for one site/date. Case-study mode, not a full GR archive browser on day one.
-- [ ] **Placefiles (read subset)** — GR-compatible placefile fetch/render for chaser dots, boundaries, spotter networks (biggest chaser ecosystem gap).
+- [x] **Archive load (scoped)** — local Archive-II files/folders and selected-site UTC windows from the public `unidata-nexrad-level2` AWS bucket now decode off-thread into a dedicated 24-frame case timeline and the normal product pipeline. Includes bzip Archive-II framing, station/timestamp checks, bounded parallel downloads with atomic per-volume publication, cancellation/stale-local guards, endpoint-preserving volume sampling, real-public-object verification, and documented legacy/history limits in `docs/placefiles-and-archives.md`.
+- [x] **Placefiles (read subset)** — local and refreshable HTTP(S) GR-compatible feeds now render `Place`, `Text`, `Icon`, `Line`, and `Polygon` features with stateful color/thresholds, click details, persisted credential-scrubbed URLs, last-known-good refresh behavior, parser/resource limits, and explicit unsupported sprite/object semantics in `docs/placefiles-and-archives.md`.
 - [ ] **Smoothing / gate display options** — optional display smoothing; below-threshold already exists — keep gates honest by default.
 - [ ] **Scan diagnostics panel** — promote `analyzeScan()` coverage/gap/range into a readable dock readout.
 - [ ] **NEXRAD algorithm markers (optional later)** — TVS/meso/hail only if quality bar is real; do not fake confidence.

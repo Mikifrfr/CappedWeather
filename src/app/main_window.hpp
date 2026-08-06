@@ -41,6 +41,8 @@ class GlmSource;
 class RadarMapCanvas;
 class RadarListModel;
 class WeatherOverlaySource;
+class PlacefileSource;
+class ArchiveSource;
 class AlertCenter;
 
 enum class RadarHealthState { Unknown, Online, Stale, Offline };
@@ -117,6 +119,13 @@ private:
     void importCustomPalette();
     void exportSnapshot();
     void exportTimelineAnimation();
+    void openLocalPlacefile();
+    void addPlacefileUrl();
+    void clearPlacefiles();
+    void openArchiveFiles();
+    void openArchiveFolder();
+    void openAwsArchive();
+    void prepareArchiveCase(int requestedFrames);
     struct RadarSession;
     std::shared_ptr<RadarSession> sessionFor(const QString& radarId, bool create = true);
     std::shared_ptr<RadarSession> activeSession() const;
@@ -202,6 +211,13 @@ private:
     QCheckBox* belowThresholdCheck_ = nullptr;
     QCheckBox* lightningCheck_ = nullptr;
     QCheckBox* lightningFusionCheck_ = nullptr;
+    QCheckBox* placefilesCheck_ = nullptr;
+    QToolButton* addPlacefileButton_ = nullptr;
+    QToolButton* addPlacefileUrlButton_ = nullptr;
+    QToolButton* clearPlacefilesButton_ = nullptr;
+    QToolButton* openArchiveFilesButton_ = nullptr;
+    QToolButton* openArchiveFolderButton_ = nullptr;
+    QToolButton* awsArchiveButton_ = nullptr;
     // Per-panel overlay overrides (active panel only).
     QLabel* activePanelOverlayLabel_ = nullptr;
     QCheckBox* activePanelWarnings_ = nullptr;
@@ -220,6 +236,8 @@ private:
     NexradSource* source_ = nullptr;
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
+    PlacefileSource* placefileSource_ = nullptr;
+    ArchiveSource* archiveSource_ = nullptr;
     AlertCenter* alertCenter_ = nullptr;
     QTimer* refreshTimer_ = nullptr;
     QTimer* overlayRefreshTimer_ = nullptr;
@@ -229,6 +247,7 @@ private:
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
     QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");
     QStringList recentRadarIds_;
+    QStringList remotePlacefileUrls_;
     QSet<QString> favoriteRadarIds_;
     QHash<QString, std::shared_ptr<RadarSession>> radarSessions_;
     QStringList panelRadarIds_;
