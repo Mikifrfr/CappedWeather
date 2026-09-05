@@ -137,6 +137,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [windows, linux]
     steps:
+      # gh release needs the git metadata to resolve the repository.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: packages
