@@ -1,5 +1,6 @@
 #include "app/radar_map_canvas.hpp"
 
+#include "app/http_client.hpp"
 #include "core/radar_geometry.hpp"
 #include "core/scan_diagnostics.hpp"
 
@@ -277,7 +278,37 @@ struct SharedTileStore {
     QSet<QString> pendingKeys;
     QHash<QNetworkReply*, QString> replies;
     QHash<QString, QVector<QPointer<RadarMapCanvas>>> watchers;
+    // In-flight base/reference composites, keyed by tile key ("z/x/y").
+    struct TileComposite {
+        QImage base;
+        bool hasBase = false;
+        QImage reference;
+        bool referenceDone = false;
+    };
+    QHash<QString, TileComposite> staging;
 };
+
+// Close the anonymous namespace: basemapTileUrls is declared in the header
+// (external linkage for tests) and must be defined in cappedweather scope.
+}  // namespace
+
+BasemapTileUrls basemapTileUrls(const int zoom, const int x, const int y) {
+    // Esri tile order is z/y/x — keep the flip in exactly one place.
+    return {
+        QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+                            "World_Dark_Gray_Base/MapServer/tile/%1/%2/%3")
+                 .arg(zoom)
+                 .arg(y)
+                 .arg(x)),
+        QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+                            "World_Dark_Gray_Reference/MapServer/tile/%1/%2/%3")
+                 .arg(zoom)
+                 .arg(y)
+                 .arg(x)),
+    };
+}
+
+namespace {
 
 void watchTile(SharedTileStore& store, const QString& key, RadarMapCanvas* canvas) {
     auto& watchers = store.watchers[key];
@@ -303,17 +334,58 @@ SharedTileStore& tileStore() {
         result->network->setCache(result->diskCache);
         QObject::connect(result->network, &QNetworkAccessManager::finished,
                          result->network, [result](QNetworkReply* reply) {
-            const auto key = result->replies.take(reply);
-            result->pendingKeys.remove(key);
-            if (reply->error() == QNetworkReply::NoError) {
-                const auto image = QImage::fromData(reply->readAll(), "PNG");
+            const auto subKey = result->replies.take(reply);
+            if (subKey.isEmpty()) {
+                reply->deleteLater();
+                return;
+            }
+            const bool isReference = subKey.endsWith(QStringLiteral("@ref"));
+            const auto key =
+                isReference ? subKey.left(subKey.size() - 4) : subKey;
+            result->pendingKeys.remove(subKey);
+            // Auto-detect the image format: the base layer serves JPEG, the
+            // reference layer transparent PNG. Forcing "PNG" breaks JPEG.
+            const auto image = reply->error() == QNetworkReply::NoError
+                                   ? QImage::fromData(reply->readAll())
+                                   : QImage();
+            reply->deleteLater();
+            auto& composite = result->staging[key];
+            if (isReference) {
+                if (!image.isNull()) composite.reference = image;
+                composite.referenceDone = true;
+                if (!composite.hasBase && !result->watchers.contains(key)) {
+                    // Base already failed and watchers were released; this
+                    // late reference has nothing to composite onto.
+                    result->staging.remove(key);
+                    return;
+                }
+            } else {
                 if (!image.isNull()) {
-                    const auto cost = static_cast<int>(std::min<qsizetype>(
-                        image.sizeInBytes(), std::numeric_limits<int>::max()));
-                    result->tiles.insert(key, new QImage(image), std::max(1, cost));
+                    composite.base = image;
+                    composite.hasBase = true;
+                } else {
+                    // Base failed: nothing to composite onto, drop the staging
+                    // entry (the reference outcome is irrelevant) and wake the
+                    // watchers so they repaint without this tile.
+                    result->staging.remove(key);
+                    const auto watchers = result->watchers.take(key);
+                    for (const auto& canvas : watchers)
+                        if (canvas && canvas->isVisible()) canvas->update();
+                    return;
                 }
             }
-            reply->deleteLater();
+            // Publish once the base is in and the reference has resolved
+            // (image or failure — a failed reference must not block the base).
+            if (!composite.hasBase || !composite.referenceDone) return;
+            auto merged = composite.base;
+            if (!composite.reference.isNull()) {
+                QPainter painter(&merged);
+                painter.drawImage(0, 0, composite.reference);
+            }
+            const auto cost = static_cast<int>(std::min<qsizetype>(
+                merged.sizeInBytes(), std::numeric_limits<int>::max()));
+            result->tiles.insert(key, new QImage(merged), std::max(1, cost));
+            result->staging.remove(key);
             const auto watchers = result->watchers.take(key);
             for (const auto& canvas : watchers)
                 if (canvas && canvas->isVisible()) canvas->update();
@@ -411,6 +483,13 @@ RadarMapCanvas::RadarMapCanvas(QWidget* parent)
     probeTimer_->setSingleShot(true);
     probeTimer_->setInterval(16);
     connect(probeTimer_, &QTimer::timeout, this, [this] {
+        if (!cursorInside_) {
+            // The cursor left before the debounce elapsed (fast transit
+            // across panels): never resurrect a probe nobody is hovering.
+            if (pinnedInfo_.isEmpty()) probeText_.clear();
+            update();
+            return;
+        }
         hoverRadarId_ = radarAt(pendingProbePosition_);
         updateProbe(pendingProbePosition_);
     });
@@ -649,21 +728,6 @@ void RadarMapCanvas::setOverlayOverrides(std::optional<OverlayVisibility> overri
     }
 }
 
-namespace {
-double haversineMeters(double lat1, double lon1, double lat2, double lon2) {
-    constexpr double earthRadiusMeters = 6371000.0;
-    const auto phi1 = qDegreesToRadians(lat1);
-    const auto phi2 = qDegreesToRadians(lat2);
-    const auto dPhi = qDegreesToRadians(lat2 - lat1);
-    const auto dLambda = qDegreesToRadians(lon2 - lon1);
-    const auto a = std::sin(dPhi / 2.0) * std::sin(dPhi / 2.0) +
-                   std::cos(phi1) * std::cos(phi2) * std::sin(dLambda / 2.0) *
-                       std::sin(dLambda / 2.0);
-    const auto c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(std::max(0.0, 1.0 - a)));
-    return earthRadiusMeters * c;
-}
-} // namespace
-
 void RadarMapCanvas::setProximityFilter(std::optional<QPointF> anchor, double radiusKm) {
     proximityAnchor_ = std::move(anchor);
     proximityRadiusKm_ = std::max(1.0, radiusKm);
@@ -848,6 +912,11 @@ void RadarMapCanvas::setView(const QPointF& center, const int zoom) {
 void RadarMapCanvas::setActivePanel(const bool active) {
     activePanel_ = active;
     update();
+}
+
+void RadarMapCanvas::setActiveBorderColor(const QColor& color) {
+    activeBorderColor_ = color;
+    if (activePanel_) update();
 }
 
 QPointF RadarMapCanvas::viewCenter() const {
@@ -1929,20 +1998,15 @@ void RadarMapCanvas::requestVisibleTiles() {
             const auto key = tileKey(wrappedX, tileY);
             if (store.tiles.contains(key)) continue;
             watchTile(store, key, this);
-            if (store.pendingKeys.contains(key)) continue;
-            const auto url = QUrl(QStringLiteral("https://basemaps.cartocdn.com/dark_all/%1/%2/%3.png")
-                                      .arg(zoom_).arg(wrappedX).arg(tileY));
-            QNetworkRequest request(url);
-            const auto contact = QSettings().value(QStringLiteral("network/contact")).toString().trimmed();
-            request.setHeader(QNetworkRequest::UserAgentHeader,
-                              contact.isEmpty() ? QStringLiteral("CappedWeather/0.3 operational radar viewer")
-                                                : QStringLiteral("CappedWeather/0.3 operational radar viewer (%1)")
-                                                      .arg(contact));
-            request.setTransferTimeout(std::clamp(QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(),
-                                                  5, 120) * 1000);
+            const auto referenceKey = key + QStringLiteral("@ref");
+            if (store.pendingKeys.contains(key) || store.pendingKeys.contains(referenceKey)) continue;
+            const auto urls = basemapTileUrls(zoom_, wrappedX, tileY);
             store.pendingKeys.insert(key);
-            auto* reply = store.network->get(request);
-            store.replies.insert(reply, key);
+            store.pendingKeys.insert(referenceKey);
+            auto* baseReply = store.network->get(makeRequest(urls.base));
+            store.replies.insert(baseReply, key);
+            auto* referenceReply = store.network->get(makeRequest(urls.reference));
+            store.replies.insert(referenceReply, referenceKey);
         }
     }
 }
@@ -2430,7 +2494,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     painter.drawRoundedRect(QRectF(width() - 250, height() - 25, 238, 18), 3, 3);
     painter.setPen(QColor(146, 152, 160));
     painter.drawText(QRectF(width() - 242, height() - 22, 222, 13), Qt::AlignRight,
-                     QStringLiteral("© OpenStreetMap contributors · CARTO"));
+                      QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin"));
     paintLegend(painter);
     paintProbe(painter);
     paintMeasurement(painter);
@@ -2453,7 +2517,9 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
                                                    : loadingMessage_);
     }
     if (activePanel_) {
-        painter.setPen(QPen(QColor(128, 211, 255, 220), 2));
+        auto border = activeBorderColor_;
+        border.setAlpha(220);
+        painter.setPen(QPen(border, 2));
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(rect().adjusted(1, 1, -2, -2));
     }
@@ -2610,8 +2676,15 @@ void RadarMapCanvas::setZoomAt(const int zoom, const QPointF& cursor) {
     emit viewChanged(center_, zoom_);
 }
 
+void RadarMapCanvas::enterEvent(QEnterEvent* event) {
+    cursorInside_ = true;
+    QWidget::enterEvent(event);
+}
+
 void RadarMapCanvas::leaveEvent(QEvent* event) {
+    cursorInside_ = false;
     hoverRadarId_.clear();
+    probeTimer_->stop();  // a debounced hover must not fire after the cursor left
     if (pinnedInfo_.isEmpty()) probeText_.clear();
     update();
     QWidget::leaveEvent(event);

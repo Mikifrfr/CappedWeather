@@ -25,7 +25,6 @@ struct NwsAlertStyle {
 };
 
 NwsAlertStyle nwsAlertStyle(const QString& event);
-int nwsOfficialAlertStyleCount();
 
 struct WarningPolygon {
     QPolygonF exterior; // longitude, latitude

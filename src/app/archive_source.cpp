@@ -1,4 +1,5 @@
 #include "app/archive_source.hpp"
+#include "app/http_client.hpp"
 
 #include "core/radar_catalog.hpp"
 
@@ -7,7 +8,6 @@
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QPointer>
 #include <QSettings>
 #include <QThread>
@@ -19,18 +19,10 @@ namespace cappedweather {
 namespace {
 
 constexpr qint64 kMaximumArchiveBytes = 512LL * 1024 * 1024;
+const QString kArchiveUserAgentSuffix = QStringLiteral(" NOAA public Level-II archive client");
 
 int archiveParallelDownloads() {
     return std::clamp(QSettings().value(QStringLiteral("archive/parallelDownloads"), 4).toInt(), 1, 12);
-}
-
-void configureArchiveRequest(QNetworkRequest& request) {
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("CappedWeather/0.3 NOAA public Level-II archive client"));
-    request.setTransferTimeout(std::clamp(
-        QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(), 5, 120) * 1000);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
 }
 
 } // namespace
@@ -133,9 +125,8 @@ void ArchiveSource::requestAws(const QString& requestedRadarId, const QDateTime&
     job->maximumVolumes = std::max(0, maximumVolumes);
     jobs_.push_back(job);
     for (auto date = startUtc.date(); date <= endUtc.date(); date = date.addDays(1)) {
-        QNetworkRequest request(awsArchiveListingUrl(radarId, date));
-        configureArchiveRequest(request);
-        auto* reply = network_.get(request);
+        auto* reply = network_.get(
+            makeRequest(awsArchiveListingUrl(radarId, date), {}, kArchiveUserAgentSuffix));
         listingRequests_.insert(reply, job);
         ++job->pendingListings;
     }
@@ -190,9 +181,8 @@ void ArchiveSource::beginDownloads(const std::shared_ptr<Job>& job) {
 void ArchiveSource::pump(const std::shared_ptr<Job>& job) {
     while (!job->cancelled && job->activeDownloads < archiveParallelDownloads() && !job->queued.isEmpty()) {
         const auto object = job->queued.dequeue();
-        QNetworkRequest request(awsArchiveObjectUrl(object.key));
-        configureArchiveRequest(request);
-        auto* reply = network_.get(request);
+        auto* reply =
+            network_.get(makeRequest(awsArchiveObjectUrl(object.key), {}, kArchiveUserAgentSuffix));
         reply->setReadBufferSize(kMaximumArchiveBytes + 1);
         connect(reply, &QNetworkReply::readyRead, this, [reply] {
             if (reply->bytesAvailable() <= kMaximumArchiveBytes) return;

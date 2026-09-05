@@ -15,6 +15,7 @@
 #include <QImage>
 #include <QPainterPath>
 #include <QPointF>
+#include <QUrl>
 #include <QWidget>
 
 #include <optional>
@@ -24,6 +25,7 @@
 #include <vector>
 
 class QMouseEvent;
+class QEnterEvent;
 class QEvent;
 class QPaintEvent;
 class QPainter;
@@ -33,6 +35,16 @@ class QWheelEvent;
 class QContextMenuEvent;
 
 namespace cappedweather {
+
+// Keyless dark basemap: Esri World Dark Gray. The canvas style (base
+// geography) and reference style (roads, boundaries, place labels) are
+// separate XYZ layers; the tile store composites them into one cached image.
+// NOTE: Esri uses z/y/x tile order (y before x), unlike most OSM endpoints.
+struct BasemapTileUrls {
+    QUrl base;
+    QUrl reference;
+};
+BasemapTileUrls basemapTileUrls(int zoom, int x, int y);
 
 class RadarMapCanvas final : public QWidget {
     Q_OBJECT
@@ -103,6 +115,8 @@ public:
     void zoomOut();
     void setView(const QPointF& center, int zoom);
     void setActivePanel(bool active);
+    // Accent color of the active-panel border. Driven by MainWindow::applyTheme.
+    void setActiveBorderColor(const QColor& color);
     QPointF viewCenter() const;
     int viewZoom() const;
     QPoint radarScreenPoint(const QString& radarId) const;
@@ -160,6 +174,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void enterEvent(QEnterEvent* event) override;
     void leaveEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
@@ -318,6 +333,7 @@ private:
     bool measureMode_ = false;
     bool crossSectionMode_ = false;
     bool activePanel_ = false;
+    QColor activeBorderColor_ = QColor(128, 211, 255);
     VelocityProcessingOptions velocityOptions_;
     std::shared_ptr<const ProcessedVelocity> processedVelocity_;
     quint64 velocityGeneration_ = 0;
@@ -333,6 +349,9 @@ private:
     QPointF pendingProbePosition_;
     QPointF probePosition_;
     QString probeText_;
+    // Tracks enter/leave explicitly: QWidget::underMouse() does not reflect
+    // synthesized/test hover, so the probe debounce cannot rely on it.
+    bool cursorInside_ = false;
     std::optional<QPointF> measureStart_;
     std::optional<QPointF> measureEnd_;
 };

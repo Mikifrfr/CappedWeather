@@ -1,17 +1,17 @@
 #include "app/glm_source.hpp"
+#include "app/http_client.hpp"
+#include "app/s3_listing.hpp"
 
 #include "core/glm_l2_reader.hpp"
+#include "core/radar_geometry.hpp"
 
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QPointer>
-#include <QSettings>
 #include <QTemporaryFile>
 #include <QUrlQuery>
-#include <QXmlStreamReader>
 
 #include <algorithm>
 #include <cmath>
@@ -20,20 +20,7 @@
 namespace cappedweather {
 namespace {
 
-void configureRequest(QNetworkRequest& request) {
-    const auto contact = QSettings().value(QStringLiteral("network/contact")).toString().trimmed();
-    const auto agent = contact.isEmpty()
-        ? QStringLiteral("CappedWeather/0.3 GLM live client")
-        : QStringLiteral("CappedWeather/0.3 GLM live client (%1)").arg(contact);
-    request.setRawHeader("User-Agent", agent.toUtf8());
-    request.setTransferTimeout(std::clamp(
-        QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(), 5, 120) * 1000);
-}
-
-std::int64_t cellKey(const int cellX, const int cellY) {
-    return (static_cast<std::int64_t>(cellX) << 32) ^
-           (static_cast<std::int64_t>(cellY) & 0xFFFFFFFFLL);
-}
+const QString kGlmUserAgentSuffix = QStringLiteral(" GLM live client");
 
 } // namespace
 
@@ -108,7 +95,7 @@ void GlmSource::refresh() {
     parsedFiles_.clear();
     const auto now = QDateTime::currentDateTimeUtc();
     const auto currentHour = QDateTime(now.date(), QTime(now.time().hour(), 0), Qt::UTC);
-    const int hours = initialBackfillComplete_ ? 2 : 2;
+    constexpr int hours = 2;
     pendingListings_ = hours * 2;
     emit statusChanged(initialBackfillComplete_
         ? QStringLiteral("checking GOES-18/19 GLM")
@@ -141,16 +128,14 @@ QUrl GlmSource::objectUrl(const QString& satellite, const QString& key) {
 }
 
 void GlmSource::requestListing(const QString& satellite, const QDateTime& hour) {
-    QNetworkRequest request(listingUrl(satellite, prefixForHour(hour)));
-    configureRequest(request);
-    auto* reply = network_.get(request);
+    auto* reply =
+        network_.get(makeRequest(listingUrl(satellite, prefixForHour(hour)), {}, kGlmUserAgentSuffix));
     requests_.insert(reply, {RequestKind::Listing, satellite, {}, 0});
 }
 
 void GlmSource::requestObject(PendingObject object) {
-    QNetworkRequest request(objectUrl(object.satellite, object.key));
-    configureRequest(request);
-    auto* reply = network_.get(request);
+    auto* reply = network_.get(
+        makeRequest(objectUrl(object.satellite, object.key), {}, kGlmUserAgentSuffix));
     requests_.insert(reply, {RequestKind::Object, object.satellite, object.key,
                              object.scanStartEpochSec});
     ++activeDownloads_;
@@ -170,26 +155,27 @@ void GlmSource::requestFinished(QNetworkReply* reply) {
 
 void GlmSource::listingFinished(QNetworkReply* reply, const RequestContext& context) {
     if (reply->error() == QNetworkReply::NoError) {
-        QXmlStreamReader xml(reply->readAll());
-        const auto nowEpoch = QDateTime::currentSecsSinceEpoch();
-        // Keep a ten-minute overlap after startup. NOAA files are normally only
-        // a few minutes late, but the overlap plus seen-key de-duplication makes
-        // a transient delayed object/listing harmless instead of a permanent gap.
-        const auto cutoff = nowEpoch - (initialBackfillComplete_
-            ? 600 : static_cast<std::int64_t>(config_.initialBackfillMinutes) * 60);
-        while (!xml.atEnd()) {
-            xml.readNext();
-            if (!xml.isStartElement() || xml.name() != QStringLiteral("Key")) continue;
-            const auto key = xml.readElementText();
-            const auto fileName = QFileInfo(key).fileName().toStdString();
-            const auto start = parseGlmLcfaStartTime(fileName);
-            if (!start || *start < cutoff || *start > nowEpoch + 60 || seenKeys_.contains(key)) continue;
-            const auto latest = latestProcessedBySatellite_.value(
-                context.satellite, std::numeric_limits<std::int64_t>::min());
-            if (*start <= latest) continue;
-            candidates_.push_back({context.satellite, key, *start});
+        QString parseError;
+        const auto listing = parseS3Listing(reply->readAll(), &parseError);
+        if (!parseError.isEmpty()) {
+            ++batchFailures_;
+        } else {
+            const auto nowEpoch = QDateTime::currentSecsSinceEpoch();
+            // Keep a ten-minute overlap after startup. NOAA files are normally only
+            // a few minutes late, but the overlap plus seen-key de-duplication makes
+            // a transient delayed object/listing harmless instead of a permanent gap.
+            const auto cutoff = nowEpoch - (initialBackfillComplete_
+                ? 600 : static_cast<std::int64_t>(config_.initialBackfillMinutes) * 60);
+            for (const auto& key : listing.keys) {
+                const auto fileName = QFileInfo(key).fileName().toStdString();
+                const auto start = parseGlmLcfaStartTime(fileName);
+                if (!start || *start < cutoff || *start > nowEpoch + 60 || seenKeys_.contains(key)) continue;
+                const auto latest = latestProcessedBySatellite_.value(
+                    context.satellite, std::numeric_limits<std::int64_t>::min());
+                if (*start <= latest) continue;
+                candidates_.push_back({context.satellite, key, *start});
+            }
         }
-        if (xml.hasError()) ++batchFailures_;
     } else {
         ++batchFailures_;
     }
@@ -347,7 +333,7 @@ void GlmSource::ingestBatch() {
             snapshot.longitudeCenterDeg < config_.satelliteSplitLongitudeDeg ? 18 : 19;
         snapshot.latestDataEpochSec = latestProcessedBySatellite_.value(
             snapshot.satelliteNumber == 18 ? QStringLiteral("G18") : QStringLiteral("G19"));
-        cells_.insert(cellKey(event.cellX, event.cellY), snapshot);
+        cells_.insert(gridCellKey(event.cellX, event.cellY), snapshot);
     }
     publishCells(nowEpoch);
     const auto ageSec = latestDataEpoch > 0 ? nowEpoch - latestDataEpoch : -1;

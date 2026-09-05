@@ -1,4 +1,5 @@
 #include "app/archive_level2.hpp"
+#include "app/s3_listing.hpp"
 
 #include "core/radar_catalog.hpp"
 
@@ -6,7 +7,6 @@
 #include <QRegularExpression>
 #include <QTimeZone>
 #include <QUrlQuery>
-#include <QXmlStreamReader>
 #include <QtEndian>
 
 #include <algorithm>
@@ -195,32 +195,18 @@ QVector<AwsArchiveObject> parseAwsArchiveListing(const QByteArray& xml,
                                                  const QString& radarId,
                                                  QString* error) {
     if (error) error->clear();
-    QVector<AwsArchiveObject> result;
-    QXmlStreamReader reader(xml);
-    QString key;
-    qint64 size = 0;
-    bool inContents = false;
-    while (!reader.atEnd()) {
-        reader.readNext();
-        if (reader.isStartElement() && reader.name() == QStringLiteral("Contents")) {
-            inContents = true;
-            key.clear();
-            size = 0;
-        } else if (inContents && reader.isStartElement() && reader.name() == QStringLiteral("Key")) {
-            key = reader.readElementText();
-        } else if (inContents && reader.isStartElement() && reader.name() == QStringLiteral("Size")) {
-            bool ok = false;
-            const auto parsed = reader.readElementText().toLongLong(&ok);
-            size = ok ? parsed : 0;
-        } else if (reader.isEndElement() && reader.name() == QStringLiteral("Contents")) {
-            inContents = false;
-            if (const auto object = objectFromKey(key, size, radarId.trimmed().toUpper()))
-                result.push_back(*object);
-        }
-    }
-    if (reader.hasError()) {
-        if (error) *error = QStringLiteral("AWS archive listing XML: %1").arg(reader.errorString());
+    QString parseError;
+    const auto parsed = parseS3Objects(xml, &parseError);
+    if (!parseError.isEmpty()) {
+        if (error) *error = QStringLiteral("AWS archive listing XML: %1").arg(parseError);
         return {};
+    }
+    QVector<AwsArchiveObject> result;
+    result.reserve(parsed.objects.size());
+    for (const auto& entry : parsed.objects) {
+        if (const auto object =
+                objectFromKey(entry.key, static_cast<qint64>(entry.size), radarId.trimmed().toUpper()))
+            result.push_back(*object);
     }
     std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
         return left.observedAt < right.observedAt;

@@ -48,6 +48,13 @@ struct AlertConfig {
     int minSeverity = 2;
     // Suppress repeat alerts for the same cell/warning for this many minutes.
     int repeatSuppressionMinutes = 30;
+    // Maximum age of a warning's onset for it to trigger a notification,
+    // in minutes. Older warnings are recorded silently so they never fire
+    // later, but they make no sound and show no banner. This stops the
+    // classic spam: opening the app (or enabling the geo filter) while
+    // hours-old warnings are still active on the NWS feed. 0 = no age
+    // limit; every new warning notifies regardless of onset. Default 60.
+    int maxWarningAgeMinutes = 60;
     // Custom sound file path. When empty, falls back to a generated beep.
     QString customSoundPath;
 };
@@ -112,7 +119,6 @@ private:
         bool valid = false;
     };
 
-    bool withinGeographicFilter(double latitude, double longitude) const;
     bool eventAllowed(const QString& event) const;
     // Returns true when the warning's CAP severity meets or exceeds
     // config_.minSeverity. Unknown severity is conservatively treated as
@@ -122,7 +128,6 @@ private:
     void raiseAlert(const QString& kind, const QString& title, const QString& detail);
     void playSound();
     void showSystemNotification(const QString& title, const QString& detail);
-    void pruneRecent();
     void pruneSeenEntries(QHash<QString, QDateTime>& seen) const;
 
     AlertConfig config_;
@@ -131,6 +136,12 @@ private:
     // Deduplication sets: warningId (NWS @id) and lightning cell key.
     QHash<QString, QDateTime> seenWarnings_;
     QHash<QString, QDateTime> seenLightningCells_;
+    // First-sync priming: the first delivery after construction (or after
+    // clearMemory) only seeds the dedupe sets without notifying, so alerts
+    // that were already active before the operator started watching do not
+    // all fire at once. Only genuinely new arrivals notify afterwards.
+    bool warningsPrimed_ = false;
+    bool cellsPrimed_ = false;
     // Bounded ring of recent alerts.
     QVector<AlertRecord> recent_;
     RadarCoord selectedRadar_;

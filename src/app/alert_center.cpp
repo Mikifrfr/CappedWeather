@@ -8,7 +8,6 @@
 #include <QPixmap>
 #include <QSettings>
 #include <QSystemTrayIcon>
-#include <QtMath>
 
 #ifdef CAPPEDWEATHER_HAS_MULTIMEDIA
 #include <QSoundEffect>
@@ -37,19 +36,6 @@ QIcon buildFallbackIcon() {
     painter.setBrush(QColor("#ffd84d"));
     painter.drawEllipse(4, 4, 8, 8);
     return QIcon(pixmap);
-}
-
-double haversineMeters(double lat1, double lon1, double lat2, double lon2) {
-    constexpr double earthRadiusMeters = 6371000.0;
-    const auto phi1 = qDegreesToRadians(lat1);
-    const auto phi2 = qDegreesToRadians(lat2);
-    const auto dPhi = qDegreesToRadians(lat2 - lat1);
-    const auto dLambda = qDegreesToRadians(lon2 - lon1);
-    const auto a = std::sin(dPhi / 2.0) * std::sin(dPhi / 2.0) +
-                   std::cos(phi1) * std::cos(phi2) * std::sin(dLambda / 2.0) *
-                       std::sin(dLambda / 2.0);
-    const auto c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(std::max(0.0, 1.0 - a)));
-    return earthRadiusMeters * c;
 }
 
 QString lightningKey(const LightningCellSnapshot& cell) {
@@ -93,6 +79,10 @@ void AlertCenter::clearMemory() {
     seenWarnings_.clear();
     seenLightningCells_.clear();
     recent_.clear();
+    // Next delivery re-primes silently instead of bursting for everything
+    // that is still active (e.g. right after the user clears the log).
+    warningsPrimed_ = false;
+    cellsPrimed_ = false;
 }
 
 std::optional<GeographicCoordinate> AlertCenter::filterAnchor() const {
@@ -123,6 +113,9 @@ void AlertCenter::setChaseMode(bool enabled, double latitude, double longitude) 
 
 void AlertCenter::ingestWarnings(const QVector<WeatherWarning>& warnings) {
     if (!config_.enabled) return;
+    const auto now = QDateTime::currentDateTimeUtc();
+    const bool priming = !warningsPrimed_;
+    const qint64 maxAgeMs = static_cast<qint64>(config_.maxWarningAgeMinutes) * 60 * 1000;
     for (const auto& warning : warnings) {
         if (!eventAllowed(warning.event)) continue;
         if (!severityAllowed(warning.severity)) continue;
@@ -157,12 +150,20 @@ void AlertCenter::ingestWarnings(const QVector<WeatherWarning>& warnings) {
                                    .arg(warning.event, warning.onset.toString(Qt::ISODate),
                                         warning.expires.toString(Qt::ISODate),
                                         warning.headline);
-        const auto now = QDateTime::currentDateTimeUtc();
+        // Stale warnings never notify: record them silently so they cannot
+        // fire on a later refresh either. Warnings without an onset always
+        // pass (missing data must not suppress a real alert).
+        if (!priming && config_.maxWarningAgeMinutes > 0 && warning.onset.isValid() &&
+            warning.onset.msecsTo(now) > maxAgeMs) {
+            seenWarnings_.insert(key, now);
+            continue;
+        }
         if (seenWarnings_.contains(key)) {
             const auto last = seenWarnings_.value(key);
             if (last.msecsTo(now) < config_.repeatSuppressionMinutes * 60 * 1000) continue;
         }
         seenWarnings_.insert(key, now);
+        if (priming) continue;  // first sync only seeds the dedupe set
 
         QString detail;
         if (!warning.headline.isEmpty()) detail = warning.headline;
@@ -173,12 +174,14 @@ void AlertCenter::ingestWarnings(const QVector<WeatherWarning>& warnings) {
         }
         raiseAlert(QStringLiteral("warning"), warning.event, detail);
     }
+    warningsPrimed_ = true;
     pruneSeenEntries(seenWarnings_);
 }
 
 void AlertCenter::ingestLightningCells(const std::vector<LightningCellSnapshot>& cells) {
     if (!config_.enabled) return;
     const auto now = QDateTime::currentDateTimeUtc();
+    const bool priming = !cellsPrimed_;
     for (const auto& cell : cells) {
         // Only JumpStart cells (not cessations) at or above the sigma threshold.
         if (cell.sigmaLevel < config_.lightningSigmaThreshold) continue;
@@ -200,6 +203,7 @@ void AlertCenter::ingestLightningCells(const std::vector<LightningCellSnapshot>&
             if (last.msecsTo(now) < config_.repeatSuppressionMinutes * 60 * 1000) continue;
         }
         seenLightningCells_.insert(key, now);
+        if (priming) continue;  // first sync only seeds the dedupe set
 
         const auto title = QStringLiteral("Lightning jump σ%1").arg(cell.sigmaLevel, 0, 'f', 1);
         const auto detail = QStringLiteral("%1 flashes/min at (%2°, %3°)")
@@ -208,6 +212,7 @@ void AlertCenter::ingestLightningCells(const std::vector<LightningCellSnapshot>&
                                 .arg(cell.longitudeCenterDeg, 0, 'f', 3);
         raiseAlert(QStringLiteral("lightning-jump"), title, detail);
     }
+    cellsPrimed_ = true;
     pruneSeenEntries(seenLightningCells_);
 }
 
@@ -215,14 +220,6 @@ void AlertCenter::triggerTestAlert() {
     raiseAlert(QStringLiteral("test"),
                QStringLiteral("CappedWeather alert test"),
                QStringLiteral("Sound + tray notification round-trip OK"));
-}
-
-bool AlertCenter::withinGeographicFilter(double latitude, double longitude) const {
-    if (!config_.geographicFilterEnabled) return true;
-    const auto anchor = filterAnchor();
-    if (!anchor.has_value()) return false;
-    return haversineMeters(anchor->latitude, anchor->longitude, latitude, longitude) <=
-           config_.geographicFilterRadiusKm * 1000.0;
 }
 
 bool AlertCenter::eventAllowed(const QString& event) const {
@@ -276,10 +273,6 @@ void AlertCenter::showSystemNotification(const QString& title, const QString& de
         else return;
     }
     tray_->showMessage(title, detail, QSystemTrayIcon::Warning, 6000);
-}
-
-void AlertCenter::pruneRecent() {
-    if (recent_.size() > kRecentLimit) recent_.resize(kRecentLimit);
 }
 
 void AlertCenter::pruneSeenEntries(QHash<QString, QDateTime>& seen) const {

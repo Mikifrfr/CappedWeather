@@ -1,15 +1,15 @@
 #include "app/nexrad_source.hpp"
 #include "app/archive_level2.hpp"
+#include "app/http_client.hpp"
+#include "app/s3_listing.hpp"
 
 #include "core/radar_catalog.hpp"
 
 #include <QDateTime>
-#include <QNetworkRequest>
 #include <QPointer>
 #include <QSettings>
 #include <QTimer>
 #include <QUrlQuery>
-#include <QXmlStreamReader>
 
 #include <algorithm>
 #include <limits>
@@ -22,10 +22,6 @@ constexpr auto kRealtimeBucket = "https://unidata-nexrad-level2-chunks.s3.amazon
 constexpr auto kRadarCatalogUrl = "https://api.weather.gov/radar/stations";
 constexpr int kVolumeQuietSeconds = 45;
 
-int networkTimeoutMilliseconds() {
-    return std::clamp(QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(), 5, 120) * 1000;
-}
-
 int maximumConcurrentObjects() {
     return std::clamp(QSettings().value(QStringLiteral("network/parallelChunks"), 6).toInt(), 1, 12);
 }
@@ -36,18 +32,6 @@ int maximumAttempts() {
 
 int retryBackoffMilliseconds() {
     return std::clamp(QSettings().value(QStringLiteral("network/retryBackoffMs"), 250).toInt(), 100, 5000);
-}
-
-QString userAgent() {
-    const auto contact = QSettings().value(QStringLiteral("network/contact")).toString().trimmed();
-    return contact.isEmpty()
-               ? QStringLiteral("CappedWeather/0.3 operational radar viewer")
-               : QStringLiteral("CappedWeather/0.3 operational radar viewer (%1)").arg(contact);
-}
-
-void configureRequest(QNetworkRequest& request) {
-    request.setHeader(QNetworkRequest::UserAgentHeader, userAgent());
-    request.setTransferTimeout(networkTimeoutMilliseconds());
 }
 
 QUrl listingUrl(const QString& prefix, const QString& delimiter, const QString& startAfter) {
@@ -131,9 +115,7 @@ NexradSource::NexradSource(QObject* parent)
 }
 
 void NexradSource::requestCatalog() {
-    QNetworkRequest request(QUrl(QString::fromUtf8(kRadarCatalogUrl)));
-    configureRequest(request);
-    auto* reply = network_.get(request);
+    auto* reply = network_.get(makeRequest(QUrl(QString::fromUtf8(kRadarCatalogUrl))));
     catalogRequests_.insert(reply, true);
 }
 
@@ -206,9 +188,8 @@ void NexradSource::cancel(const QString& radarId) {
 
 void NexradSource::startRootListing(const QString& radarId, const QString& startAfter,
                                     QStringList volumePrefixes, const int requestedCount) {
-    QNetworkRequest request(listingUrl(utcPrefix(radarId), QStringLiteral("/"), startAfter));
-    configureRequest(request);
-    auto* reply = network_.get(request);
+    auto* reply = network_.get(
+        makeRequest(listingUrl(utcPrefix(radarId), QStringLiteral("/"), startAfter)));
     rootListingRequests_.insert(
         reply, ListingContext{radarId, startAfter, std::move(volumePrefixes), requestedCount});
     emit statusChanged(radarId, QStringLiteral("checking for new volume"));
@@ -225,37 +206,20 @@ void NexradSource::rootListingFinished(QNetworkReply* reply) {
         return;
     }
 
-    QXmlStreamReader xml(reply->readAll());
-    auto prefixes = context.volumePrefixes;
-    bool truncated = false;
-    QString lastPrefix;
-    while (!xml.atEnd()) {
-        xml.readNextStartElement();
-        if (xml.name() == QStringLiteral("IsTruncated")) {
-            truncated = xml.readElementText() == QStringLiteral("true");
-        } else if (xml.name() == QStringLiteral("CommonPrefixes")) {
-            while (xml.readNextStartElement()) {
-                if (xml.name() == QStringLiteral("Prefix")) {
-                    lastPrefix = xml.readElementText();
-                    if (!lastPrefix.isEmpty()) {
-                        prefixes.push_back(lastPrefix);
-                    }
-                } else {
-                    xml.skipCurrentElement();
-                }
-            }
-        }
-    }
-    const auto xmlError = xml.errorString();
+    const auto payload = reply->readAll();
     reply->deleteLater();
-
-    if (xml.hasError()) {
+    QString parseError;
+    const auto listing = parseS3Listing(payload, &parseError);
+    if (!parseError.isEmpty()) {
         finishRadar(context.radarId);
-        emit requestFailed(context.radarId, QStringLiteral("Invalid NOAA volume listing: %1").arg(xmlError));
+        emit requestFailed(context.radarId,
+                           QStringLiteral("Invalid NOAA volume listing: %1").arg(parseError));
         return;
     }
-    if (truncated && !lastPrefix.isEmpty() && lastPrefix != context.startAfter) {
-        startRootListing(context.radarId, lastPrefix, std::move(prefixes), context.requestedCount);
+    auto prefixes = context.volumePrefixes + listing.keys;
+    if (listing.truncated && !listing.lastKey.isEmpty() && listing.lastKey != context.startAfter) {
+        startRootListing(context.radarId, listing.lastKey, std::move(prefixes),
+                         context.requestedCount);
         return;
     }
     if (prefixes.isEmpty()) {
@@ -287,9 +251,8 @@ void NexradSource::startVolumeListing(const QString& radarId, const QStringList&
 }
 
 void NexradSource::requestVolumePage(VolumeListingContext context) {
-    QNetworkRequest request(listingUrl(context.volumePrefix, {}, context.startAfter));
-    configureRequest(request);
-    auto* reply = network_.get(request);
+    auto* reply =
+        network_.get(makeRequest(listingUrl(context.volumePrefix, {}, context.startAfter)));
     volumeListingRequests_.insert(reply, std::move(context));
     emit statusChanged(volumeListingRequests_.value(reply).radarId, QStringLiteral("checking volume chunks"));
 }
@@ -305,50 +268,24 @@ void NexradSource::volumeListingFinished(QNetworkReply* reply) {
         return;
     }
 
-    QXmlStreamReader xml(reply->readAll());
-    bool truncated = false;
-    QString lastKey;
-    while (!xml.atEnd()) {
-        xml.readNextStartElement();
-        if (xml.name() == QStringLiteral("IsTruncated")) {
-            truncated = xml.readElementText() == QStringLiteral("true");
-            continue;
-        }
-        if (xml.name() != QStringLiteral("Contents")) {
-            continue;
-        }
-
-        QString key;
-        QString modified;
-        quint64 size = 0;
-        while (xml.readNextStartElement()) {
-            if (xml.name() == QStringLiteral("Key")) {
-                key = xml.readElementText();
-            } else if (xml.name() == QStringLiteral("LastModified")) {
-                modified = xml.readElementText();
-            } else if (xml.name() == QStringLiteral("Size")) {
-                size = xml.readElementText().toULongLong();
-            } else {
-                xml.skipCurrentElement();
-            }
-        }
-        if (!key.isEmpty()) {
-            lastKey = key;
-        }
-        if (key.endsWith(QStringLiteral("-I")) && size > 0) {
-            context.objects.push_back({context.radarId, key, modified, size});
-        }
-    }
-    const auto xmlError = xml.errorString();
+    const auto payload = reply->readAll();
     reply->deleteLater();
-
-    if (xml.hasError()) {
+    QString parseError;
+    const auto parsed = parseS3Objects(payload, &parseError);
+    if (!parseError.isEmpty()) {
         finishRadar(context.radarId);
-        emit requestFailed(context.radarId, QStringLiteral("Invalid NOAA chunk listing: %1").arg(xmlError));
+        emit requestFailed(context.radarId,
+                           QStringLiteral("Invalid NOAA chunk listing: %1").arg(parseError));
         return;
     }
-    if (truncated && !lastKey.isEmpty() && lastKey != context.startAfter) {
-        context.startAfter = lastKey;
+    for (const auto& entry : parsed.objects) {
+        if (entry.key.endsWith(QStringLiteral("-I")) && entry.size > 0) {
+            context.objects.push_back(
+                {context.radarId, entry.key, entry.lastModified, entry.size});
+        }
+    }
+    if (parsed.truncated && !parsed.lastKey.isEmpty() && parsed.lastKey != context.startAfter) {
+        context.startAfter = parsed.lastKey;
         requestVolumePage(std::move(context));
         return;
     }
@@ -416,9 +353,7 @@ void NexradSource::requestObject(ObjectContext context) {
         queuedObjects_.enqueue(std::move(context));
         return;
     }
-    QNetworkRequest request(objectUrl(context.object.key));
-    configureRequest(request);
-    auto* reply = network_.get(request);
+    auto* reply = network_.get(makeRequest(objectUrl(context.object.key)));
     objectRequests_.insert(reply, std::move(context));
     ++activeObjectRequests_;
 }

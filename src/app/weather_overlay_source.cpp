@@ -1,12 +1,11 @@
 #include "app/weather_overlay_source.hpp"
+#include "app/http_client.hpp"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QNetworkReply>
-#include <QNetworkRequest>
-#include <QSettings>
 #include <QTimer>
 #include <QTimeZone>
 #include <QUrl>
@@ -241,10 +240,6 @@ NwsAlertStyle nwsAlertStyle(const QString& event) {
     return {QColor(QStringLiteral("#F4D35E")), 1000};
 }
 
-int nwsOfficialAlertStyleCount() {
-    return static_cast<int>(kOfficialAlertStyles.size());
-}
-
 WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
     : QObject(parent) {
     connect(&network_, &QNetworkAccessManager::finished, this, &WeatherOverlaySource::requestFinished);
@@ -382,14 +377,7 @@ void WeatherOverlaySource::refresh() {
 }
 
 void WeatherOverlaySource::request(const QUrl& url, RequestContext context, const QByteArray& accept) {
-    QNetworkRequest request(url);
-    const auto contact = QSettings().value(QStringLiteral("network/contact")).toString().trimmed();
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      contact.isEmpty() ? QStringLiteral("CappedWeather/0.3 operational radar viewer")
-                                        : QStringLiteral("CappedWeather/0.3 operational radar viewer (%1)").arg(contact));
-    request.setTransferTimeout(std::clamp(QSettings().value(QStringLiteral("network/timeoutSeconds"), 30).toInt(),
-                                          5, 120) * 1000);
-    if (!accept.isEmpty()) request.setRawHeader(QByteArrayLiteral("Accept"), accept);
+    auto request = makeRequest(url, QString::fromUtf8(accept));
     if (context.kind != RequestKind::Zone) {
         if (const auto etag = responseEtags_.value(url); !etag.isEmpty())
             request.setRawHeader(QByteArrayLiteral("If-None-Match"), etag);

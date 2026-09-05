@@ -1,4 +1,5 @@
 #include "app/placefile_source.hpp"
+#include "app/http_client.hpp"
 
 #include <QFile>
 #include <QFileInfo>
@@ -162,12 +163,7 @@ void PlacefileSource::request(Entry& entry) {
     if (!query.hasQueryItem(QStringLiteral("version")))
         query.addQueryItem(QStringLiteral("version"), QStringLiteral("1.2"));
     url.setQuery(query);
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("CappedWeather/0.3 GR placefile client"));
-    request.setTransferTimeout(30'000);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    auto request = makeRequest(url, {}, QStringLiteral(" GR placefile client"));
     auto* reply = network_.get(request);
     reply->setReadBufferSize(kMaximumResponseBytes + 1);
     connect(reply, &QNetworkReply::readyRead, this, [reply] {
