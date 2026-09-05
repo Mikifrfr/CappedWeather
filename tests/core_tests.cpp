@@ -392,7 +392,7 @@ void testLightningJumpDetection() {
     // 2026-07-20T14:00:00Z, aligned to a 60 s bin boundary.
     const std::int64_t t0 = 1784556000;
 
-    LightningJumpDetector detector({});
+    LightningJumpDetector detector;
     // 20 min of wobbling ~10-14 fl/min baseline (nonzero dfrdt variance).
     for (int m = 0; m < 20; ++m) {
         const int n = (m % 2 == 0) ? 10 : 14;
@@ -428,7 +428,7 @@ void testLightningJumpDetection() {
 void testLightningJumpNoiseFloor() {
     const std::int64_t t0 = 1784556000;
 
-    LightningJumpDetector detector({});
+    LightningJumpDetector detector;
     for (int m = 0; m < 20; ++m) {
         const int n = (m % 2 == 0) ? 2 : 3;
         for (int k = 0; k < n; ++k) {
@@ -447,7 +447,7 @@ void testLightningJumpNoiseFloor() {
 void testFlashRateGrid() {
     const std::int64_t t0 = 1784556000;
 
-    FlashRateGrid grid({});
+    FlashRateGrid grid;
     for (int m = 0; m < 20; ++m) {
         const int n = (m % 2 == 0) ? 10 : 14;
         for (int k = 0; k < n; ++k) {

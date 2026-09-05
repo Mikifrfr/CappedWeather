@@ -27,6 +27,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QProgressBar>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -1302,6 +1303,12 @@ UnsupportedThing: ignored safely
 
     window.resize(1024, 700);
     application.processEvents();
+    // The control dock scrolls vertically: bring the last row into view,
+    // then assert nothing sticks out horizontally at 1024 px.
+    if (auto* controlScroll = controlDock->findChild<QScrollArea*>()) {
+        controlScroll->ensureWidgetVisible(belowThresholdCheck);
+        application.processEvents();
+    }
     const auto belowThresholdBottomRight = belowThresholdCheck->mapTo(
         &window, belowThresholdCheck->rect().bottomRight());
     if (window.width() > 1024 || !window.rect().contains(belowThresholdBottomRight)) {

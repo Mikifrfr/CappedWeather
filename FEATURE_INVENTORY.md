@@ -1,4 +1,4 @@
-# CappedWeather v0.4.0 — Feature & UI Inventory
+# CappedWeather v0.4.1 — Feature & UI Inventory
 
 > **Source-ground analysis**: every item below is confirmed in the actual C++20/Qt6 source code at `src/`. This is not a README summary; it is a direct code audit.
 
