@@ -964,6 +964,11 @@ QString RadarMapCanvas::probeText() const {
     return probeText_;
 }
 
+bool RadarMapCanvas::infoCardScrollable() const {
+    return !pinnedInfo_.isEmpty() &&
+           pinnedInfoContentHeight_ > static_cast<int>(std::floor(pinnedInfoBodyRect_.height()));
+}
+
 void RadarMapCanvas::inspectAt(const QPointF& point) {
     const auto hit = overlayAt(point);
     if (!hit.text.isEmpty()) {

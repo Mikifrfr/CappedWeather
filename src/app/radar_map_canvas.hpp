@@ -132,6 +132,13 @@ public:
     QString probeText() const;
     QRectF infoCardRect() const { return pinnedInfoCardRect_; }
     double infoCardScrollOffset() const { return pinnedInfoScrollOffset_; }
+    // Whether the pinned card overflows and can actually scroll. The card
+    // content height depends on font metrics, so tests must not assume
+    // scrolling is possible on every platform.
+    bool infoCardScrollable() const;
+    // Test hook: explicit enter/leave tracking (QWidget::underMouse does not
+    // reflect synthesized hover, so the probe debounce cannot rely on it).
+    bool hoverActiveForTest() const { return cursorInside_; }
     void inspectAt(const QPointF& point);
     QPoint lightningCellScreenPoint(int index) const;
     int warningCount() const;

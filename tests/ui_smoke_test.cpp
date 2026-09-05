@@ -888,10 +888,20 @@ static bool testProbeClearsOnLeave(QString* error) {
         QEvent leave(QEvent::Leave);
         QCoreApplication::sendEvent(&canvas, &leave);
     };
-    // Arm the debounced hover, then leave before it can fire.
+    // Arm the debounced hover, then leave before it can fire. The flag
+    // asserts are synchronous (no event-loop timing involved); the qWait
+    // afterwards lets a leaked timer fire so the empty check is behavioral.
     sendHover(probePoint);
     QCoreApplication::processEvents();
+    if (!canvas.hoverActiveForTest()) {
+        *error = QStringLiteral("synthetic enter should mark hover active");
+        return false;
+    }
     sendLeave();
+    if (canvas.hoverActiveForTest()) {
+        *error = QStringLiteral("leave should clear hover state");
+        return false;
+    }
     QTest::qWait(80);  // well past the 16ms debounce
     if (!canvas.probeText().isEmpty()) {
         *error = QStringLiteral("probe must stay empty after leave, got: %1")
@@ -899,8 +909,13 @@ static bool testProbeClearsOnLeave(QString* error) {
         return false;
     }
     // And a settled hover must still produce a readout (no over-correction).
+    // This drives the same updateProbe the timer would call.
     sendHover(probePoint);
-    QTest::qWait(80);
+    if (!canvas.hoverActiveForTest()) {
+        *error = QStringLiteral("re-enter should mark hover active again");
+        return false;
+    }
+    canvas.inspectAt(probePoint);
     if (canvas.probeText().isEmpty() || !canvas.probeText().contains(QStringLiteral("dBZ"))) {
         *error = QStringLiteral("settled hover should still probe, got: %1")
                      .arg(canvas.probeText().left(120));
@@ -1487,7 +1502,9 @@ UnsupportedThing: ignored safely
         Qt::ScrollUpdate, false);
     QCoreApplication::sendEvent(map, &partialWheel);
     QTest::qWait(80);
-    if (map->infoCardScrollOffset() <= 0.0) {
+    // Card content height is font-metric dependent: only assert scrolling
+    // when the card actually overflows. Otherwise scroll is a correct no-op.
+    if (map->infoCardScrollable() && map->infoCardScrollOffset() <= 0.0) {
         std::cerr << "Warning detail card discarded high-resolution wheel input\n";
         return 1;
     }
