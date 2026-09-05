@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CappedWeather
+Comment=Operational real-time Level II radar viewer (WSR-88D/TDWR)
+Exec=CappedWeather
+Icon=CappedWeather
+Terminal=false
+Categories=Science;Geoscience;Education;
+Keywords=radar;weather;NEXRAD;Level II;

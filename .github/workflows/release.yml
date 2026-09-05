@@ -86,8 +86,8 @@ jobs:
           rm -rf AppDir
           mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
           DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr
-          cp dist/CappedWeather.desktop AppDir/usr/share/applications/
-          cp dist/CappedWeather.png AppDir/usr/share/icons/hicolor/256x256/apps/
+          cp packaging/CappedWeather.desktop AppDir/usr/share/applications/
+          cp packaging/CappedWeather.png AppDir/usr/share/icons/hicolor/256x256/apps/
 
       - name: Fetch linuxdeploy (no FUSE on runners, extract instead)
         run: |
