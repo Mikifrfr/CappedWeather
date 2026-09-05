@@ -2,8 +2,6 @@
 
 CappedWeather is a small Qt6/C++ WSR-88D and TDWR Level II viewer focused on direct operational data.
 
-The application does not ship synthetic or demo radar frames. It discovers live Level II objects from NOAA's public AWS buckets and displays an explicit unavailable/stale state when data cannot be obtained.
-
 ## Screenshots
 
 ### Quad-panel console view
