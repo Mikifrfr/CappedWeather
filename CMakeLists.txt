@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(CappedWeather VERSION 0.3.0 LANGUAGES CXX)
+project(CappedWeather VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,11 @@ if(MSVC)
 endif()
 
 option(CAPPEDWEATHER_BUILD_APP "Build the Qt6 desktop application when Qt6 is available" ON)
+
+# Bundling the Qt runtime (windeployqt/macdeployqt via Qt's deploy script)
+# makes portable packages. Turn off when the deploy tooling is unavailable
+# (e.g. Linux CI without linuxdeploy) to still get a plain TGZ.
+option(CAPPEDWEATHER_DEPLOY_QT "Bundle the Qt runtime into the install/package step" ON)
 
 # Production builds require netCDF-C so the GLM reader cannot silently stub out.
 # Dev / CI can override with -DCAPPEDWEATHER_REQUIRE_NETCDF=OFF or by setting
@@ -232,12 +237,14 @@ if(CAPPEDWEATHER_BUILD_APP)
                 RUNTIME DESTINATION bin
             )
         endif()
-        qt_generate_deploy_app_script(
-            TARGET CappedWeather
-            OUTPUT_SCRIPT CAPPEDWEATHER_DEPLOY_SCRIPT
-            NO_UNSUPPORTED_PLATFORM_ERROR
-        )
-        install(SCRIPT ${CAPPEDWEATHER_DEPLOY_SCRIPT})
+        if(CAPPEDWEATHER_DEPLOY_QT)
+            qt_generate_deploy_app_script(
+                TARGET CappedWeather
+                OUTPUT_SCRIPT CAPPEDWEATHER_DEPLOY_SCRIPT
+                NO_UNSUPPORTED_PLATFORM_ERROR
+            )
+            install(SCRIPT ${CAPPEDWEATHER_DEPLOY_SCRIPT})
+        endif()
     else()
         message(WARNING "Qt6 and/or BZip2 was not found. The CappedWeather GUI target is skipped; core tests remain available.")
     endif()

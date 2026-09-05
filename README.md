@@ -2,6 +2,15 @@
 
 CappedWeather is a small Qt6/C++ WSR-88D and TDWR Level II viewer focused on direct operational data.
 
+## Download
+
+Grab the latest portable build from the [Releases page](https://github.com/Mikifrfr/CappedWeather/releases):
+
+- **Windows**: `CappedWeather-*-Windows-*.zip` — unzip and run `CappedWeather.exe`, no install needed.
+- **Linux**: `CappedWeather-v*-Linux-x86_64.tgz` — extract and run `./AppDir/AppRun` (built on Ubuntu 22.04, runs on newer distros too).
+
+Release builds stub the GLM lightning reader (no netCDF); everything else is live.
+
 ## Screenshots
 
 ### Quad-panel console view
