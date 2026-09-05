@@ -102,15 +102,30 @@ jobs:
           sudo ln -sf "$PWD/linuxdeploy-plugin-qt-root/AppRun" /usr/local/bin/linuxdeploy-plugin-qt
 
       - name: Bundle Qt runtime into AppDir
+        # No --output plugin: with only --appdir, linuxdeploy fixes up the
+        # tree in place (explicit --output appdir is not shipped by every
+        # linuxdeploy build and fails with "Could not find plugin").
         run: |
           export QMAKE="$(which qmake)"
           ./linuxdeploy-root/AppRun --appdir AppDir \
             -d AppDir/usr/share/applications/CappedWeather.desktop \
             -i AppDir/usr/share/icons/hicolor/256x256/apps/CappedWeather.png \
-            --plugin qt --output appdir
+            --plugin qt
 
       - name: Pack portable TGZ
-        run: tar czf "CappedWeather-${{ github.ref_name }}-Linux-x86_64.tgz" AppDir
+        run: |
+          # In-place deploy does not always leave a launcher; add a minimal
+          # one when linuxdeploy did not.
+          if [ ! -x AppDir/AppRun ]; then
+            printf '%s\n' '#!/bin/sh' \
+              'HERE="$(dirname "$(readlink -f "$0")")"' \
+              'export LD_LIBRARY_PATH="$HERE/usr/lib:$LD_LIBRARY_PATH"' \
+              'export QT_PLUGIN_PATH="$HERE/usr/plugins"' \
+              'export QML2_IMPORT_PATH="$HERE/usr/qml"' \
+              'exec "$HERE/usr/bin/CappedWeather" "$@"' > AppDir/AppRun
+            chmod +x AppDir/AppRun
+          fi
+          tar czf "CappedWeather-${{ github.ref_name }}-Linux-x86_64.tgz" AppDir
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
