@@ -35,7 +35,6 @@ add_library(cappedweather_core STATIC
     src/core/radar_catalog.cpp
     src/core/scan_diagnostics.cpp
     src/core/velocity_processing.cpp
-    src/core/s3_object.cpp
     src/core/lightning_jump.cpp
     src/core/flash_rate_grid.cpp
     src/core/glm_l2_reader.cpp
@@ -113,6 +112,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/cross_section_widget.hpp
             src/app/gif_writer.cpp
             src/app/gif_writer.hpp
+            src/app/http_client.cpp
+            src/app/http_client.hpp
             src/app/glm_source.cpp
             src/app/glm_source.hpp
             src/app/main_window.cpp
@@ -125,6 +126,10 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/placefile_source.hpp
             src/app/radar_map_canvas.cpp
             src/app/radar_map_canvas.hpp
+            src/app/s3_listing.cpp
+            src/app/s3_listing.hpp
+            src/app/theme.cpp
+            src/app/theme.hpp
             src/app/radar_list_model.cpp
             src/app/radar_list_model.hpp
             src/app/shortcut_help_dialog.cpp
@@ -133,12 +138,9 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/weather_overlay_source.hpp
         )
 
-        qt_add_executable(CappedWeather
-            src/app/main.cpp
-            ${CAPPEDWEATHER_UI_SOURCES}
-        )
+        add_library(cappedweather_ui STATIC ${CAPPEDWEATHER_UI_SOURCES})
 
-        target_link_libraries(CappedWeather PRIVATE
+        target_link_libraries(cappedweather_ui PUBLIC
             cappedweather_core
             Qt6::Core
             Qt6::Gui
@@ -148,16 +150,22 @@ if(CAPPEDWEATHER_BUILD_APP)
             BZip2::BZip2
         )
         if(CAPPEDWEATHER_QT_MULTIMEDIA)
-            target_link_libraries(CappedWeather PRIVATE Qt6::Multimedia)
-            target_compile_definitions(CappedWeather PRIVATE CAPPEDWEATHER_HAS_MULTIMEDIA=1)
+            target_link_libraries(cappedweather_ui PUBLIC Qt6::Multimedia)
+            target_compile_definitions(cappedweather_ui PUBLIC CAPPEDWEATHER_HAS_MULTIMEDIA=1)
         endif()
 
-        target_compile_definitions(CappedWeather PRIVATE
+        target_compile_definitions(cappedweather_ui PUBLIC
             CAPPEDWEATHER_HAS_BZIP2=1
             CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
             NOMINMAX
             WIN32_LEAN_AND_MEAN
         )
+
+        qt_add_executable(CappedWeather
+            src/app/main.cpp
+        )
+
+        target_link_libraries(CappedWeather PRIVATE cappedweather_ui)
 
         if(WIN32)
             add_custom_command(TARGET CappedWeather POST_BUILD
@@ -174,45 +182,17 @@ if(CAPPEDWEATHER_BUILD_APP)
 
         qt_add_executable(cappedweather_live_glm_probe
             tests/live_glm_probe.cpp
-            src/app/glm_source.cpp
-            src/app/glm_source.hpp
         )
-        target_link_libraries(cappedweather_live_glm_probe PRIVATE
-            cappedweather_core
-            Qt6::Core
-            Qt6::Network
-        )
-        target_compile_definitions(cappedweather_live_glm_probe PRIVATE
-            CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
-            NOMINMAX
-            WIN32_LEAN_AND_MEAN
-        )
+        target_link_libraries(cappedweather_live_glm_probe PRIVATE cappedweather_ui)
 
         find_package(Qt6 6.4 COMPONENTS Test QUIET)
         if(TARGET Qt6::Test)
             qt_add_executable(cappedweather_ui_tests
                 tests/ui_smoke_test.cpp
-                ${CAPPEDWEATHER_UI_SOURCES}
             )
             target_link_libraries(cappedweather_ui_tests PRIVATE
-                cappedweather_core
-                Qt6::Core
-                Qt6::Gui
-                Qt6::Widgets
-                Qt6::Network
-                Qt6::Xml
+                cappedweather_ui
                 Qt6::Test
-                BZip2::BZip2
-            )
-            if(CAPPEDWEATHER_QT_MULTIMEDIA)
-                target_link_libraries(cappedweather_ui_tests PRIVATE Qt6::Multimedia)
-                target_compile_definitions(cappedweather_ui_tests PRIVATE CAPPEDWEATHER_HAS_MULTIMEDIA=1)
-            endif()
-            target_compile_definitions(cappedweather_ui_tests PRIVATE
-                CAPPEDWEATHER_HAS_BZIP2=1
-                CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
-                NOMINMAX
-                WIN32_LEAN_AND_MEAN
             )
             add_test(NAME cappedweather_ui_tests COMMAND cappedweather_ui_tests -platform offscreen)
             set_tests_properties(cappedweather_ui_tests PROPERTIES
@@ -227,27 +207,8 @@ if(CAPPEDWEATHER_BUILD_APP)
 
             qt_add_executable(cappedweather_live_gui_probe
                 tests/live_gui_probe.cpp
-                ${CAPPEDWEATHER_UI_SOURCES}
             )
-            target_link_libraries(cappedweather_live_gui_probe PRIVATE
-                cappedweather_core
-                Qt6::Core
-                Qt6::Gui
-                Qt6::Widgets
-                Qt6::Network
-                Qt6::Xml
-                BZip2::BZip2
-            )
-            if(CAPPEDWEATHER_QT_MULTIMEDIA)
-                target_link_libraries(cappedweather_live_gui_probe PRIVATE Qt6::Multimedia)
-                target_compile_definitions(cappedweather_live_gui_probe PRIVATE CAPPEDWEATHER_HAS_MULTIMEDIA=1)
-            endif()
-            target_compile_definitions(cappedweather_live_gui_probe PRIVATE
-                CAPPEDWEATHER_HAS_BZIP2=1
-                CAPPEDWEATHER_VERSION="${PROJECT_VERSION}"
-                NOMINMAX
-                WIN32_LEAN_AND_MEAN
-            )
+            target_link_libraries(cappedweather_live_gui_probe PRIVATE cappedweather_ui)
         endif()
 
         set_target_properties(CappedWeather PROPERTIES

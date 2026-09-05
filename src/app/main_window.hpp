@@ -2,6 +2,7 @@
 
 #include "core/level2_decoder.hpp"
 #include "app/alert_center.hpp"
+#include "app/theme.hpp"
 #include "app/weather_overlay_source.hpp"
 
 #include <QMainWindow>
@@ -31,6 +32,7 @@ class QResizeEvent;
 class QLabel;
 class QGridLayout;
 class QSlider;
+class QSpinBox;
 class QTimer;
 class QToolButton;
 
@@ -60,6 +62,11 @@ class MainWindow final : public QMainWindow {
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+
+    // Switchable identity (Classic / Squall prototype). Applies the palette,
+    // stylesheet, panel spacing, and canvas accent colors live.
+    void applyTheme(AppTheme theme);
+    AppTheme theme() const { return theme_; }
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -110,6 +117,12 @@ private:
     void activateMap(RadarMapCanvas* map);
     void synchronizeMapView(RadarMapCanvas* source);
     void refreshActivePanelOverlayUi();
+    void refreshLayerBadges();
+    void refreshScopeVisibility();
+    void syncProductChips();
+    void rebuildTiltGrid();
+    void pushAlertDockToCenter();
+    void refreshAlertDockFromCenter();
     void pushProximityFilterToCanvases();
     void setRadarHealth(RadarHealthState state, const QString& tooltip = {});
     void recomputeRadarHealth();
@@ -169,7 +182,14 @@ private:
     QDockWidget* controlDock_ = nullptr;
     QDockWidget* playbackDock_ = nullptr;
     QComboBox* productCombo_ = nullptr;
+    QVector<QToolButton*> productChips_;
     QComboBox* tiltCombo_ = nullptr;
+    QToolButton* tiltMinus_ = nullptr;
+    QToolButton* tiltPlus_ = nullptr;
+    QToolButton* tiltValueButton_ = nullptr;
+    QWidget* tiltGridBox_ = nullptr;
+    QVector<QToolButton*> tiltGridButtons_;
+    QWidget* velocityBox_ = nullptr;
     QComboBox* stationCombo_ = nullptr;
     QComboBox* warningFilterCombo_ = nullptr;
     QComboBox* paletteCombo_ = nullptr;
@@ -204,14 +224,25 @@ private:
     QToolButton* crossSectionButton_ = nullptr;
     QComboBox* speedCombo_ = nullptr;
     QCheckBox* warningsCheck_ = nullptr;
+    QLabel* warningsBadge_ = nullptr;
     QCheckBox* reportsCheck_ = nullptr;
+    QLabel* reportsBadge_ = nullptr;
     QCheckBox* tornadoCheck_ = nullptr;
     QCheckBox* hailCheck_ = nullptr;
     QCheckBox* windCheck_ = nullptr;
     QCheckBox* belowThresholdCheck_ = nullptr;
     QCheckBox* lightningCheck_ = nullptr;
+    QLabel* lightningBadge_ = nullptr;
     QCheckBox* lightningFusionCheck_ = nullptr;
+    QLabel* fusionBadge_ = nullptr;
     QCheckBox* placefilesCheck_ = nullptr;
+    QLabel* placefilesBadge_ = nullptr;
+    QComboBox* scopeCombo_ = nullptr;
+    QWidget* perPanelBox_ = nullptr;
+    QComboBox* severityCombo_ = nullptr;
+    QSpinBox* ageSpin_ = nullptr;
+    QCheckBox* soundCheck_ = nullptr;
+    QCheckBox* trayCheck_ = nullptr;
     QToolButton* addPlacefileButton_ = nullptr;
     QToolButton* addPlacefileUrlButton_ = nullptr;
     QToolButton* clearPlacefilesButton_ = nullptr;
@@ -258,6 +289,7 @@ private:
     int historyVolumeCount_ = 8;
     bool synchronizePanels_ = true;
     bool synchronizingMapView_ = false;
+    AppTheme theme_ = AppTheme::Prototype;
 };
 
 } // namespace cappedweather

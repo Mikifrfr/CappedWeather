@@ -24,10 +24,12 @@ jobs:
       - name: Install BZip2
         run: vcpkg install bzip2:x64-windows
 
+      # CI installs only Qt + BZip2 (no netCDF), so stub the GLM L2 reader explicitly.
       - name: Configure
         run: >-
           cmake -S . -B build -A x64
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DCAPPEDWEATHER_REQUIRE_NETCDF=OFF
 
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
