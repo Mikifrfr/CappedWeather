@@ -1,4 +1,5 @@
 #include "core/flash_rate_grid.hpp"
+#include "core/radar_geometry.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,12 +10,11 @@ FlashRateGrid::FlashRateGrid(FlashRateGridConfig config)
     : config_(config) {}
 
 std::int64_t FlashRateGrid::cellKey(const int cellX, const int cellY) {
-    return (static_cast<std::int64_t>(cellX) << 32) ^ (static_cast<std::int64_t>(cellY) & 0xFFFFFFFFLL);
+    return gridCellKey(cellX, cellY);
 }
 
 void FlashRateGrid::unpackKey(const std::int64_t key, int& cellX, int& cellY) {
-    cellX = static_cast<int>(key >> 32);
-    cellY = static_cast<int>(key & 0xFFFFFFFFLL);
+    unpackGridCellKey(key, cellX, cellY);
 }
 
 void FlashRateGrid::addFlash(const double timeEpochSec, const double latitudeDeg, const double longitudeDeg) {

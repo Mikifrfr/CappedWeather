@@ -26,16 +26,6 @@ struct GridCell {
     int velocitySamples = 0;
 };
 
-std::int64_t gridKey(const int x, const int y) {
-    return (static_cast<std::int64_t>(x) << 32) ^
-           (static_cast<std::int64_t>(y) & 0xFFFFFFFFLL);
-}
-
-void unpackGridKey(const std::int64_t key, int& x, int& y) {
-    x = static_cast<int>(key >> 32);
-    y = static_cast<int>(key & 0xFFFFFFFFLL);
-}
-
 double cellAreaKm2(const double latitudeDeg, const double gridSizeDeg) {
     constexpr double kKmPerDegree = 111.195;
     return gridSizeDeg * kKmPerDegree *
@@ -81,7 +71,7 @@ std::vector<RadarStormFeature> extractRadarStormFeatures(
                                                          beam.surfaceDistanceMeters);
                 const int x = static_cast<int>(std::floor(coordinate.longitude / config.gridSizeDeg));
                 const int y = static_cast<int>(std::floor(coordinate.latitude / config.gridSizeDeg));
-                auto& cell = cells[gridKey(x, y)];
+                auto& cell = cells[gridCellKey(x, y)];
                 if (product == ProductKind::Reflectivity) {
                     const double weight = std::max(1.0, *value - config.minimumReflectivityDbz + 1.0);
                     cell.weightedLatitude += coordinate.latitude * weight;
@@ -117,11 +107,11 @@ std::vector<RadarStormFeature> extractRadarStormFeatures(
             component.push_back(key);
             int x = 0;
             int y = 0;
-            unpackGridKey(key, x, y);
+            unpackGridCellKey(key, x, y);
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     if (dx == 0 && dy == 0) continue;
-                    const auto neighbor = gridKey(x + dx, y + dy);
+                    const auto neighbor = gridCellKey(x + dx, y + dy);
                     if (reflectivityKeys.contains(neighbor) && visited.insert(neighbor).second)
                         pending.push(neighbor);
                 }
@@ -148,10 +138,10 @@ std::vector<RadarStormFeature> extractRadarStormFeatures(
                                                        cell.maximumReflectivity);
             int x = 0;
             int y = 0;
-            unpackGridKey(key, x, y);
+            unpackGridCellKey(key, x, y);
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx)
-                    velocityNeighborhood.insert(gridKey(x + dx, y + dy));
+                    velocityNeighborhood.insert(gridCellKey(x + dx, y + dy));
         }
         for (const auto key : velocityNeighborhood) {
             const auto it = cells.find(key);

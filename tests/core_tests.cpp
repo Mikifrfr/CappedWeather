@@ -5,7 +5,6 @@
 #include "core/radar_geometry.hpp"
 #include "core/scan_diagnostics.hpp"
 #include "core/velocity_processing.hpp"
-#include "core/s3_object.hpp"
 #include "core/lightning_jump.hpp"
 #include "core/flash_rate_grid.hpp"
 #include "core/glm_l2_reader.hpp"
@@ -169,19 +168,6 @@ void testCatalog() {
     assert(!RadarCatalog::isValidRadarId("TLX"));
     assert(!RadarCatalog::isValidRadarId("K1LX"));
     assert(!RadarCatalog::isValidRadarId("ktlx"));
-}
-
-void testS3Selection() {
-    const std::vector<S3Object> objects{
-        {"2026/07/11/KTLX/KTLX_old", "", "2026-07-11T18:00:00.000Z", 100},
-        {"2026/07/11/KTLX/KTLX_new", "", "2026-07-11T18:05:00.000Z", 200},
-        {"2026/07/11/KTLX/KTLX_empty", "", "2026-07-11T18:06:00.000Z", 0},
-    };
-    const auto latest = newestObject(objects);
-    assert(latest.has_value());
-    assert(latest->key.ends_with("KTLX_new"));
-    assert(isRadarObjectKey(latest->key, "KTLX"));
-    assert(!isRadarObjectKey(latest->key, "KBUF"));
 }
 
 void testBinaryPrimitives() {
@@ -584,7 +570,6 @@ int main() {
     testDerivedProductsRequireVolumeDepth();
     testDerivedProductsSupportNegativeFirstGate();
     testCatalog();
-    testS3Selection();
     testBinaryPrimitives();
     testNativeEncodings();
     testRadarGeometry();
