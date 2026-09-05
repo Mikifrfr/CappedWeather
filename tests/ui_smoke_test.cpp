@@ -7,6 +7,8 @@
 #include "app/placefile_source.hpp"
 #include "app/archive_level2.hpp"
 #include "app/archive_source.hpp"
+#include "app/glm_source.hpp"
+#include "app/nexrad_source.hpp"
 #include "app/opera_source.hpp"
 #include "app/shortcut_help_dialog.hpp"
 #include "core/product.hpp"
@@ -1072,6 +1074,14 @@ int main(int argc, char** argv) {
     MainWindow window;
     window.show();
     application.processEvents();
+
+    // Hermetic suite: sever the live feeds. The constructor fires real
+    // NWS/SPC/GLM requests whose responses can land mid-suite and clobber
+    // fixture overlays (a load-dependent flake). Env-gated live tests use
+    // their own sources and are unaffected.
+    if (auto* liveNexrad = window.findChild<NexradSource*>()) liveNexrad->disconnect();
+    if (auto* liveOverlays = window.findChild<WeatherOverlaySource*>()) liveOverlays->disconnect();
+    if (auto* liveGlm = window.findChild<GlmSource*>()) liveGlm->disconnect();
 
     auto* map = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
     auto* secondMap = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
