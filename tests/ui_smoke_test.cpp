@@ -902,7 +902,7 @@ static bool testProbeClearsOnLeave(QString* error) {
         *error = QStringLiteral("leave should clear hover state");
         return false;
     }
-    QTest::qWait(80);  // well past the 16ms debounce
+    QTest::qWait(250);  // well past the 16ms debounce, even on loaded runners
     if (!canvas.probeText().isEmpty()) {
         *error = QStringLiteral("probe must stay empty after leave, got: %1")
                      .arg(canvas.probeText().left(120));
@@ -1501,7 +1501,10 @@ UnsupportedThing: ignored safely
         QPoint{}, QPoint(0, -30), Qt::NoButton, Qt::NoModifier,
         Qt::ScrollUpdate, false);
     QCoreApplication::sendEvent(map, &partialWheel);
-    QTest::qWait(80);
+    // The card scrolls on a 16 ms animation timer; give loaded CI runners
+    // ample ticks, then pump once more before reading the offset.
+    QTest::qWait(500);
+    QCoreApplication::processEvents();
     // Card content height is font-metric dependent: only assert scrolling
     // when the card actually overflows. Otherwise scroll is a correct no-op.
     if (map->infoCardScrollable() && map->infoCardScrollOffset() <= 0.0) {
