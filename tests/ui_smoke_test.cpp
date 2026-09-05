@@ -10,18 +10,27 @@
 #include "app/shortcut_help_dialog.hpp"
 #include "core/product.hpp"
 
+#include "app/alert_center.hpp"
+#include "core/lightning_overlay.hpp"
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDockWidget>
 #include <QFile>
 #include <QImage>
 #include <QLabel>
+#include <QList>
+#include <QPointF>
+#include <QPolygonF>
 #include <QSlider>
+#include <QSpinBox>
 #include <QProgressBar>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QTest>
 #include <QTemporaryDir>
 #include <QTimeZone>
@@ -29,11 +38,976 @@
 
 #include <iostream>
 #include <bit>
+#include <cmath>
 #include <cstdint>
+#include <optional>
+#include <vector>
 
 #include <bzlib.h>
 
 using namespace cappedweather;
+
+// --- Hermetic P1 helpers (no network, offscreen-safe) ---
+static QPolygonF smokeSquare(double lon, double lat, double halfDeg) {
+    QPolygonF polygon;
+    polygon << QPointF(lon - halfDeg, lat - halfDeg) << QPointF(lon + halfDeg, lat - halfDeg)
+            << QPointF(lon + halfDeg, lat + halfDeg) << QPointF(lon - halfDeg, lat + halfDeg);
+    return polygon;
+}
+
+static WeatherWarning smokeWarning(const QString& id, const QString& event, const QString& severity,
+                                   const QString& headline, const QPolygonF& exterior = {},
+                                   const QDateTime& onset = {}) {
+    WeatherWarning warning;
+    warning.id = id;
+    warning.event = event;
+    warning.headline = headline;
+    warning.severity = severity;
+    warning.senderName = QStringLiteral("NWS Test");
+    warning.description = headline;
+    warning.instruction = QStringLiteral("Take shelter now");
+    // Default to a fresh onset so the age gate does not filter fixtures;
+    // pass an explicit onset to exercise stale-warning behavior.
+    warning.onset =
+        onset.isValid() ? onset : QDateTime::currentDateTimeUtc().addSecs(-5 * 60);
+    warning.expires = warning.onset.addSecs(60 * 60);
+    if (!exterior.isEmpty()) {
+        WarningPolygon polygon;
+        polygon.exterior = exterior;
+        warning.polygons.append(polygon);
+    }
+    return warning;
+}
+
+static LightningCellSnapshot smokeCell(double sigma, JumpEventKind kind, int cellX, int cellY,
+                                       int satellite = 19) {
+    LightningCellSnapshot cell;
+    cell.kind = kind;
+    cell.sigmaLevel = sigma;
+    cell.flashRatePerMin = 28.0;
+    cell.latitudeCenterDeg = 33.65;
+    cell.longitudeCenterDeg = -83.85;
+    cell.cellX = cellX;
+    cell.cellY = cellY;
+    cell.satelliteNumber = satellite;
+    cell.eventTimeEpochSec = QDateTime::currentSecsSinceEpoch() - 45;
+    cell.latestDataEpochSec = QDateTime::currentSecsSinceEpoch() - 12;
+    return cell;
+}
+
+static AlertConfig smokeQuietConfig() {
+    AlertConfig config;
+    config.enabled = true;
+    config.soundEnabled = false;
+    config.systemNotificationEnabled = false;
+    config.geographicFilterEnabled = false;
+    config.eventFilterEnabled = false;
+    return config;
+}
+
+static bool testAlertCenterDedupe(QString* error) {
+    AlertCenter center;
+    auto config = smokeQuietConfig();
+    config.minSeverity = 0;
+    config.repeatSuppressionMinutes = 30;
+    center.setConfig(config);
+    const auto first =
+        smokeWarning(QStringLiteral("urn:oid:smoke-dedupe-1"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Dedup headline A"));
+    center.ingestWarnings({first});
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("dedupe: first sync should prime silently, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    center.ingestWarnings({first});
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("dedupe: re-ingest of same @id should stay silent, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    const auto second =
+        smokeWarning(QStringLiteral("urn:oid:smoke-dedupe-2"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Dedup headline B"));
+    center.ingestWarnings({second});
+    if (center.recent().size() != 1) {
+        *error = QStringLiteral("dedupe: new @id should yield 1 alert, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    auto noSuppression = center.config();
+    noSuppression.repeatSuppressionMinutes = 0;
+    center.setConfig(noSuppression);
+    center.ingestWarnings({first});
+    if (center.recent().size() != 2) {
+        *error = QStringLiteral("suppression window 0 should re-alert, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    return true;
+}
+
+static bool testAlertCenterSeverity(QString* error) {
+    AlertCenter center;
+    auto config = smokeQuietConfig();
+    config.minSeverity = 2;  // Severe default: Minor < Moderate < Severe < Extreme
+    config.repeatSuppressionMinutes = 30;
+    center.setConfig(config);
+    QVector<WeatherWarning> batch;
+    batch.append(smokeWarning(QStringLiteral("smoke-sev-minor"), QStringLiteral("Tornado Warning"),
+                              QStringLiteral("Minor"), QStringLiteral("sev-minor")));
+    batch.append(smokeWarning(QStringLiteral("smoke-sev-moderate"), QStringLiteral("Tornado Warning"),
+                              QStringLiteral("Moderate"), QStringLiteral("sev-moderate")));
+    batch.append(smokeWarning(QStringLiteral("smoke-sev-severe"), QStringLiteral("Tornado Warning"),
+                              QStringLiteral("Severe"), QStringLiteral("sev-severe")));
+    batch.append(smokeWarning(QStringLiteral("smoke-sev-extreme"), QStringLiteral("Tornado Warning"),
+                              QStringLiteral("Extreme"), QStringLiteral("sev-extreme")));
+    batch.append(smokeWarning(QStringLiteral("smoke-sev-unknown"), QStringLiteral("Tornado Warning"),
+                              QStringLiteral("Unknown"), QStringLiteral("sev-unknown")));
+    center.ingestWarnings(batch);  // first sync primes silently
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("severity: first sync should prime silently, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    // Re-issue the same severities under fresh ids (as the NWS feed would for
+    // genuinely new alerts) so dedupe does not mask the severity filter.
+    QVector<WeatherWarning> fresh;
+    for (const auto& warning : batch) {
+        auto copy = warning;
+        copy.id = warning.id + QStringLiteral("-fresh");
+        fresh.append(copy);
+    }
+    center.ingestWarnings(fresh);
+    if (center.recent().size() != 2) {
+        *error = QStringLiteral("minSeverity=Severe should keep 2 (Severe+Extreme), got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    bool sawSevere = false;
+    bool sawExtreme = false;
+    for (const auto& record : center.recent()) {
+        if (record.detail.contains(QStringLiteral("sev-severe"))) sawSevere = true;
+        if (record.detail.contains(QStringLiteral("sev-extreme"))) sawExtreme = true;
+        if (record.detail.contains(QStringLiteral("sev-minor")) ||
+            record.detail.contains(QStringLiteral("sev-moderate")) ||
+            record.detail.contains(QStringLiteral("sev-unknown"))) {
+            *error = QStringLiteral("minSeverity=Severe leaked %1").arg(record.detail);
+            return false;
+        }
+    }
+    if (!sawSevere || !sawExtreme) {
+        *error = QStringLiteral("minSeverity=Severe missing Severe/Extreme alerts");
+        return false;
+    }
+    config.minSeverity = 0;  // Minor: everything (incl. Unknown-as-Moderate) passes
+    center.setConfig(config);
+    center.clearMemory();
+    QVector<WeatherWarning> minorBatch;
+    for (const auto& warning : batch) {
+        auto copy = warning;
+        copy.id = warning.id + QStringLiteral("-minor");
+        minorBatch.append(copy);
+    }
+    center.ingestWarnings(minorBatch);  // primes after clearMemory
+    QVector<WeatherWarning> minorFresh;
+    for (const auto& warning : minorBatch) {
+        auto copy = warning;
+        copy.id = warning.id + QStringLiteral("-fresh");
+        minorFresh.append(copy);
+    }
+    center.ingestWarnings(minorFresh);
+    if (center.recent().size() != 5) {
+        *error = QStringLiteral("minSeverity=Minor should keep 5, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    config.minSeverity = 3;  // Extreme only
+    center.setConfig(config);
+    center.clearMemory();
+    QVector<WeatherWarning> extremeBatch;
+    for (const auto& warning : batch) {
+        auto copy = warning;
+        copy.id = warning.id + QStringLiteral("-extreme");
+        extremeBatch.append(copy);
+    }
+    center.ingestWarnings(extremeBatch);  // primes after clearMemory
+    QVector<WeatherWarning> extremeFresh;
+    for (const auto& warning : extremeBatch) {
+        auto copy = warning;
+        copy.id = warning.id + QStringLiteral("-fresh");
+        extremeFresh.append(copy);
+    }
+    center.ingestWarnings(extremeFresh);
+    if (center.recent().size() != 1 ||
+        !center.recent().constFirst().detail.contains(QStringLiteral("sev-extreme"))) {
+        *error = QStringLiteral("minSeverity=Extreme should keep only Extreme, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    return true;
+}
+
+static bool testAlertCenterLightning(QString* error) {
+    AlertCenter center;
+    auto config = smokeQuietConfig();
+    config.lightningSigmaThreshold = 2.0;
+    config.repeatSuppressionMinutes = 30;
+    center.setConfig(config);
+    const auto low = smokeCell(1.0, JumpEventKind::JumpStart, 11, 21);
+    const auto high = smokeCell(3.0, JumpEventKind::JumpStart, 12, 22);
+    const auto ceased = smokeCell(5.0, JumpEventKind::JumpCessation, 13, 23);
+    center.ingestLightningCells({low, high, ceased});  // first sync primes silently
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("lightning: first sync should prime silently, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    const auto highFresh = smokeCell(3.0, JumpEventKind::JumpStart, 112, 122);
+    center.ingestLightningCells({highFresh});
+    if (center.recent().size() != 1) {
+        *error = QStringLiteral("sigma 2.0 should keep only the 3.0 active cell, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    if (!center.recent().constFirst().title.contains(QStringLiteral("3.0"))) {
+        *error = QStringLiteral("lightning title should mention sigma 3.0, got %1")
+                     .arg(center.recent().constFirst().title);
+        return false;
+    }
+    center.ingestLightningCells({highFresh});
+    if (center.recent().size() != 1) {
+        *error = QStringLiteral("lightning dedupe should suppress repeat cell, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    const auto update = smokeCell(3.5, JumpEventKind::JumpUpdate, 14, 24);
+    center.ingestLightningCells({update});
+    if (center.recent().size() != 2) {
+        *error = QStringLiteral("active JumpUpdate should also alert, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    config.lightningSigmaThreshold = 4.0;
+    center.setConfig(config);
+    center.clearMemory();
+    center.ingestLightningCells({high});  // re-primes after clearMemory
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("sigma 4.0 should drop the 3.0 cell");
+        return false;
+    }
+    config.lightningSigmaThreshold = 0.5;
+    center.setConfig(config);
+    center.clearMemory();
+    center.ingestLightningCells({low, high, ceased});  // re-primes after clearMemory
+    const auto lowFresh = smokeCell(1.0, JumpEventKind::JumpStart, 111, 121);
+    const auto highFresh2 = smokeCell(3.0, JumpEventKind::JumpStart, 112, 123);
+    const auto ceasedFresh = smokeCell(5.0, JumpEventKind::JumpCessation, 113, 124);
+    center.ingestLightningCells({lowFresh, highFresh2, ceasedFresh});
+    if (center.recent().size() != 2) {
+        *error = QStringLiteral("sigma 0.5 should keep both active cells but drop cessation, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    return true;
+}
+
+static bool testAlertCenterPrimingAndAge(QString* error) {
+    AlertCenter center;
+    auto config = smokeQuietConfig();
+    config.minSeverity = 0;
+    config.repeatSuppressionMinutes = 30;
+    config.maxWarningAgeMinutes = 60;
+    center.setConfig(config);
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto oldWarning =
+        smokeWarning(QStringLiteral("urn:oid:smoke-age-old"), QStringLiteral("Flash Flood Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Age headline old"), {},
+                     now.addSecs(-5 * 3600));
+    const auto freshWarning =
+        smokeWarning(QStringLiteral("urn:oid:smoke-age-fresh"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Age headline fresh"));
+    center.ingestWarnings({oldWarning, freshWarning});
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("priming: first sync must stay silent, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    // A genuinely new, fresh warning notifies.
+    const auto fresh2 =
+        smokeWarning(QStringLiteral("urn:oid:smoke-age-fresh2"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Age headline fresh2"));
+    center.ingestWarnings({fresh2});
+    if (center.recent().size() != 1) {
+        *error = QStringLiteral("priming: new fresh warning should alert, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    // A new-but-stale warning is seeded silently and never fires later.
+    const auto old2 =
+        smokeWarning(QStringLiteral("urn:oid:smoke-age-old2"), QStringLiteral("Flash Flood Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Age headline old2"), {},
+                     now.addSecs(-5 * 3600));
+    center.ingestWarnings({old2});
+    if (center.recent().size() != 1) {
+        *error = QStringLiteral("age gate: 5h-old warning must stay silent, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    center.ingestWarnings({old2});
+    if (center.recent().size() != 1) {
+        *error = QStringLiteral("age gate: stale warning must not fire on refresh either, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    // Warnings without an onset always pass (missing data must not suppress).
+    auto noOnset = smokeWarning(QStringLiteral("urn:oid:smoke-age-noonset"),
+                                QStringLiteral("Tornado Warning"), QStringLiteral("Severe"),
+                                QStringLiteral("Age headline no-onset"));
+    noOnset.onset = QDateTime();
+    center.ingestWarnings({noOnset});
+    if (center.recent().size() != 2) {
+        *error = QStringLiteral("age gate: missing onset must still alert, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    // 0 disables the age limit entirely.
+    auto unlimited = center.config();
+    unlimited.maxWarningAgeMinutes = 0;
+    center.setConfig(unlimited);
+    const auto old3 =
+        smokeWarning(QStringLiteral("urn:oid:smoke-age-old3"), QStringLiteral("Flash Flood Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Age headline old3"), {},
+                     now.addSecs(-5 * 3600));
+    center.ingestWarnings({old3});
+    if (center.recent().size() != 3) {
+        *error = QStringLiteral("age 0 should notify regardless of onset, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    // Clearing memory re-arms priming instead of bursting for active alerts.
+    center.clearMemory();
+    const auto fresh3 =
+        smokeWarning(QStringLiteral("urn:oid:smoke-age-fresh3"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("Age headline fresh3"));
+    center.ingestWarnings({fresh3});
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("clearMemory should re-arm silent priming, got %1")
+                     .arg(center.recent().size());
+        return false;
+    }
+    return true;
+}
+
+static bool testBasemapTileUrls(QString* error) {
+    // Esri uses z/y/x order (y before x) — the flip lives in basemapTileUrls.
+    const auto urls = basemapTileUrls(5, 7, 12);
+    const auto base = urls.base.toString();
+    const auto reference = urls.reference.toString();
+    if (!base.endsWith(QStringLiteral("/5/12/7")) ||
+        !base.contains(QStringLiteral("World_Dark_Gray_Base"))) {
+        *error = QStringLiteral("base URL should be Dark_Gray_Base z/y/x, got %1").arg(base);
+        return false;
+    }
+    if (!reference.endsWith(QStringLiteral("/5/12/7")) ||
+        !reference.contains(QStringLiteral("World_Dark_Gray_Reference"))) {
+        *error = QStringLiteral("reference URL should be Dark_Gray_Reference z/y/x, got %1")
+                     .arg(reference);
+        return false;
+    }
+    if (base.contains(QStringLiteral("cartocdn")) || reference.contains(QStringLiteral("cartocdn"))) {
+        *error = QStringLiteral("basemap must not reference CARTO");
+        return false;
+    }
+    return true;
+}
+
+static bool testThemeSwitcher(MainWindow* window, QString* error) {
+    if (appThemeName(AppTheme::Classic) == appThemeName(AppTheme::Prototype)) {
+        *error = QStringLiteral("theme names must be distinct");
+        return false;
+    }
+    if (appThemeFromInt(99) != AppTheme::Classic || appThemeFromInt(1) != AppTheme::Prototype) {
+        *error = QStringLiteral("appThemeFromInt should map 1->Prototype, other->Classic");
+        return false;
+    }
+    const auto classic = appStylesheet(AppTheme::Classic);
+    const auto squall = appStylesheet(AppTheme::Prototype);
+    if (classic.isEmpty() || squall.isEmpty() || classic == squall) {
+        *error = QStringLiteral("both themes must ship distinct non-empty stylesheets");
+        return false;
+    }
+    if (appAccent(AppTheme::Classic) == appAccent(AppTheme::Prototype)) {
+        *error = QStringLiteral("theme accents must differ");
+        return false;
+    }
+    window->applyTheme(AppTheme::Prototype);
+    if (window->theme() != AppTheme::Prototype) {
+        *error = QStringLiteral("applyTheme(Prototype) should stick");
+        window->applyTheme(AppTheme::Classic);
+        return false;
+    }
+    window->applyTheme(AppTheme::Classic);  // leave the shared window untouched
+    if (window->theme() != AppTheme::Classic) {
+        *error = QStringLiteral("applyTheme(Classic) should restore");
+        return false;
+    }
+    return true;
+}
+
+static bool testSidebarRedesign(MainWindow* window, QString* error) {
+    // Collapsible task groups.
+    const auto headers = window->findChildren<QToolButton*>(QStringLiteral("groupHeader"));
+    if (headers.size() < 5) {
+        *error = QStringLiteral("dock should have 5+ collapsible groups, got %1").arg(headers.size());
+        return false;
+    }
+    auto* firstHeader = headers.constFirst();
+    const auto bodies = window->findChildren<QWidget*>();
+    QWidget* toggledBody = nullptr;
+    // Collapse the first group via its header and confirm something hides.
+    int visibleBefore = 0;
+    for (auto* body : bodies) {
+        if (body->isVisibleTo(window) && qobject_cast<QCheckBox*>(body) == nullptr) ++visibleBefore;
+    }
+    firstHeader->setChecked(false);
+    QCoreApplication::processEvents();
+    int visibleAfter = 0;
+    for (auto* body : bodies) {
+        if (body->isVisibleTo(window) && qobject_cast<QCheckBox*>(body) == nullptr) ++visibleAfter;
+    }
+    if (visibleAfter >= visibleBefore) {
+        *error = QStringLiteral("collapsing a group should hide widgets");
+        firstHeader->setChecked(true);
+        return false;
+    }
+    firstHeader->setChecked(true);
+    QCoreApplication::processEvents();
+    Q_UNUSED(toggledBody);
+    // Product chips mirror the product combo.
+    auto* products = window->findChild<QComboBox*>(QStringLiteral("productCombo"));
+    const auto chips = window->findChildren<QToolButton*>(QStringLiteral("productChip"));
+    if (chips.size() != 8 || !products) {
+        *error = QStringLiteral("product chip grid should have 8 chips, got %1").arg(chips.size());
+        return false;
+    }
+    for (const auto* chip : chips) {
+        if (chip->icon().isNull() || chip->toolTip().isEmpty()) {
+            *error = QStringLiteral("every product chip needs an icon and hover text");
+            return false;
+        }
+    }
+    const auto velocityIndex = products->findData(static_cast<int>(ProductKind::Velocity));
+    chips.at(velocityIndex)->click();
+    QCoreApplication::processEvents();
+    if (products->currentIndex() != velocityIndex) {
+        *error = QStringLiteral("clicking the Velocity chip should drive the product combo");
+        return false;
+    }
+    const auto reflectivityIndex = products->findData(static_cast<int>(ProductKind::Reflectivity));
+    chips.at(reflectivityIndex)->click();
+    QCoreApplication::processEvents();
+    if (products->currentIndex() != reflectivityIndex || !chips.at(reflectivityIndex)->isChecked()) {
+        *error = QStringLiteral("clicking the Reflectivity chip should check it and drive the combo");
+        return false;
+    }
+    // Tilt stepper + grid widgets exist (grid fills once volumes decode).
+    if (!window->findChild<QToolButton*>(QStringLiteral("tiltMinusButton")) ||
+        !window->findChild<QToolButton*>(QStringLiteral("tiltPlusButton")) ||
+        !window->findChild<QToolButton*>(QStringLiteral("tiltValueButton")) ||
+        !window->findChild<QWidget*>(QStringLiteral("tiltGrid"))) {
+        *error = QStringLiteral("tilt stepper/grid widgets missing");
+        return false;
+    }
+    // Scope selector drives the per-panel override box.
+    auto* scope = window->findChild<QComboBox*>(QStringLiteral("scopeCombo"));
+    auto* perPanelBox = window->findChild<QWidget*>(QStringLiteral("perPanelBox"));
+    if (!scope || scope->count() != 2 || !perPanelBox) {
+        *error = QStringLiteral("scope selector or per-panel box missing");
+        return false;
+    }
+    if (perPanelBox->isVisibleTo(window)) {
+        *error = QStringLiteral("per-panel box should hide under All-panels scope");
+        return false;
+    }
+    scope->setCurrentIndex(1);
+    QCoreApplication::processEvents();
+    if (!perPanelBox->isVisibleTo(window)) {
+        *error = QStringLiteral("per-panel box should show under Active-panel scope");
+        scope->setCurrentIndex(0);
+        return false;
+    }
+    scope->setCurrentIndex(0);
+    QCoreApplication::processEvents();
+    // Layer badges + dock alert controls exist.
+    for (const auto& name : {QStringLiteral("warningsBadge"), QStringLiteral("reportsBadge"),
+                             QStringLiteral("lightningBadge"), QStringLiteral("fusionBadge"),
+                             QStringLiteral("placefilesBadge")}) {
+        if (!window->findChild<QLabel*>(name)) {
+            *error = QStringLiteral("layer badge missing: %1").arg(name);
+            return false;
+        }
+    }
+    auto* severity = window->findChild<QComboBox*>(QStringLiteral("severityCombo"));
+    auto* age = window->findChild<QSpinBox*>(QStringLiteral("ageSpin"));
+    auto* sound = window->findChild<QCheckBox*>(QStringLiteral("soundCheck"));
+    auto* tray = window->findChild<QCheckBox*>(QStringLiteral("trayCheck"));
+    if (!severity || severity->count() != 4 || !age || age->maximum() != 1440 || !sound || !tray) {
+        *error = QStringLiteral("dock alert controls missing or misshapen");
+        return false;
+    }
+    severity->setCurrentIndex(severity->findData(3));
+    age->setValue(15);
+    QCoreApplication::processEvents();
+    if (severity->currentData().toInt() != 3 || age->value() != 15) {
+        *error = QStringLiteral("dock alert controls should accept edits");
+        return false;
+    }
+    // Velocity controls hide outside the Velocity product.
+    auto* velocityBox = window->findChild<QWidget*>(QStringLiteral("velocityBox"));
+    if (!velocityBox || velocityBox->isVisibleTo(window)) {
+        *error = QStringLiteral("velocity box should hide while product is Reflectivity");
+        return false;
+    }
+    return true;
+}
+
+static bool testProximityFilter(QString* error) {
+    const auto nearWarning =
+        smokeWarning(QStringLiteral("prox-near"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("PROX-NEAR-HEADLINE"),
+                     smokeSquare(-97.4, 35.2, 0.1));
+    const auto farWarning =
+        smokeWarning(QStringLiteral("prox-far"), QStringLiteral("Severe Thunderstorm Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("PROX-FAR-HEADLINE"),
+                     smokeSquare(-100.0, 40.0, 0.1));
+    const QVector<WeatherWarning> warnings{nearWarning, farWarning};
+    RadarMapCanvas nearby;
+    nearby.resize(800, 600);
+    nearby.setWarningsVisible(true);
+    nearby.setWeatherOverlays(warnings, {});
+    nearby.setView(QPointF(-97.4, 35.2), 8);
+    nearby.setProximityFilter(QPointF(-97.4, 35.2), 150.0);
+    if (!nearby.proximityFilterActive()) {
+        *error = QStringLiteral("proximity filter should report active");
+        return false;
+    }
+    nearby.inspectAt(QPointF(nearby.rect().center()));
+    if (!nearby.probeText().contains(QStringLiteral("PROX-NEAR-HEADLINE"))) {
+        *error = QStringLiteral("proximity should keep nearby warning, got: %1")
+                     .arg(nearby.probeText().left(120));
+        return false;
+    }
+    RadarMapCanvas distant;
+    distant.resize(800, 600);
+    distant.setWarningsVisible(true);
+    distant.setWeatherOverlays(warnings, {});
+    distant.setView(QPointF(-100.0, 40.0), 8);
+    distant.setProximityFilter(QPointF(-97.4, 35.2), 150.0);
+    distant.inspectAt(QPointF(distant.rect().center()));
+    if (distant.probeText().contains(QStringLiteral("PROX-FAR-HEADLINE"))) {
+        *error = QStringLiteral("proximity should drop distant warning");
+        return false;
+    }
+    distant.setProximityFilter(std::nullopt, 150.0);
+    if (distant.proximityFilterActive()) {
+        *error = QStringLiteral("clearing proximity anchor should deactivate filter");
+        return false;
+    }
+    distant.inspectAt(QPointF(distant.rect().center()));
+    if (!distant.probeText().contains(QStringLiteral("PROX-FAR-HEADLINE"))) {
+        *error = QStringLiteral("disabled proximity filter should restore distant warning, got: %1")
+                     .arg(distant.probeText().left(120));
+        return false;
+    }
+    return true;
+}
+
+static bool testOverlayVisibility(MainWindow* window, QString* error) {
+    const auto warning =
+        smokeWarning(QStringLiteral("ov-1"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("OVERLAY-VIS-HEADLINE"),
+                     smokeSquare(-97.4, 35.2, 0.1));
+    RadarMapCanvas globalCanvas;
+    globalCanvas.resize(800, 600);
+    globalCanvas.setWarningsVisible(true);
+    globalCanvas.setWeatherOverlays({warning}, {});
+    globalCanvas.setView(QPointF(-97.4, 35.2), 8);
+    globalCanvas.inspectAt(QPointF(globalCanvas.rect().center()));
+    if (!globalCanvas.probeText().contains(QStringLiteral("OVERLAY-VIS-HEADLINE"))) {
+        *error = QStringLiteral("global warningsVisible should hit");
+        return false;
+    }
+    RadarMapCanvas overridden;
+    overridden.resize(800, 600);
+    overridden.setWarningsVisible(true);
+    overridden.setWeatherOverlays({warning}, {});
+    overridden.setView(QPointF(-97.4, 35.2), 8);
+    RadarMapCanvas::OverlayVisibility hideWarnings;
+    hideWarnings.warnings = false;
+    hideWarnings.stormReports = true;
+    hideWarnings.lightning = true;
+    hideWarnings.lightningFusion = true;
+    overridden.setOverlayOverrides(hideWarnings);
+    if (!overridden.overlayOverrides().has_value() || overridden.overlayOverrides()->warnings) {
+        *error = QStringLiteral("per-panel override should store warnings=false");
+        return false;
+    }
+    overridden.inspectAt(QPointF(overridden.rect().center()));
+    if (overridden.probeText().contains(QStringLiteral("OVERLAY-VIS-HEADLINE"))) {
+        *error = QStringLiteral("per-panel warnings=false should hide warning hit");
+        return false;
+    }
+    // "Use global" reset: drop the override, then re-apply the global toggle.
+    overridden.setOverlayOverrides(std::nullopt);
+    if (overridden.overlayOverrides().has_value()) {
+        *error = QStringLiteral("Use global should clear overlayOverrides");
+        return false;
+    }
+    overridden.setWarningsVisible(true);
+    overridden.inspectAt(QPointF(overridden.rect().center()));
+    if (!overridden.probeText().contains(QStringLiteral("OVERLAY-VIS-HEADLINE"))) {
+        *error = QStringLiteral("Use global + global visible should restore hit");
+        return false;
+    }
+    bool foundUseGlobal = false;
+    const auto buttons = window->findChildren<QToolButton*>();
+    for (const auto* button : buttons) {
+        if (button && button->text() == QStringLiteral("Use global")) {
+            foundUseGlobal = true;
+            break;
+        }
+    }
+    if (!foundUseGlobal) {
+        *error = QStringLiteral("MainWindow should expose a 'Use global' per-panel reset");
+        return false;
+    }
+    return true;
+}
+
+static bool testPresets(MainWindow* window, QString* error) {
+    auto* presets = window->findChild<QComboBox*>(QStringLiteral("presetsCombo"));
+    auto* layoutCombo = window->findChild<QComboBox*>(QStringLiteral("panelLayoutCombo"));
+    auto* secondMap = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
+    if (!presets || !layoutCombo || !secondMap) {
+        *error = QStringLiteral("preset combos or second panel missing");
+        return false;
+    }
+    if (presets->findText(QStringLiteral("Chase 1x1")) < 0 ||
+        presets->findText(QStringLiteral("Analysis 2x2 dual-pol")) < 0 ||
+        presets->findText(QStringLiteral("Lightning scout 1x2")) < 0) {
+        *error = QStringLiteral("builtInPresets should contain Chase/Analysis/Lightning, got: %1")
+                     .arg([presets] {
+                         QStringList names;
+                         for (int i = 0; i < presets->count(); ++i) names << presets->itemText(i);
+                         return names.join(QStringLiteral(" | "));
+                     }());
+        return false;
+    }
+    const int originalLayout = layoutCombo->currentIndex();
+    presets->setCurrentIndex(presets->findText(QStringLiteral("Chase 1x1")));
+    QCoreApplication::processEvents();
+    if (layoutCombo->currentIndex() != 0) {
+        *error = QStringLiteral("presetByName Chase should map to layout 0, got %1")
+                     .arg(layoutCombo->currentIndex());
+        return false;
+    }
+    presets->setCurrentIndex(presets->findText(QStringLiteral("Analysis 2x2 dual-pol")));
+    QCoreApplication::processEvents();
+    if (layoutCombo->currentIndex() != 3) {
+        *error = QStringLiteral("presetByName Analysis should map to layout 3, got %1")
+                     .arg(layoutCombo->currentIndex());
+        return false;
+    }
+    if (secondMap->product() != ProductKind::Velocity) {
+        *error = QStringLiteral("Analysis preset should set panel2 to Velocity");
+        return false;
+    }
+    presets->setCurrentIndex(presets->findText(QStringLiteral("Lightning scout 1x2")));
+    QCoreApplication::processEvents();
+    if (layoutCombo->currentIndex() != 1) {
+        *error = QStringLiteral("presetByName Lightning should map to layout 1, got %1")
+                     .arg(layoutCombo->currentIndex());
+        return false;
+    }
+    presets->setCurrentIndex(0);  // "(none)" is a no-op lookup guard
+    layoutCombo->setCurrentIndex(originalLayout);
+    QCoreApplication::processEvents();
+    return true;
+}
+
+static bool testViewHistory(QString* error) {
+    RadarMapCanvas canvas;
+    canvas.resize(800, 600);
+    canvas.clearViewHistory();
+    if (canvas.canUndoView() || canvas.canRedoView()) {
+        *error = QStringLiteral("fresh history should have no undo/redo");
+        return false;
+    }
+    canvas.setView(QPointF(-97.0, 35.0), 6);
+    canvas.pushViewHistory();
+    canvas.setView(QPointF(-96.0, 36.0), 7);
+    if (!canvas.canUndoView()) {
+        *error = QStringLiteral("history should offer undo after push+move");
+        return false;
+    }
+    canvas.undoView();
+    const auto undone = canvas.viewCenter();
+    if (std::abs(undone.x() + 97.0) > 1e-9 || std::abs(undone.y() - 35.0) > 1e-9 ||
+        canvas.viewZoom() != 6) {
+        *error = QStringLiteral("undoView should restore center/zoom, got %1,%2 z%3")
+                     .arg(undone.x())
+                     .arg(undone.y())
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    if (!canvas.canRedoView()) {
+        *error = QStringLiteral("history should offer redo after undo");
+        return false;
+    }
+    canvas.redoView();
+    const auto redone = canvas.viewCenter();
+    if (std::abs(redone.x() + 96.0) > 1e-9 || std::abs(redone.y() - 36.0) > 1e-9 ||
+        canvas.viewZoom() != 7) {
+        *error = QStringLiteral("redoView should restore center/zoom, got %1,%2 z%3")
+                     .arg(redone.x())
+                     .arg(redone.y())
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    canvas.clearViewHistory();
+    canvas.setView(QPointF(-100.0, 35.0), 5);
+    canvas.pushViewHistory();
+    const int sizeBefore = canvas.viewBackSizeForUi();
+    canvas.pushViewHistory();  // same view: no-op dedupe
+    if (canvas.viewBackSizeForUi() != sizeBefore) {
+        *error = QStringLiteral("pushing the same view should not grow history");
+        return false;
+    }
+    canvas.clearViewHistory();
+    for (int i = 0; i < 60; ++i) {
+        canvas.setView(QPointF(-100.0 + i * 0.1, 35.0 + i * 0.05), 4 + (i % 5));
+        canvas.pushViewHistory();
+    }
+    if (canvas.viewBackSizeForUi() != 50) {
+        *error = QStringLiteral("view history should be bounded to 50, got %1")
+                     .arg(canvas.viewBackSizeForUi());
+        return false;
+    }
+    canvas.clearViewHistory();
+    if (canvas.canUndoView() || canvas.canRedoView()) {
+        *error = QStringLiteral("clearViewHistory should empty both stacks");
+        return false;
+    }
+    return true;
+}
+
+static bool testPinnedLock(QString* error) {
+    const auto warningA =
+        smokeWarning(QStringLiteral("pin-A"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("PIN-LOCK-A"),
+                     smokeSquare(-97.4, 35.2, 0.1));
+    const auto warningB =
+        smokeWarning(QStringLiteral("pin-B"), QStringLiteral("Severe Thunderstorm Warning"),
+                     QStringLiteral("Severe"), QStringLiteral("PIN-LOCK-B"),
+                     smokeSquare(-96.0, 36.0, 0.1));
+    RadarMapCanvas canvas;
+    canvas.resize(800, 600);
+    canvas.setWarningsVisible(true);
+    canvas.setWeatherOverlays({warningA, warningB}, {});
+    canvas.setView(QPointF(-97.4, 35.2), 8);
+    canvas.inspectAt(QPointF(canvas.rect().center()));
+    if (!canvas.probeText().contains(QStringLiteral("PIN-LOCK-A"))) {
+        *error = QStringLiteral("pinned setup should show A, got: %1")
+                     .arg(canvas.probeText().left(120));
+        return false;
+    }
+    canvas.setPinnedOverlayLocked(true);
+    if (!canvas.pinnedOverlayLocked()) {
+        *error = QStringLiteral("setPinnedOverlayLocked(true) should stick");
+        return false;
+    }
+    canvas.setView(QPointF(-96.0, 36.0), 8);
+    canvas.inspectAt(QPointF(canvas.rect().center()));
+    if (!canvas.probeText().contains(QStringLiteral("PIN-LOCK-A")) ||
+        canvas.probeText().contains(QStringLiteral("PIN-LOCK-B"))) {
+        *error = QStringLiteral("locked card should survive new clicks, got: %1")
+                     .arg(canvas.probeText().left(160));
+        return false;
+    }
+    canvas.setPinnedOverlayLocked(false);
+    canvas.inspectAt(QPointF(canvas.rect().center()));
+    if (!canvas.probeText().contains(QStringLiteral("PIN-LOCK-B"))) {
+        *error = QStringLiteral("unlocked click should replace card with B, got: %1")
+                     .arg(canvas.probeText().left(120));
+        return false;
+    }
+    return true;
+}
+
+static bool testProbeClearsOnLeave(QString* error) {
+    // Regression: the 16ms hover debounce used to outlive the cursor, so fast
+    // transits across panels left frozen probe readouts behind on every panel.
+    DecodedRay ray;
+    ray.azimuthDegrees = 90.0F;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = 1;
+    ray.elevationDegrees = 0.5F;
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    ray.fields.at(reflectivityIndex).assign(1000, 86);
+    ray.firstGateByProduct.at(reflectivityIndex) = 0;
+    ray.gateSpacingByProduct.at(reflectivityIndex) = 250;
+    ray.scaleByProduct.at(reflectivityIndex) = 2.0F;
+    ray.offsetByProduct.at(reflectivityIndex) = 66.0F;
+    RadarMapCanvas canvas;
+    canvas.resize(800, 600);
+    canvas.setSites({{"TATL", "Atlanta", "TDWR", 33.6470, -84.2620, 327.7}});
+    canvas.setSelectedRadar(QStringLiteral("TATL"));
+    canvas.setProduct(ProductKind::Reflectivity);
+    canvas.setElevationFilter(1);
+    canvas.setDecodedChunk({"TATL", {ray}, 1}, QDateTime::currentDateTimeUtc());
+    canvas.setView(QPointF(-84.2620, 33.6470), 8);
+    canvas.show();
+    if (!QTest::qWaitForWindowExposed(&canvas, 5000)) {
+        *error = QStringLiteral("probe canvas did not expose offscreen");
+        return false;
+    }
+    const QPointF probePoint =
+        QPointF(canvas.radarScreenPoint(QStringLiteral("TATL"))) + QPointF(20, 0);
+    // Drive the event handlers directly: QTest mouse synthesis does not
+    // reliably produce enter/move offscreen, and the race is in the handlers.
+    const auto sendHover = [&canvas](const QPointF& point) {
+        QEnterEvent enter(point, point, point);
+        QCoreApplication::sendEvent(&canvas, &enter);
+        QMouseEvent move(QEvent::MouseMove, point, point, point, Qt::NoButton,
+                         Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(&canvas, &move);
+    };
+    const auto sendLeave = [&canvas]() {
+        QEvent leave(QEvent::Leave);
+        QCoreApplication::sendEvent(&canvas, &leave);
+    };
+    // Arm the debounced hover, then leave before it can fire.
+    sendHover(probePoint);
+    QCoreApplication::processEvents();
+    sendLeave();
+    QTest::qWait(80);  // well past the 16ms debounce
+    if (!canvas.probeText().isEmpty()) {
+        *error = QStringLiteral("probe must stay empty after leave, got: %1")
+                     .arg(canvas.probeText().left(120));
+        return false;
+    }
+    // And a settled hover must still produce a readout (no over-correction).
+    sendHover(probePoint);
+    QTest::qWait(80);
+    if (canvas.probeText().isEmpty() || !canvas.probeText().contains(QStringLiteral("dBZ"))) {
+        *error = QStringLiteral("settled hover should still probe, got: %1")
+                     .arg(canvas.probeText().left(120));
+        return false;
+    }
+    return true;
+}
+
+static bool testPlaybackSpeeds(MainWindow* window, QString* error) {
+    auto* speeds = window->findChild<QComboBox*>(QStringLiteral("speedCombo"));
+    auto* slider = window->findChild<QSlider*>(QStringLiteral("frameSlider"));
+    if (!speeds || !slider) {
+        *error = QStringLiteral("speedCombo or frameSlider missing");
+        return false;
+    }
+    const QStringList expectedTexts{QStringLiteral("0.5x"), QStringLiteral("1x"), QStringLiteral("2x"),
+                                   QStringLiteral("4x"), QStringLiteral("8x"),
+                                   QStringLiteral("16x")};
+    const QList<int> expectedData{2000, 1000, 500, 250, 125, 62};
+    if (speeds->count() != expectedTexts.size()) {
+        *error = QStringLiteral("speedCombo should list 6 speeds, got %1").arg(speeds->count());
+        return false;
+    }
+    for (int i = 0; i < expectedTexts.size(); ++i) {
+        if (speeds->itemText(i) != expectedTexts.at(i) ||
+            speeds->itemData(i).toInt() != expectedData.at(i)) {
+            *error = QStringLiteral("speedCombo item %1 should be %2/%3, got %4/%5")
+                         .arg(i)
+                         .arg(expectedTexts.at(i))
+                         .arg(expectedData.at(i))
+                         .arg(speeds->itemText(i))
+                         .arg(speeds->itemData(i).toInt());
+            return false;
+        }
+    }
+    // Home/End with an empty timeline must be safe no-ops offscreen.
+    const int before = slider->value();
+    QTest::keyClick(window, Qt::Key_Home);
+    QCoreApplication::processEvents();
+    QTest::keyClick(window, Qt::Key_End);
+    QCoreApplication::processEvents();
+    if (slider->value() != before) {
+        *error = QStringLiteral("Home/End on empty history should not move the frame slider");
+        return false;
+    }
+    const int original = speeds->currentIndex();
+    for (int i = 0; i < speeds->count(); ++i) {
+        speeds->setCurrentIndex(i);
+        QCoreApplication::processEvents();
+        if (speeds->currentData().toInt() != expectedData.at(i)) {
+            *error = QStringLiteral("speedCombo selection should track interval data");
+            speeds->setCurrentIndex(original);
+            return false;
+        }
+    }
+    speeds->setCurrentIndex(original);
+    QCoreApplication::processEvents();
+    return true;
+}
+
+static bool testHealthIndicator(MainWindow* window, QString* error) {
+    auto* dot = window->findChild<QLabel*>(QStringLiteral("healthDot"));
+    auto* label = window->findChild<QLabel*>(QStringLiteral("healthLabel"));
+    if (!dot || !label) {
+        *error = QStringLiteral("healthDot/healthLabel widgets missing");
+        return false;
+    }
+    const QString text = label->text();
+    if (text != QStringLiteral("Unknown") && text != QStringLiteral("Online") &&
+        text != QStringLiteral("Stale") && text != QStringLiteral("Offline")) {
+        *error = QStringLiteral("healthLabel should show a known state, got %1").arg(text);
+        return false;
+    }
+    if (!dot->styleSheet().contains(QStringLiteral("background-color"))) {
+        *error = QStringLiteral("healthDot should carry a colored status stylesheet");
+        return false;
+    }
+    return true;
+}
+
+static bool testContextMenuToolModes(QString* error) {
+    RadarMapCanvas canvas;
+    canvas.resize(800, 600);
+    canvas.setProduct(ProductKind::Reflectivity);
+    canvas.setCrossSectionMode(false);
+    canvas.setMeasureMode(false);
+    canvas.setCrossSectionMode(true);
+    if (!canvas.crossSectionMode()) {
+        *error = QStringLiteral("cross-section should enable on native products");
+        return false;
+    }
+    // Context-menu behavior: enabling Measure clears Cross-section.
+    canvas.setMeasureMode(true);
+    if (canvas.crossSectionMode()) {
+        *error = QStringLiteral("measure mode should clear cross-section mode");
+        return false;
+    }
+    canvas.setMeasureMode(false);
+    canvas.setCrossSectionMode(true);
+    // Derived products (what the context menu disables) reject cross-section.
+    canvas.setProduct(ProductKind::EchoTop);
+    if (canvas.crossSectionMode()) {
+        *error = QStringLiteral("derived product should clear cross-section mode");
+        return false;
+    }
+    canvas.setProduct(ProductKind::Reflectivity);
+    return true;
+}
 
 int main(int argc, char** argv) {
     QApplication application(argc, argv);
@@ -86,7 +1060,7 @@ int main(int argc, char** argv) {
         !belowThresholdCheck ||
         !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
         !model || model->rowCount() < 200 || !panelLayout || panelLayout->count() != 4 ||
-        !controlDock || controlDock->width() < 220 ||
+        !controlDock || controlDock->width() < 300 ||
         radarPanels.size() != 4 || !glmStatusNote) {
         std::cerr << "UI smoke setup failed\n";
         return 1;
@@ -438,7 +1412,8 @@ UnsupportedThing: ignored safely
         std::cerr << "NWS alert parsing failed\n";
         return 1;
     }
-    if (nwsOfficialAlertStyleCount() != 111 ||
+    if (nwsAlertStyle(QStringLiteral("Tornado Warning")).priority != 2 ||
+        nwsAlertStyle(QStringLiteral("This Is Not A Real Alert")).priority != 1000 ||
         nwsAlertStyle(QStringLiteral("winter weather advisory")).priority != 60 ||
         nwsAlertStyle(QStringLiteral("Winter Weather Advisory")).color.name(QColor::HexRgb) !=
             QStringLiteral("#7b68ee") ||
@@ -610,6 +1585,79 @@ UnsupportedThing: ignored safely
         std::cerr << "GLM intelligence inspector incomplete: "
                   << lightningInfo.toStdString() << '\n';
         return 1;
+    }
+
+    // --- Hermetic P1 coverage for shipped-but-untested features (no network) ---
+    {
+        QString failure;
+        if (!testAlertCenterDedupe(&failure)) {
+            std::cerr << "AlertCenter dedupe/suppression failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testAlertCenterSeverity(&failure)) {
+            std::cerr << "AlertCenter minSeverity failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testAlertCenterLightning(&failure)) {
+            std::cerr << "AlertCenter lightning sigma failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testAlertCenterPrimingAndAge(&failure)) {
+            std::cerr << "AlertCenter priming/age gate failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testBasemapTileUrls(&failure)) {
+            std::cerr << "Basemap tile URLs failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testThemeSwitcher(&window, &failure)) {
+            std::cerr << "Theme switcher failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testSidebarRedesign(&window, &failure)) {
+            std::cerr << "Sidebar redesign failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testProximityFilter(&failure)) {
+            std::cerr << "Proximity filter failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testOverlayVisibility(&window, &failure)) {
+            std::cerr << "OverlayVisibility override failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testPresets(&window, &failure)) {
+            std::cerr << "Layout presets failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testViewHistory(&failure)) {
+            std::cerr << "View history failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testPinnedLock(&failure)) {
+            std::cerr << "Pinned lock failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testProbeClearsOnLeave(&failure)) {
+            std::cerr << "Probe leave-clear failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testPlaybackSpeeds(&window, &failure)) {
+            std::cerr << "Playback speeds failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testHealthIndicator(&window, &failure)) {
+            std::cerr << "Health indicator failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testContextMenuToolModes(&failure)) {
+            std::cerr << "Context-menu tool modes failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        // Restore main-map view that preset/speed probes may have touched.
+        map->activated();
+        application.processEvents();
+        std::cout << "P1 hermetic UI checks passed\n";
     }
 
     window.resizeDocks({controlDock}, {386}, Qt::Horizontal);

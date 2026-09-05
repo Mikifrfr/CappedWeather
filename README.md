@@ -104,7 +104,7 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Great-circle range/bearing tools, standard-atmosphere beam height, scan coverage/gap diagnostics, and multi-tilt vertical cross-sections.
 - PNG snapshots, animated GIF timelines, and cross-section CSV export.
 - Cached, color-batched radar geometry built off the UI thread; decoded frames are shared across panels instead of copied.
-- Dock-based console layout with movable control and playback docks, a flat dark theme, and a dark CARTO-rendered OpenStreetMap basemap.
+- Dock-based console layout with movable control and playback docks, a flat dark theme, and a dark Esri World Dark Gray basemap (base + reference labels, no API key).
 - Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
 - Persistent operational settings for panels, products, palettes, overlays, opacity, playback, timeline depth, and window geometry.
 
