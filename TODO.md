@@ -9,6 +9,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 
 - [x] **Lightning-jump engine (GLM L2 + Level II fusion)** — open-source real-time 2σ LJA on GOES GLM, fused with NEXRAD. Spec: `docs/lightning-jump-engine.md`. Code + M5 verification exist; mark complete when netCDF production builds are the default path and TODO status is cleaned up.
 - [x] **P1 first slice — alerts + right-click context menu** — `AlertCenter` sinks `WeatherOverlaySource::overlaysReady` and `GlmSource::cellsUpdated`, plays a sound (custom `.wav` via `QSoundEffect` or system beep fallback) and shows a tray balloon when a new NWS alert or a high-σ lightning jump is observed. Dedupe keyed by NWS `@id` and lightning cell id, with a configurable suppression window. `RadarMapCanvas::contextMenuEvent` exposes select / recenter / national view / zoom in/out / copy lat-lon / inspect / measure / cross-section. Both new behaviors gated by a `Qt6::Multimedia` opt-in (cleanly degrades to tray + beep otherwise).
+- [x] **European OPERA radars as first-class sessions (v0.5.0)** — 179 operational OPERA sites in the picker/model/panels; ODIM_H5 volumes (`DBZH`→Reflectivity, `VRADH`→Velocity) stream over anonymous CloudFerro S3 via `OperaSource` and decode to the shared `DecodedRay` model, so tilts, timeline, Echo Tops/VIL, probing, and export work unmodified. HDF5-gated like netCDF. Ground truth + limits (24 h rolling cache only) in `docs/europe-sources.md`.
 
 ---
 
@@ -31,6 +32,7 @@ Guiding rule: close highest-value live-ops and chase gaps first. Do **not** beco
 - [x] **Minimum-severity alert filter** — `AlertConfig::minSeverity` (default = Severe) drops any warning whose NWS CAP `severity` tag is below the threshold before it reaches the sound + tray pipeline. Mapped from NWS taxonomy: 0=Minor, 1=Moderate, 2=Severe, 3=Extreme; Unknown is conservatively treated as Moderate. Exposed in Settings as a "Minimum severity" combo (Minor / Moderate / Severe (default) / Extreme). Persists under `alerts/minSeverity`. Stops the operator from being paged for Dense Fog Advisories, Air Quality Alerts, Special Weather Statements, etc. that previously fired on every NWS event.
 - [x] **Multi pin cards** — `P` toggles a pin lock (`RadarMapCanvas::setPinnedOverlayLocked`); while locked, the active card survives any new overlay clicks. A small lock glyph is drawn in the card header so the user can see the state. The lock clears when the card is closed. Single-card replace remains the default for un-locked cards.
 - [x] **Single-card replace is OK as default** — same TODO entry as "Multi pin cards"; the existing single-card replace behavior is preserved when the lock is off, and the lock is the user-opt-in escape hatch for keeping a card.
+- [ ] **Meteoalarm warnings for Europe** — EUMETNET Meteoalarm CAP feeds mapped onto the existing `WeatherWarning` pipeline (`WeatherOverlaySource` + `AlertCenter` + proximity/severity/age filters). No new alert machinery; the work is feed parsing (awareness levels → severity scale), polygon/area handling, and a second overlay refresh alongside NWS/SPC.
 
 ### Map & tool UX
 - [x] **Right-click map context menu** — `RadarMapCanvas::contextMenuEvent` exposes: Select radar (when over a station), Recenter on selected, National view, Zoom in/out, Copy lat/lon (formatted to 4 dp; clipboard copy to 6 dp), Inspect at cursor, and checkable Measure / Cross-section entries. The two tool toggles emit `measureModeToggled` / `crossSectionModeToggled` so the toolbar buttons stay in sync.
@@ -79,6 +81,7 @@ Prefer a **small set of high-signal products**, not a full user-defined-product 
 - [ ] **Smoothing / gate display options** — optional display smoothing; below-threshold already exists — keep gates honest by default.
 - [ ] **Scan diagnostics panel** — promote `analyzeScan()` coverage/gap/range into a readable dock readout.
 - [ ] **NEXRAD algorithm markers (optional later)** — TVS/meso/hail only if quality bar is real; do not fake confidence.
+- [ ] **OPERA dual-pol unlock (gated on 2027 data)** — OPERA plans CC/ZDR/PHI/KDP moments from 2027 onwards. Work is decoder mapping in `readOdimPvol` (new quantities → existing products) plus fixture + availability tests; the per-panel auto-disable path already handles their absence. Do NOT fake dual-pol from single-pol moments before then.
 
 ---
 
