@@ -244,9 +244,9 @@ std::uint16_t packGate(const double value, const bool belowThreshold, const floa
     return static_cast<std::uint16_t>(encoded);
 }
 
-}  // namespace
-
 #endif  // CAPPEDWEATHER_HAS_HDF5
+
+}  // namespace
 
 bool odimReaderAvailable() {
 #ifdef CAPPEDWEATHER_HAS_HDF5
