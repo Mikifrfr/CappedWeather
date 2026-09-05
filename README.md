@@ -84,12 +84,13 @@ cmake -S . -B build
 
 - Real-time Level II chunks: `https://unidata-nexrad-level2-chunks.s3.amazonaws.com/`
 - Historical Archive-II volumes: `https://unidata-nexrad-level2.s3.amazonaws.com/`
+- European OPERA volumes (anonymous): `https://s3.waw3-1.cloudferro.com/openradar-24h` (CC BY 4.0 EUMETNET; see `docs/europe-sources.md`)
 - Live official station catalog: `https://api.weather.gov/radar/stations`
 - Active warning GeoJSON and zone geometry: `https://api.weather.gov/alerts/active`
 - Preliminary storm reports: `https://www.spc.noaa.gov/climo/reports/`
 - Official NEXRAD data documentation: <https://www.ncei.noaa.gov/products/radar/next-generation-weather-radar>
 
-The application uses public HTTPS listing and download requests, with no cloud SDK. The official NWS station catalog is filtered to `WSR-88D` and `TDWR` stations; the embedded fallback contains the same real station classes and no generated stations.
+The application uses public HTTPS listing and download requests, with no cloud SDK. The official NWS station catalog is filtered to `WSR-88D` and `TDWR` stations; the embedded fallback contains the same real station classes and no generated stations. European OPERA sites (179 operational radars) come from EUMETNET's station list and stream ODIM_H5 volumes over anonymous S3.
 
 The viewer exposes the decoded native moment fields and elevation tilts present in the received volume, then derives Echo Tops and VIL only from assembled real reflectivity volumes. It does not render an echo until real Level II data has been downloaded and decoded.
 
@@ -101,6 +102,7 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Importable, persistent custom palettes using `native_value,#RRGGBB` lines, plus Capped and color-safe presets.
 - TDWR volumes expose their available base moments (reflectivity, radial velocity, and spectrum width); unavailable dual-polarization products are disabled automatically.
 - Searchable radar selection with persistent favorites, recent sites, optional manual-position chase mode, zoom-aware station decluttering, station details, and national/recenter controls.
+- 179 operational EUMETNET OPERA radars (ODIM volumes over anonymous S3, CC BY 4.0) alongside NEXRAD: same panels, tilts, products, timeline, and export. Dual-pol products unlock automatically once OPERA serves them.
 - Cursor sampling for value, range, azimuth, and elevation tilt, including below-threshold and range-folded gates.
 - Up to eight recent NOAA volumes per radar session in memory, with explicit live-follow mode, timestamped frame stepping, looping playback, 1x/2x/4x speeds, and repeated supplemental tilts retained separately.
 - Scoped Archive-II case-study loading from local files/folders or a selected radar/time window in the public AWS archive. Bzip records decode off the UI thread and join the normal timeline/product pipeline.

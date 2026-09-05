@@ -7,6 +7,7 @@
 #include "app/placefile_source.hpp"
 #include "app/archive_level2.hpp"
 #include "app/archive_source.hpp"
+#include "app/opera_source.hpp"
 #include "app/shortcut_help_dialog.hpp"
 #include "core/product.hpp"
 
@@ -568,6 +569,43 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
     auto* velocityBox = window->findChild<QWidget*>(QStringLiteral("velocityBox"));
     if (!velocityBox || velocityBox->isVisibleTo(window)) {
         *error = QStringLiteral("velocity box should hide while product is Reflectivity");
+        return false;
+    }
+    return true;
+}
+
+static bool testOperaKeys(QString* error) {
+    const auto prefix = OperaSource::pvolPrefix(QStringLiteral("NO"), QStringLiteral("nohur"),
+                                                QDate(2026, 9, 5));
+    if (prefix != QStringLiteral("2026/09/05/NO/nohur/PVOL/")) {
+        *error = QStringLiteral("OPERA prefix mismatch: %1").arg(prefix);
+        return false;
+    }
+    const auto stamp = OperaSource::timestampFromKey(
+        QStringLiteral("2026/09/05/NO/nohur/PVOL/nohur@20260905T0005@0.5_1.0@DBZH.h5"));
+    if (!stamp.isValid() || stamp.date() != QDate(2026, 9, 5) || stamp.time() != QTime(0, 5) ||
+        stamp.timeSpec() != Qt::UTC || stamp.offsetFromUtc() != 0) {
+        *error = QStringLiteral("OPERA timestamp parse failed");
+        return false;
+    }
+    if (OperaSource::timestampFromKey(QStringLiteral("nohur@bogus@DBZH.h5")).isValid() ||
+        OperaSource::timestampFromKey({}).isValid()) {
+        *error = QStringLiteral("OPERA timestamp parse should reject garbage");
+        return false;
+    }
+    if (!OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/05/NO/nohur/PVOL/nohur@20260905T0005@0.5@DBZH.h5"),
+            QStringLiteral("nohur"))) {
+        *error = QStringLiteral("OPERA DBZH key not recognized");
+        return false;
+    }
+    if (OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/05/NO/nohur/PVOL/nohur@20260905T0006@2.6@VRADH.h5"),
+            QStringLiteral("nohur")) ||
+        OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/05/DE/deess/PVOL/deess@20260905T0005@0.5@DBZH.h5"),
+            QStringLiteral("nohur"))) {
+        *error = QStringLiteral("OPERA key filter should drop VRADH and foreign sites");
         return false;
     }
     return true;
@@ -1635,6 +1673,10 @@ UnsupportedThing: ignored safely
         }
         if (!testBasemapTileUrls(&failure)) {
             std::cerr << "Basemap tile URLs failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testOperaKeys(&failure)) {
+            std::cerr << "OPERA key helpers failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testThemeSwitcher(&window, &failure)) {

@@ -29,15 +29,28 @@ option(CAPPEDWEATHER_REQUIRE_NETCDF
     "Fail configuration instead of building the stubbed GLM reader when netCDF-C is unavailable"
     ${_cw_require_netcdf_default})
 
+# Same fail-fast philosophy for European ODIM volumes: production builds
+# need HDF5-C, dev/CI opt out with -DCAPPEDWEATHER_REQUIRE_HDF5=OFF.
+if(DEFINED ENV{CAPPEDWEATHER_REQUIRE_HDF5} AND NOT DEFINED CAPPEDWEATHER_REQUIRE_HDF5)
+    set(_cw_require_hdf5_default "$ENV{CAPPEDWEATHER_REQUIRE_HDF5}")
+else()
+    set(_cw_require_hdf5_default "ON")
+endif()
+option(CAPPEDWEATHER_REQUIRE_HDF5
+    "Fail configuration instead of building the stubbed ODIM reader when HDF5 is unavailable"
+    ${_cw_require_hdf5_default})
+
 include(CTest)
 
 add_library(cappedweather_core STATIC
     src/core/derived_products.cpp
     src/core/level2_primitives.cpp
     src/core/level2_decoder.cpp
+    src/core/odim_reader.cpp
     src/core/product.cpp
     src/core/radar_geometry.cpp
     src/core/radar_catalog.cpp
+    src/core/opera_catalog.cpp
     src/core/scan_diagnostics.cpp
     src/core/velocity_processing.cpp
     src/core/lightning_jump.cpp
@@ -76,6 +89,30 @@ elseif(CAPPEDWEATHER_REQUIRE_NETCDF)
         "Set netCDF_DIR to the directory containing netCDFConfig.cmake.")
 else()
     message(STATUS "netCDF not found: GLM L2 reader stubbed (key helpers still available)")
+endif()
+
+# HDF5-C for the OPERA ODIM_H5 polar volume reader (vcpkg: hdf5).
+# Without it the reader stubs out; the S3 key helpers below are plain
+# string code and always build.
+find_package(HDF5 QUIET COMPONENTS C)
+set(CAPPEDWEATHER_HDF5_TARGET "")
+if(TARGET hdf5::hdf5-shared)
+    set(CAPPEDWEATHER_HDF5_TARGET hdf5::hdf5-shared)
+elseif(TARGET hdf5::hdf5-static)
+    set(CAPPEDWEATHER_HDF5_TARGET hdf5::hdf5-static)
+elseif(HDF5_FOUND)
+    set(CAPPEDWEATHER_HDF5_TARGET ${HDF5_C_LIBRARIES})
+endif()
+if(CAPPEDWEATHER_HDF5_TARGET)
+    target_link_libraries(cappedweather_core PUBLIC ${CAPPEDWEATHER_HDF5_TARGET})
+    target_compile_definitions(cappedweather_core PRIVATE CAPPEDWEATHER_HAS_HDF5=1)
+    message(STATUS "HDF5 found: ODIM reader enabled")
+elseif(CAPPEDWEATHER_REQUIRE_HDF5)
+    message(FATAL_ERROR
+        "HDF5 is required for this build, but CMake could not find it. "
+        "Install it (vcpkg: hdf5) or configure with -DCAPPEDWEATHER_REQUIRE_HDF5=OFF.")
+else()
+    message(STATUS "HDF5 not found: ODIM reader stubbed")
 endif()
 
 if(BUILD_TESTING)
@@ -125,6 +162,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/main_window.hpp
             src/app/nexrad_source.cpp
             src/app/nexrad_source.hpp
+            src/app/opera_source.cpp
+            src/app/opera_source.hpp
             src/app/placefile.cpp
             src/app/placefile.hpp
             src/app/placefile_source.cpp
@@ -189,6 +228,11 @@ if(CAPPEDWEATHER_BUILD_APP)
             tests/live_glm_probe.cpp
         )
         target_link_libraries(cappedweather_live_glm_probe PRIVATE cappedweather_ui)
+
+        qt_add_executable(cappedweather_live_opera_probe
+            tests/live_opera_probe.cpp
+        )
+        target_link_libraries(cappedweather_live_opera_probe PRIVATE cappedweather_ui)
 
         find_package(Qt6 6.4 COMPONENTS Test QUIET)
         if(TARGET Qt6::Test)

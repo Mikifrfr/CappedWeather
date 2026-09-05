@@ -919,6 +919,12 @@ void RadarMapCanvas::setActiveBorderColor(const QColor& color) {
     if (activePanel_) update();
 }
 
+void RadarMapCanvas::setSupplementalAttribution(const QString& text) {
+    if (supplementalAttribution_ == text) return;
+    supplementalAttribution_ = text;
+    update();
+}
+
 QPointF RadarMapCanvas::viewCenter() const {
     return center_;
 }
@@ -2499,7 +2505,15 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     painter.drawRoundedRect(QRectF(width() - 250, height() - 25, 238, 18), 3, 3);
     painter.setPen(QColor(146, 152, 160));
     painter.drawText(QRectF(width() - 242, height() - 22, 222, 13), Qt::AlignRight,
-                      QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin"));
+                     QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin"));
+    if (!supplementalAttribution_.isEmpty()) {
+        painter.setPen(QColor(43, 45, 51));
+        painter.setBrush(QColor(26, 27, 30, 225));
+        painter.drawRoundedRect(QRectF(width() - 250, height() - 46, 238, 18), 3, 3);
+        painter.setPen(QColor(146, 152, 160));
+        painter.drawText(QRectF(width() - 242, height() - 43, 222, 13), Qt::AlignRight,
+                         supplementalAttribution_);
+    }
     paintLegend(painter);
     paintProbe(painter);
     paintMeasurement(painter);

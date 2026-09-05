@@ -52,6 +52,7 @@ per panel. See `docs/derived-products.md` for quality limits.
 
 ### 1.4 Radar Catalog
 - `RadarCatalog` (`core/radar_catalog.hpp`): embedded fallback list of real WSR-88D and TDWR sites via `defaultSites()`.
+- `RadarCatalog::operaSites()` (`core/opera_catalog.cpp`, generated from EUMETNET's station CSV): 179 operational European radars with ODIM codes. Served to the same picker/model/panels; volumes arrive as ODIM_H5 via `OperaSource` over anonymous S3 and decode to the shared `DecodedRay` model (`DBZH`→Reflectivity, `VRADH`→Velocity). Requires HDF5 at build time (`CAPPEDWEATHER_REQUIRE_HDF5`, same fail-fast pattern as netCDF).
 - `NexradSource` fetches live catalog from `api.weather.gov/radar/stations`, filtering to `WSR-88D` and `TDWR` only (lines 1002–1004 in `main_window.cpp`).
 - `RadarListModel` (`app/radar_list_model.hpp`): Qt list model with roles for id, name, owner, status, age.
 

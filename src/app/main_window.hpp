@@ -39,6 +39,7 @@ class QToolButton;
 namespace cappedweather {
 
 class NexradSource;
+class OperaSource;
 class GlmSource;
 class RadarMapCanvas;
 class RadarListModel;
@@ -124,6 +125,14 @@ private:
     void pushAlertDockToCenter();
     void refreshAlertDockFromCenter();
     void pushProximityFilterToCanvases();
+    // OPERA (European ODIM) radars flow through OperaSource instead of the
+    // NEXRAD chunk pipeline; the volume signals are identical downstream.
+    bool isOperaRadar(const QString& radarId) const;
+    void requestLatestFor(const QString& radarId);
+    void requestRecentFor(const QString& radarId, int volumeCount);
+    void cancelFor(const QString& radarId);
+    void clearDownloadedFor(const QString& radarId);
+    void updatePanelAttribution();
     void setRadarHealth(RadarHealthState state, const QString& tooltip = {});
     void recomputeRadarHealth();
     RadarHealthState classifyHealth() const;
@@ -265,6 +274,7 @@ private:
     RadarHealthState radarHealthState_ = RadarHealthState::Unknown;
     QDateTime lastVolumeTime_;
     NexradSource* source_ = nullptr;
+    OperaSource* operaSource_ = nullptr;
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;

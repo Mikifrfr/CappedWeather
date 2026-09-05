@@ -12,7 +12,8 @@ namespace cappedweather {
 // Callers pass their distinctive suffix to keep historically equivalent strings:
 //   "" not used directly; most clients use " operational radar viewer",
 //   GLM uses " GLM live client", archive uses " NOAA public Level-II archive client",
-//   placefiles use " GR placefile client", chase detection uses " (chase-position detection)".
+//   placefiles use " GR placefile client", chase detection uses " (chase-position detection)",
+//   OPERA uses " OPERA ODIM client".
 QString userAgent(const QString& suffix = QStringLiteral(" operational radar viewer"));
 int networkTimeoutMs();
 QNetworkRequest makeRequest(const QUrl& url, const QString& accept = {},

@@ -117,6 +117,9 @@ public:
     void setActivePanel(bool active);
     // Accent color of the active-panel border. Driven by MainWindow::applyTheme.
     void setActiveBorderColor(const QColor& color);
+    // Extra attribution line (e.g. OPERA CC BY 4.0) painted above the
+    // basemap credit when a non-default data source feeds this panel.
+    void setSupplementalAttribution(const QString& text);
     QPointF viewCenter() const;
     int viewZoom() const;
     QPoint radarScreenPoint(const QString& radarId) const;
@@ -341,6 +344,7 @@ private:
     bool crossSectionMode_ = false;
     bool activePanel_ = false;
     QColor activeBorderColor_ = QColor(128, 211, 255);
+    QString supplementalAttribution_;
     VelocityProcessingOptions velocityOptions_;
     std::shared_ptr<const ProcessedVelocity> processedVelocity_;
     quint64 velocityGeneration_ = 0;

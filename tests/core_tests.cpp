@@ -8,6 +8,7 @@
 #include "core/lightning_jump.hpp"
 #include "core/flash_rate_grid.hpp"
 #include "core/glm_l2_reader.hpp"
+#include "core/odim_reader.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "core/derived_products.hpp"
 
@@ -168,6 +169,34 @@ void testCatalog() {
     assert(!RadarCatalog::isValidRadarId("TLX"));
     assert(!RadarCatalog::isValidRadarId("K1LX"));
     assert(!RadarCatalog::isValidRadarId("ktlx"));
+    // OPERA 5-letter codes ride alongside NEXRAD ids. 4-letter codes with
+    // digits (ISX1) are real OPERA sites too, but this guard stays NEXRAD
+    // strict on purpose: all of its callers are NEXRAD/archive paths, and
+    // OPERA sites are validated by catalog membership (isOperaRadar).
+    assert(RadarCatalog::isValidRadarId("NOHUR"));
+    assert(!RadarCatalog::isValidRadarId("ISX1"));
+    assert(!RadarCatalog::isValidRadarId("nohur"));
+    assert(!RadarCatalog::isValidRadarId("NOHUR1"));
+}
+
+void testOperaCatalog() {
+    const auto sites = RadarCatalog::operaSites();
+    assert(sites.size() >= 150);
+    const auto hurum =
+        std::find_if(sites.begin(), sites.end(),
+                     [](const RadarSite& site) { return site.id == "NOHUR"; });
+    assert(hurum != sites.end());
+    assert(hurum->dataSource == "opera");
+    assert(hurum->odimCode == "nohur");
+    assert(hurum->countryCode == "NO");
+    assert(hurum->latitude.has_value() && hurum->longitude.has_value());
+    for (const auto& site : sites) {
+        assert(site.dataSource == "opera");
+        assert(!site.odimCode.empty() && !site.countryCode.empty());
+        assert(RadarCatalog::isValidRadarId(site.id));
+    }
+    // Default US sites are untouched by the new fields.
+    assert(RadarCatalog::defaultSites().front().dataSource == "nexrad");
 }
 
 void testBinaryPrimitives() {
@@ -563,6 +592,94 @@ void testGlmReaderBuildContract() {
 #endif
 }
 
+std::vector<std::byte> readFixtureBytes(const char* name) {
+    // Committed fixtures live in tests/fixtures; ctest runs from the build
+    // directory, developers sometimes from the source root.
+    const char* candidates[] = {
+        "tests/fixtures/odim_nohur_dbzh.h5",
+        "../tests/fixtures/odim_nohur_dbzh.h5",
+        "../../tests/fixtures/odim_nohur_dbzh.h5",
+    };
+    (void)name;
+    for (const char* path : candidates) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) continue;
+        const std::string raw((std::istreambuf_iterator<char>(file)),
+                              std::istreambuf_iterator<char>());
+        std::vector<std::byte> data;
+        data.reserve(raw.size());
+        for (const char c : raw) data.push_back(static_cast<std::byte>(c));
+        return data;
+    }
+    return {};
+}
+
+void testOdimReader() {
+    if (!odimReaderAvailable()) {
+        // Stubbed build: everything fails closed with a message.
+        std::string error;
+        assert(!readOdimPvol({}, "nohur", &error).has_value());
+        assert(!error.empty());
+        return;
+    }
+    const auto bytes = readFixtureBytes("odim_nohur_dbzh.h5");
+    if (bytes.empty()) {
+        std::cout << "note: odim fixture missing, skipping decode asserts\n";
+        return;
+    }
+    // Real OPERA volume: nohur 2026-09-05, DBZH over 10 elevations
+    // (0.5..90 deg), CC BY 4.0 EUMETNET OPERA.
+    std::string error;
+    const auto chunk = readOdimPvol(bytes, "nohur", &error);
+    assert(chunk.has_value());
+    assert(chunk->radarId == "nohur");
+    // 720 rays on the lowest sweep, 360 on each of the other nine.
+    assert(chunk->rays.size() == 720 + 9 * 360);
+    std::vector<int> elevationNumbers;
+    for (const auto& ray : chunk->rays) elevationNumbers.push_back(ray.elevationNumber);
+    std::sort(elevationNumbers.begin(), elevationNumbers.end());
+    elevationNumbers.erase(std::unique(elevationNumbers.begin(), elevationNumbers.end()),
+                           elevationNumbers.end());
+    assert(elevationNumbers.size() == 10);
+    for (std::size_t i = 0; i < elevationNumbers.size(); ++i) {
+        assert(elevationNumbers[i] == static_cast<int>(i + 1));
+    }
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto velocityIndex = static_cast<std::size_t>(ProductKind::Velocity);
+    bool sawValid = false;
+    bool sawBelowThreshold = false;
+    double minValid = 1e9;
+    double maxValid = -1e9;
+    for (const auto& ray : chunk->rays) {
+        assert(ray.azimuthDegrees >= 0.0F && ray.azimuthDegrees < 360.0F);
+        assert(ray.has(ProductKind::Reflectivity));
+        assert(!ray.has(ProductKind::Velocity));  // DBZH-only fixture
+        for (const auto encoded : ray.fields[reflectivityIndex]) {
+            if (encoded <= 1) {
+                sawBelowThreshold = true;
+                continue;
+            }
+            const auto value = nativeValue(encoded, ray.scaleByProduct[reflectivityIndex],
+                                           ray.offsetByProduct[reflectivityIndex]);
+            assert(value.has_value());
+            sawValid = true;
+            minValid = std::min(minValid, *value);
+            maxValid = std::max(maxValid, *value);
+        }
+    }
+    assert(sawValid && sawBelowThreshold);
+    assert(minValid >= -32.5 && maxValid <= 60.0);
+    assert(maxValid > 20.0);  // real echoes, not just noise floor
+    // Malformed inputs fail closed, never partially.
+    assert(!readOdimPvol({}, "nohur", &error).has_value());
+    const std::vector<std::byte> garbage = {std::byte{'n'}, std::byte{'o'},
+                                            std::byte{'t'}, std::byte{' '},
+                                            std::byte{'h'}, std::byte{'d'},
+                                            std::byte{'f'}, std::byte{'5'}};
+    assert(!readOdimPvol(garbage, "nohur", &error).has_value());
+    assert(!readOdimPvol(std::span(bytes).first(100), "nohur", &error).has_value());
+}
+
 int main() {
     testProducts();
     testDerivedProducts();
@@ -570,6 +687,7 @@ int main() {
     testDerivedProductsRequireVolumeDepth();
     testDerivedProductsSupportNegativeFirstGate();
     testCatalog();
+    testOperaCatalog();
     testBinaryPrimitives();
     testNativeEncodings();
     testRadarGeometry();
@@ -585,6 +703,7 @@ int main() {
     testFlashRateGridUsesConfiguredDetectorAndPrunes();
     testGlmL2Keys();
     testGlmReaderBuildContract();
+    testOdimReader();
     testRadarLightningFusion();
     std::cout << "core tests passed\n";
 }

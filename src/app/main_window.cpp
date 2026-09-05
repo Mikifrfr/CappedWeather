@@ -1,6 +1,7 @@
 #include "app/main_window.hpp"
 
 #include "app/nexrad_source.hpp"
+#include "app/opera_source.hpp"
 #include "app/glm_source.hpp"
 #include "app/http_client.hpp"
 #include "app/radar_map_canvas.hpp"
@@ -191,6 +192,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
       model_(new RadarListModel(this)),
       source_(new NexradSource(this)),
+      operaSource_(new OperaSource(this)),
       glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
       placefileSource_(new PlacefileSource(this)),
@@ -377,6 +379,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(source_, &NexradSource::volumeProgress, this, &MainWindow::volumeProgress);
     connect(source_, &NexradSource::chunkDecoded, this, &MainWindow::chunkDecoded);
     connect(source_, &NexradSource::volumeReady, this, &MainWindow::volumeReady);
+    connect(operaSource_, &OperaSource::statusChanged, this, &MainWindow::sourceStatusChanged);
+    connect(operaSource_, &OperaSource::requestFailed, this, &MainWindow::sourceFailed);
+    connect(operaSource_, &OperaSource::volumeStarted, this, &MainWindow::volumeStarted);
+    connect(operaSource_, &OperaSource::volumeProgress, this, &MainWindow::volumeProgress);
+    connect(operaSource_, &OperaSource::chunkDecoded, this, &MainWindow::chunkDecoded);
+    connect(operaSource_, &OperaSource::volumeReady, this, &MainWindow::volumeReady);
     connect(archiveSource_, &ArchiveSource::statusChanged, this, &MainWindow::sourceStatusChanged);
     connect(archiveSource_, &ArchiveSource::requestFailed, this,
             [this](const QString& radarId, const QString& message) {
@@ -422,14 +430,14 @@ MainWindow::MainWindow(QWidget* parent)
         session->requestActive = true;
         if (session->historyRequested) {
             session->historyLoadStarted = true;
-            source_->requestRecent(selectedRadarId_, historyVolumeCount_);
+            requestRecentFor(selectedRadarId_, historyVolumeCount_);
         } else {
-            source_->requestLatest(selectedRadarId_);
+            requestLatestFor(selectedRadarId_);
         }
     });
     connect(cancelButton_, &QToolButton::clicked, this, [this] {
         const auto session = activeSession();
-        source_->cancel(selectedRadarId_);
+        cancelFor(selectedRadarId_);
         archiveSource_->cancel();
         if (session) {
             session->requestActive = false;
@@ -1528,6 +1536,7 @@ void MainWindow::radarSelected(const QModelIndex& index) {
         panel->setLoading(session->history.empty(), QStringLiteral("Loading %1 radar data").arg(radarId));
         panel->setVolumeQuality(0, 0, 0);
     }
+    updatePanelAttribution();
     const auto contextRow = model_->rowForRadar(radarId);
     if (contextRow >= 0) {
         const auto& site = model_->siteAt(contextRow);
@@ -1550,9 +1559,9 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     radarStatus_ = QStringLiteral("%1 loading latest complete volume").arg(radarId);
     updateStationSummary();
     updateUnifiedStatus();
-    if (!existed) source_->clearDownloaded(radarId);
+    if (!existed) clearDownloadedFor(radarId);
     session->requestActive = true;
-    source_->requestLatest(radarId);
+    requestLatestFor(radarId);
     if (!session->history.empty()) {
         session->frameIndex = static_cast<int>(session->history.size()) - 1;
         showFrame(session->frameIndex);
@@ -1562,7 +1571,7 @@ void MainWindow::radarSelected(const QModelIndex& index) {
 void MainWindow::requestSelectedRadar() {
     if (selectedRadarId_.isEmpty()) return;
     if (const auto session = sessionFor(selectedRadarId_)) session->requestActive = true;
-    source_->requestLatest(selectedRadarId_);
+    requestLatestFor(selectedRadarId_);
 }
 
 void MainWindow::sourceStatusChanged(const QString& radarId, const QString& status) {
@@ -1649,6 +1658,8 @@ void MainWindow::catalogReceived(const QByteArray& data) {
         return;
     }
 
+    // The NWS feed carries no European sites; keep the OPERA catalog.
+    for (const auto& site : RadarCatalog::operaSites()) sites.push_back(site);
     model_->replaceSites(std::move(sites));
     for (auto* panel : maps_) panel->setSites(model_->sites());
     rebuildStationPicker();
@@ -1844,7 +1855,7 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
                 radarStatus_ = QStringLiteral("%1 loading timeline history").arg(radarId);
                 updateUnifiedStatus();
             }
-            source_->requestRecent(radarId, historyVolumeCount_);
+            requestRecentFor(radarId, historyVolumeCount_);
         });
     }
     if (radarId == selectedRadarId() && session->playWhenHistoryReady && session->history.size() >= 2) {
@@ -1887,7 +1898,7 @@ void MainWindow::ensureHistoryLoaded(const bool playWhenReady) {
     if (session->requestActive || session->historyLoadStarted || selectedRadarId_.isEmpty()) return;
     session->historyLoadStarted = true;
     session->requestActive = true;
-    source_->requestRecent(selectedRadarId_, historyVolumeCount_);
+    requestRecentFor(selectedRadarId_, historyVolumeCount_);
 }
 
 void MainWindow::rebuildTiltCombo() {
@@ -2024,6 +2035,7 @@ void MainWindow::showFrame(const int index) {
     }
     updatePlaybackControls();
     refreshLayerBadges();
+    updatePanelAttribution();
 }
 
 void MainWindow::updateProductAvailability() {
@@ -2991,7 +3003,7 @@ void MainWindow::clearPlacefiles() {
 void MainWindow::prepareArchiveCase(const int requestedFrames) {
     stopAnimation();
     liveButton_->setChecked(false);
-    source_->cancel(selectedRadarId_);
+    cancelFor(selectedRadarId_);
     archiveSource_->cancel();
     maximumHistoryFrames_ = std::max(maximumHistoryFrames_, std::clamp(requestedFrames, 2, 24));
     if (const auto session = activeSession()) {
@@ -3138,8 +3150,43 @@ void MainWindow::recomputeRadarHealth() {
     setRadarHealth(classifyHealth());
 }
 
-void MainWindow::pushProximityFilterToCanvases() {
-    if (!proximityFilterCheck_ || !proximityFilterRadius_) return;
+bool MainWindow::isOperaRadar(const QString& radarId) const {
+    if (!model_ || radarId.isEmpty()) return false;
+    const auto row = model_->rowForRadar(radarId);
+    if (row < 0) return false;
+    return model_->siteAt(row).dataSource == "opera";
+}
+
+void MainWindow::requestLatestFor(const QString& radarId) {
+    if (isOperaRadar(radarId)) operaSource_->requestLatest(radarId);
+    else source_->requestLatest(radarId);
+}
+
+void MainWindow::requestRecentFor(const QString& radarId, const int volumeCount) {
+    if (isOperaRadar(radarId)) operaSource_->requestRecent(radarId, volumeCount);
+    else source_->requestRecent(radarId, volumeCount);
+}
+
+void MainWindow::cancelFor(const QString& radarId) {
+    if (isOperaRadar(radarId)) operaSource_->cancel(radarId);
+    else source_->cancel(radarId);
+}
+
+void MainWindow::clearDownloadedFor(const QString& radarId) {
+    if (isOperaRadar(radarId)) operaSource_->clearDownloaded(radarId);
+    else source_->clearDownloaded(radarId);
+}
+
+void MainWindow::updatePanelAttribution() {
+    static const QString operaCredit =
+        QStringLiteral("OPERA data CC BY 4.0 EUMETNET");
+    for (auto* panel : maps_) {
+        panel->setSupplementalAttribution(isOperaRadar(panel->radarId()) ? operaCredit
+                                                                         : QString{});
+    }
+}
+
+void MainWindow::pushProximityFilterToCanvases() {    if (!proximityFilterCheck_ || !proximityFilterRadius_) return;
     std::optional<QPointF> anchor;
     if (proximityFilterCheck_->isChecked()) {
         if (chaseMode_) {

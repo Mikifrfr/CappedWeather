@@ -14,6 +14,11 @@ RadarListModel::RadarListModel(QObject* parent)
         sites_.push_back(site);
         status_.insert(QString::fromStdString(site.id), {});
     }
+    // European OPERA sites ride the same model, picker, and panels.
+    for (const auto& site : RadarCatalog::operaSites()) {
+        sites_.push_back(site);
+        status_.insert(QString::fromStdString(site.id), {});
+    }
 }
 
 int RadarListModel::rowCount(const QModelIndex& parent) const {

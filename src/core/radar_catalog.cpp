@@ -268,11 +268,17 @@ TTUL|Tulsa|TDWR|823|36.0710|-95.8270
 }
 
 bool RadarCatalog::isValidRadarId(const std::string& id) {
-    if (id.size() != 4) {
+    // NEXRAD 4-letter guard (all callers are NEXRAD/archive paths), plus
+    // 5-letter OPERA codes (uppercased ODIM codes such as NOHUR).
+    // 4-letter codes with digits (Iceland's ISX1/ISX2) are real OPERA sites
+    // but stay invalid here; OPERA membership is checked against the
+    // catalog instead.
+    if (id.size() != 4 && id.size() != 5) {
         return false;
     }
-    return std::all_of(id.begin(), id.end(), [](const unsigned char ch) {
-        return std::isupper(ch) != 0;
+    const bool opera = id.size() == 5;
+    return std::all_of(id.begin(), id.end(), [opera](const unsigned char ch) {
+        return std::isupper(ch) != 0 || (opera && std::isdigit(ch) != 0);
     });
 }
 

@@ -33,6 +33,7 @@ jobs:
           cmake -S . -B build -A x64
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DCAPPEDWEATHER_REQUIRE_NETCDF=OFF
+          -DCAPPEDWEATHER_REQUIRE_HDF5=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -72,6 +73,7 @@ jobs:
           cmake -S . -B build
           -DCMAKE_PREFIX_PATH="$(qmake -query QT_INSTALL_PREFIX)"
           -DCAPPEDWEATHER_REQUIRE_NETCDF=OFF
+          -DCAPPEDWEATHER_REQUIRE_HDF5=OFF
           -DCAPPEDWEATHER_DEPLOY_QT=OFF
           -DCMAKE_BUILD_TYPE=Release
 
