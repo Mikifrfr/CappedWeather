@@ -84,12 +84,14 @@ straight at ODIM polar volumes.
 - OPERA NIMBUS composites as a map layer (user: skip the detour).
 - KNMI/SMHI/FMI national APIs (per-service keys, redundant once OPERA
   volumes flow; revisit only for sites OPERA lacks).
-- Meteoalarm warnings: live since v0.5.x — per-country legacy Atom feeds
-  (`feeds.meteoalarm.org`) parsed into the existing `WeatherWarning` pipeline
-  (`WeatherOverlaySource` + `AlertCenter` + severity/age filters). CAP entries
-  carry EMMA/NUTS geocodes but no polygons, so European warnings notify and
-  list but do not draw map polygons yet; resolving geocodes to geometry is
-  the remaining follow-up, not a new alert path.
+- Meteoalarm warnings: live with full map geometry — per-country hazard
+  feeds from the visualization service (`visservice.meteoalarm.org`, same
+  backend as meteoalarm.org) joined to the official warning-area polygons
+  from its vector tiles by area UUID, with per-area warning texts
+  (`WeatherOverlaySource` + map polygons + `AlertCenter` + severity/age/
+  proximity filters). Awareness levels 1/2/3 map to Extreme/Severe/Moderate
+  in official red/orange/yellow. Details and tile geometry cache per refresh
+  round with bounded per-round requests (most-severe-first).
 - OPERA BUFR volumes: HDF5 covers everything recent; do not write a
   BUFR decoder.
 

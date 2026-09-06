@@ -9,7 +9,11 @@
 #include <QTimer>
 #include <QTimeZone>
 #include <QUrl>
-#include <QXmlStreamReader>
+#include <QUrlQuery>
+
+#ifdef CAPPEDWEATHER_HAS_ZLIB
+#include <zlib.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -26,19 +30,42 @@ constexpr auto kYesterdayTornadoReportsUrl = "https://www.spc.noaa.gov/climo/rep
 constexpr auto kYesterdayHailReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_hail.csv";
 constexpr auto kYesterdayWindReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_wind.csv";
 
-// Meteoalarm legacy Atom feeds (EUMETNET, CC BY 4.0 equivalent + ToS at
-// meteoalarm.org). One feed per country; slugs verified live 2026-09-06.
-// Covers the OPERA radar footprint so European sessions get alerts through
-// the same WeatherWarning pipeline as NWS. Extend here to add countries.
-constexpr std::array kMeteoalarmFeeds{
-    "france",         "germany",   "netherlands", "belgium",  "finland",  "sweden",
-    "norway",         "denmark",   "ireland",     "united-kingdom", "spain", "poland",
-    "italy",          "austria",
+// Meteoalarm visualization service (EUMETNET, same backend as
+// meteoalarm.org): official warning-area polygons + warning texts.
+// visservice region codes are ISO-2 and cover the OPERA radar footprint.
+constexpr char kMeteoVisBase[] = "https://visservice.meteoalarm.org/api/v1";
+constexpr char kMeteoTileBase[] = "https://visservice.meteoalarm.org";
+constexpr std::array kMeteoRegions{
+    "FR", "DE", "NL", "BE", "FI", "SE", "NO", "DK",
+    "IE", "UK", "ES", "PL", "IT", "AT",
 };
+constexpr int kMeteoTileZoom = 5;
+constexpr int kMeteoMaxNewTiles = 24;
+constexpr int kMeteoMaxNewDetails = 40;
 
-QString meteoalarmFeedUrl(const char* slug) {
-    return QStringLiteral("https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-%1")
-        .arg(QString::fromLatin1(slug));
+QString meteoReferenceDateString(const QDateTime& referenceDate) {
+    // Hour-truncated UTC ISO with Z suffix (the only form verified against
+    // the service); stable for an hour so tile URLs stay cacheable.
+    return referenceDate.toString(QStringLiteral("yyyy-MM-ddTHH:00:00'Z'"));
+}
+
+QDateTime meteoInstant(const QString& text) {
+    // "2026-09-06T14:02:19.000000Z" -> Qt-parseable ISO (fractional seconds
+    // stripped, Z normalized to an explicit offset).
+    QString normalized = text.trimmed();
+    const auto dot = normalized.indexOf(QLatin1Char('.'));
+    if (dot >= 0) {
+        int end = dot;
+        while (end < normalized.size() && (normalized.at(end) == QLatin1Char('.') ||
+                                           normalized.at(end).isDigit()))
+            ++end;
+        normalized.remove(dot, end - dot);
+    }
+    if (normalized.endsWith(QLatin1Char('Z'))) {
+        normalized.chop(1);
+        normalized += QStringLiteral("+00:00");
+    }
+    return QDateTime::fromString(normalized, Qt::ISODate);
 }
 
 struct OfficialAlertStyle {
@@ -256,25 +283,96 @@ NwsAlertStyle nwsAlertStyle(const QString& event) {
     return {QColor(QStringLiteral("#F4D35E")), 1000};
 }
 
-NwsAlertStyle meteoalarmAlertStyle(const QString& severity) {
-    // Meteoalarm awareness colors onto the NWS severity scale: red/orange for
-    // Severe+, yellow for Moderate, grey for Minor. Priorities sit alongside
-    // the NWS table so European warnings interleave sanely in the card list.
-    const auto normalized = severity.trimmed();
-    if (normalized.compare(QStringLiteral("Extreme"), Qt::CaseInsensitive) == 0)
-        return {QColor(QStringLiteral("#FF0000")), 2};
-    if (normalized.compare(QStringLiteral("Severe"), Qt::CaseInsensitive) == 0)
-        return {QColor(QStringLiteral("#FF8C00")), 4};
-    if (normalized.compare(QStringLiteral("Moderate"), Qt::CaseInsensitive) == 0)
-        return {QColor(QStringLiteral("#FFD700")), 60};
-    if (normalized.compare(QStringLiteral("Minor"), Qt::CaseInsensitive) == 0)
-        return {QColor(QStringLiteral("#808080")), 100};
+bool meteoTilesAvailable() {
+#ifdef CAPPEDWEATHER_HAS_ZLIB
+    return true;
+#else
+    return false;
+#endif
+}
+
+QDateTime WeatherOverlaySource::meteoReferenceDate(const QDateTime& now) {
+    const auto utc = now.toUTC();
+    return QDateTime(utc.date(), QTime(utc.time().hour(), 0, 0), QTimeZone::UTC);
+}
+
+NwsAlertStyle WeatherOverlaySource::meteoalarmLevelStyle(const int levelId) {
+    // Official Meteoalarm awareness colors (visservice levels endpoint).
+    switch (levelId) {
+    case 1: return {QColor(QStringLiteral("#FF0000")), 2};   // Extreme / red
+    case 2: return {QColor(QStringLiteral("#FF9300")), 4};   // Severe / orange
+    case 3: return {QColor(QStringLiteral("#FFDA22")), 60};  // Moderate / yellow
+    default: break;
+    }
     return {QColor(QStringLiteral("#F4D35E")), 1000};
 }
 
+QString WeatherOverlaySource::meteoSeverityForLevel(const int levelId) {
+    switch (levelId) {
+    case 1: return QStringLiteral("Extreme");
+    case 2: return QStringLiteral("Severe");
+    case 3: return QStringLiteral("Moderate");
+    default: break;
+    }
+    return QStringLiteral("Unknown");
+}
+
+QUrl WeatherOverlaySource::meteoTileUrl(const int z, const int x, const int y,
+                                        const QDateTime& referenceDate) {
+    QUrl url(QStringLiteral("%1/stream-buffers/live/tiles/%2/%3/%4.mvt")
+                 .arg(QString::fromLatin1(kMeteoTileBase))
+                 .arg(z)
+                 .arg(x)
+                 .arg(y));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("referenceDate"), meteoReferenceDateString(referenceDate));
+    query.addQueryItem(QStringLiteral("preset"), QStringLiteral("now"));
+    url.setQuery(query);
+    return url;
+}
+
+QVector<QPair<int, int>> WeatherOverlaySource::meteoTilesForBounds(const double minLon,
+                                                                   const double minLat,
+                                                                   const double maxLon,
+                                                                   const double maxLat) {
+    // Covering z5 tiles for a bbox (Web Mercator XYZ), clamped to Europe.
+    // z5 keeps whole warned regions to a handful of requests.
+    const auto lonToX = [](const double lon) {
+        return static_cast<int>(std::floor((lon + 180.0) / 360.0 * 32.0));
+    };
+    const auto latToY = [](const double lat) {
+        const double clamped = std::clamp(lat, -85.0, 85.0);
+        const double sin = std::sin(clamped * 3.14159265358979323846 / 180.0);
+        return static_cast<int>(
+            std::floor((0.5 - std::log((1.0 + sin) / (1.0 - sin)) / (4.0 * 3.14159265358979323846)) *
+                       32.0));
+    };
+    const int x0 = std::clamp(lonToX(minLon), 0, 31);
+    const int x1 = std::clamp(lonToX(maxLon), 0, 31);
+    const int y0 = std::clamp(latToY(maxLat), 0, 31);
+    const int y1 = std::clamp(latToY(minLat), 0, 31);
+    QVector<QPair<int, int>> tiles;
+    for (int x = x0; x <= x1; ++x) {
+        for (int y = y0; y <= y1; ++y) tiles.push_back({x, y});
+    }
+    return tiles;
+}
+
+QString WeatherOverlaySource::localizedText(const QJsonValue& value) {
+    if (value.isString()) return value.toString().trimmed();
+    if (!value.isObject()) return {};
+    const auto map = value.toObject();
+    const auto english = map.value(QStringLiteral("en")).toString().trimmed();
+    if (!english.isEmpty()) return english;
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+        const auto text = it.value().toString().trimmed();
+        if (!text.isEmpty()) return text;
+    }
+    return {};
+}
+
 WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
-    : QObject(parent) {
-    connect(&network_, &QNetworkAccessManager::finished, this, &WeatherOverlaySource::requestFinished);
+    : QObject(parent) {    connect(&network_, &QNetworkAccessManager::finished, this, &WeatherOverlaySource::requestFinished);
     publishTimer_ = new QTimer(this);
     publishTimer_->setSingleShot(true);
     publishTimer_->setInterval(100);
@@ -381,160 +479,380 @@ QVector<StormReport> WeatherOverlaySource::parseStormReports(const QByteArray& d
     return reports;
 }
 
-QVector<WeatherWarning> WeatherOverlaySource::parseMeteoalarmAtom(const QByteArray& data,
-                                                                  const QString& countrySlug,
-                                                                  QString* error) {
-    QVector<WeatherWarning> warnings;
-    QXmlStreamReader xml(data);
-    // Empty feeds (no active warnings) are a valid ~1 KB Atom shell.
-    QString entryIdentifier;
-    QString entryEvent;
-    QString entrySeverity;
-    QString entryCertainty;
-    QString entryUrgency;
-    QString entryOnset;
-    QString entryExpires;
-    QString entryEffective;
-    QString entryAreaDesc;
-    QString entryCapLink;
-    QStringList entryGeocodes;
-    bool inEntry = false;
-    bool inGeocode = false;
-    QString geocodeValueName;
-    QString currentText;
-    const auto flushEntry = [&] {
-        if (entryIdentifier.isEmpty() && entryEvent.isEmpty()) return;
-        WeatherWarning warning;
-        warning.id = entryIdentifier.isEmpty()
-                         ? QStringLiteral("meteoalarm:%1:%2").arg(countrySlug, entryCapLink)
-                         : QStringLiteral("meteoalarm:%1").arg(entryIdentifier);
-        warning.event = entryEvent.isEmpty() ? QStringLiteral("Weather warning") : entryEvent;
-        warning.headline = entryAreaDesc.isEmpty()
-                               ? warning.event
-                               : QStringLiteral("%1 — %2").arg(entryAreaDesc, warning.event);
-        warning.severity = entrySeverity.isEmpty() ? QStringLiteral("Unknown") : entrySeverity;
-        warning.senderName = QStringLiteral("Meteoalarm/%1").arg(countrySlug);
-        QStringList descriptionParts;
-        if (!entryAreaDesc.isEmpty()) descriptionParts.push_back(entryAreaDesc);
-        if (!entryGeocodes.isEmpty())
-            descriptionParts.push_back(
-                QStringLiteral("Areas: %1").arg(entryGeocodes.join(QStringLiteral(", "))));
-        QStringList qualifierParts;
-        if (!entryCertainty.isEmpty())
-            qualifierParts.push_back(QStringLiteral("certainty %1").arg(entryCertainty));
-        if (!entryUrgency.isEmpty())
-            qualifierParts.push_back(QStringLiteral("urgency %1").arg(entryUrgency));
-        if (!qualifierParts.isEmpty())
-            descriptionParts.push_back(qualifierParts.join(QStringLiteral(", ")));
-        if (!entryCapLink.isEmpty()) descriptionParts.push_back(entryCapLink);
-        warning.description = descriptionParts.join(QStringLiteral(" · "));
-        if (!entryOnset.isEmpty())
-            warning.onset = QDateTime::fromString(entryOnset, Qt::ISODate);
-        else if (!entryEffective.isEmpty())
-            warning.onset = QDateTime::fromString(entryEffective, Qt::ISODate);
-        if (!entryExpires.isEmpty())
-            warning.expires = QDateTime::fromString(entryExpires, Qt::ISODate);
-        const auto style = meteoalarmAlertStyle(warning.severity);
-        warning.alertColor = style.color;
-        warning.alertPriority = style.priority;
-        // No polygons: Meteoalarm CAP carries EMMA/NUTS geocodes without
-        // geometry. AlertCenter treats these as zone-only warnings (they
-        // notify when the geographic filter is off and are skipped by the
-        // proximity filter, same as unresolved NWS zones).
-        warnings.push_back(std::move(warning));
-    };
-    while (!xml.atEnd()) {
-        const auto token = xml.readNext();
-        if (token == QXmlStreamReader::StartElement) {
-            const auto local = xml.name().toString();
-            currentText.clear();
-            if (local == QStringLiteral("entry")) {
-                inEntry = true;
-                entryIdentifier.clear();
-                entryEvent.clear();
-                entrySeverity.clear();
-                entryCertainty.clear();
-                entryUrgency.clear();
-                entryOnset.clear();
-                entryExpires.clear();
-                entryEffective.clear();
-                entryAreaDesc.clear();
-                entryCapLink.clear();
-                entryGeocodes.clear();
-            } else if (inEntry && local == QStringLiteral("link")) {
-                const auto attrs = xml.attributes();
-                // The CAP detail link carries type="application/cap+xml".
-                if (attrs.value(QStringLiteral("type")).toString() ==
-                        QStringLiteral("application/cap+xml") &&
-                    entryCapLink.isEmpty())
-                    entryCapLink = attrs.value(QStringLiteral("href")).toString();
-            } else if (inEntry && local == QStringLiteral("geocode")) {
-                inGeocode = true;
-                geocodeValueName.clear();
-            }
-        } else if (token == QXmlStreamReader::Characters) {
-            if (inEntry && !xml.isWhitespace()) currentText += xml.text().toString();
-        } else if (token == QXmlStreamReader::EndElement) {
-            const auto local = xml.name().toString();
-            const auto text = currentText.trimmed();
-            currentText.clear();
-            if (!inEntry) continue;
-            if (local == QStringLiteral("entry")) {
-                flushEntry();
-                inEntry = false;
-            } else if (local == QStringLiteral("identifier")) {
-                if (entryIdentifier.isEmpty()) entryIdentifier = text;
-            } else if (local == QStringLiteral("event")) {
-                if (entryEvent.isEmpty()) entryEvent = text;
-            } else if (local == QStringLiteral("severity")) {
-                if (entrySeverity.isEmpty()) entrySeverity = text;
-            } else if (local == QStringLiteral("certainty")) {
-                if (entryCertainty.isEmpty()) entryCertainty = text;
-            } else if (local == QStringLiteral("urgency")) {
-                if (entryUrgency.isEmpty()) entryUrgency = text;
-            } else if (local == QStringLiteral("onset")) {
-                if (entryOnset.isEmpty()) entryOnset = text;
-            } else if (local == QStringLiteral("expires")) {
-                if (entryExpires.isEmpty()) entryExpires = text;
-            } else if (local == QStringLiteral("effective")) {
-                if (entryEffective.isEmpty()) entryEffective = text;
-            } else if (local == QStringLiteral("areaDesc")) {
-                if (entryAreaDesc.isEmpty()) entryAreaDesc = text;
-            } else if (local == QStringLiteral("valueName")) {
-                if (inGeocode) geocodeValueName = text;
-            } else if (local == QStringLiteral("value")) {
-                if (inGeocode && !text.isEmpty()) {
-                    entryGeocodes.push_back(geocodeValueName.isEmpty()
-                                                ? text
-                                                : QStringLiteral("%1:%2").arg(geocodeValueName, text));
-                }
-            } else if (local == QStringLiteral("geocode")) {
-                inGeocode = false;
-                geocodeValueName.clear();
-            }
+namespace {
+
+// Minimal protobuf reader for Mapbox Vector Tiles: varints, length-delimited
+// blobs, and fixed32/64 skips. Anything malformed fails closed via ok().
+struct MvtCursor {
+    const char* ptr = nullptr;
+    const char* end = nullptr;
+    bool ok = true;
+
+    bool atEnd() const { return !ok || ptr >= end; }
+
+    quint64 varint() {
+        quint64 result = 0;
+        int shift = 0;
+        while (ptr < end && shift < 64) {
+            const auto byte = static_cast<unsigned char>(*ptr++);
+            result |= static_cast<quint64>(byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) return result;
+            shift += 7;
+        }
+        ok = false;
+        return 0;
+    }
+
+    // Splits a tag varint into field number and wire type.
+    bool tag(quint64* number, quint64* wire) {
+        if (atEnd()) return false;
+        const quint64 tag = varint();
+        if (!ok) return false;
+        *number = tag >> 3;
+        *wire = tag & 7;
+        return true;
+    }
+
+    void skip(const quint64 wire) {
+        if (!ok) return;
+        if (wire == 0) {
+            varint();
+        } else if (wire == 1) {
+            if (end - ptr < 8) ok = false;
+            else ptr += 8;
+        } else if (wire == 2) {
+            const quint64 length = varint();
+            if (!ok || static_cast<quint64>(end - ptr) < length) ok = false;
+            else ptr += length;
+        } else if (wire == 5) {
+            if (end - ptr < 4) ok = false;
+            else ptr += 4;
+        } else {
+            ok = false;  // groups (3/4) never appear in MVT; anything else is corrupt
         }
     }
-    if (xml.hasError()) {
-        if (error) *error = QStringLiteral("Invalid Meteoalarm feed %1: %2").arg(
-                                countrySlug, xml.errorString());
-        return {};
+
+    QByteArray bytes() {
+        const quint64 length = varint();
+        if (!ok || length > static_cast<quint64>(end - ptr)) {
+            ok = false;
+            return {};
+        }
+        const QByteArray result(ptr, static_cast<qsizetype>(length));
+        ptr += length;
+        return result;
     }
-    if (error) error->clear();
-    return warnings;
+
+    QString string() { return QString::fromUtf8(bytes()); }
+};
+
+qint32 mvtZigzag(const quint64 value) {
+    return static_cast<qint32>((value >> 1) ^ (~(value & 1) + 1));
 }
 
+// One decoded MVT ring in tile coordinates plus its shoelace area.
+struct MvtRing {
+    QPolygonF points;
+    double area = 0.0;
+};
+
+QVector<MvtRing> mvtDecodeRings(const QByteArray& geometry, const int maxRings = 64,
+                                const int maxPoints = 1500) {
+    QVector<MvtRing> rings;
+    MvtCursor cursor{geometry.constData(), geometry.constData() + geometry.size()};
+    long long cursorX = 0;
+    long long cursorY = 0;
+    MvtRing current;
+    bool open = false;
+    const auto pushRing = [&] {
+        // Triangles carry 3 points with implicit closure; close explicitly.
+        if (open && current.points.size() >= 3) {
+            // Close explicitly and measure (tile space is y-down).
+            if (current.points.first() != current.points.last())
+                current.points.push_back(current.points.first());
+            double area = 0.0;
+            const auto& points = current.points;
+            for (qsizetype i = 0; i < points.size(); ++i) {
+                const auto& a = points.at(i);
+                const auto& b = points.at((i + 1) % points.size());
+                area += a.x() * b.y() - b.x() * a.y();
+            }
+            current.area = area / 2.0;
+            rings.push_back(std::move(current));
+        }
+        current = MvtRing{};
+        open = false;
+    };
+    while (!cursor.atEnd() && rings.size() < maxRings) {
+        const quint64 command = cursor.varint();
+        if (!cursor.ok) return {};
+        const quint64 id = command & 7;
+        quint64 count = command >> 3;
+        if (id == 1 || id == 2) {
+            while (count-- > 0) {
+                if (cursor.atEnd()) return {};
+                const qint32 dx = mvtZigzag(cursor.varint());
+                if (cursor.atEnd()) return {};
+                const qint32 dy = mvtZigzag(cursor.varint());
+                if (!cursor.ok) return {};
+                cursorX += dx;
+                cursorY += dy;
+                if (id == 1) {
+                    pushRing();
+                    current.points.push_back(
+                        QPointF(static_cast<double>(cursorX), static_cast<double>(cursorY)));
+                    open = true;
+                } else if (open) {
+                    current.points.push_back(
+                        QPointF(static_cast<double>(cursorX), static_cast<double>(cursorY)));
+                }
+                if (open && current.points.size() > maxPoints * 2) {
+                    // Pathological ring: stride-sample to stay bounded.
+                    QPolygonF sampled;
+                    sampled.reserve(maxPoints + 1);
+                    const qsizetype step =
+                        std::max<qsizetype>(1, current.points.size() / maxPoints);
+                    for (qsizetype i = 0; i < current.points.size(); i += step)
+                        sampled.push_back(current.points.at(i));
+                    current.points = std::move(sampled);
+                }
+            }
+        } else if (id == 7) {
+            // ClosePath: count is always 1; extra closes are harmless.
+            for (quint64 i = 0; i < count; ++i) pushRing();
+        } else {
+            return {};
+        }
+    }
+    pushRing();
+    return cursor.ok ? rings : QVector<MvtRing>{};
+}
+
+#ifdef CAPPEDWEATHER_HAS_ZLIB
+QByteArray gunzipBytes(const QByteArray& gzip, QString* error) {
+    // RFC 1952 gzip: 10-byte header, raw deflate, 8-byte trailer.
+    if (gzip.size() < 18 || static_cast<unsigned char>(gzip.at(0)) != 0x1F ||
+        static_cast<unsigned char>(gzip.at(1)) != 0x8B) {
+        if (error) *error = QStringLiteral("MVT tile is not gzip data");
+        return {};
+    }
+    z_stream stream{};
+    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+        if (error) *error = QStringLiteral("MVT inflate init failed");
+        return {};
+    }
+    QByteArray out;
+    out.reserve(std::min<qsizetype>(gzip.size() * 3, 8 * 1024 * 1024));
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(gzip.constData()));
+    stream.avail_in = static_cast<uInt>(gzip.size());
+    char buffer[65536];
+    int status = Z_OK;
+    while (status == Z_OK) {
+        stream.next_out = reinterpret_cast<Bytef*>(buffer);
+        stream.avail_out = sizeof(buffer);
+        status = inflate(&stream, Z_NO_FLUSH);
+        if (status == Z_OK || status == Z_STREAM_END) {
+            out.append(buffer, sizeof(buffer) - stream.avail_out);
+        }
+        if (out.size() > 8 * 1024 * 1024) {
+            inflateEnd(&stream);
+            if (error) *error = QStringLiteral("MVT tile exceeds size cap");
+            return {};
+        }
+    }
+    inflateEnd(&stream);
+    if (status != Z_STREAM_END) {
+        if (error) *error = QStringLiteral("MVT inflate failed");
+        return {};
+    }
+    return out;
+}
+#endif
+
+} // namespace
+
+QHash<QString, QVector<WarningPolygon>> WeatherOverlaySource::parseMvtAreas(
+    const QByteArray& gzipData, const int z, const int x, const int y,
+    const QSet<QString>& wantedUuids, QString* error) {
+    QHash<QString, QVector<WarningPolygon>> result;
+    if (error) error->clear();
+    if (wantedUuids.isEmpty()) return result;
+#ifndef CAPPEDWEATHER_HAS_ZLIB
+    Q_UNUSED(gzipData);
+    Q_UNUSED(z);
+    Q_UNUSED(x);
+    Q_UNUSED(y);
+    if (error) *error = QStringLiteral("MVT tiles unavailable: build without zlib");
+    return result;
+#else
+    QString gunzipError;
+    // Qt transparently decodes Content-Encoding: gzip, so depending on the
+    // stack the payload arrives raw protobuf already; gunzip only when the
+    // gzip magic is present.
+    const bool gzipped = gzipData.size() >= 2 &&
+                         static_cast<unsigned char>(gzipData.at(0)) == 0x1F &&
+                         static_cast<unsigned char>(gzipData.at(1)) == 0x8B;
+    const QByteArray pbf =
+        gzipped ? gunzipBytes(gzipData, &gunzipError) : gzipData;
+    if (pbf.isEmpty()) {
+        if (error) *error = gzipped ? gunzipError : QStringLiteral("MVT tile is empty");
+        return result;
+    }
+    const double tiles = static_cast<double>(1 << std::min(std::max(z, 0), 22));
+    MvtCursor tile{pbf.constData(), pbf.constData() + pbf.size()};
+    bool corrupt = false;
+    while (!tile.atEnd()) {
+        quint64 number = 0;
+        quint64 wire = 0;
+        if (!tile.tag(&number, &wire)) break;
+        if (number != 3 || wire != 2) {
+            tile.skip(wire);
+            continue;
+        }
+        const QByteArray layerBytes = tile.bytes();
+        if (!tile.ok) break;
+        MvtCursor layer{layerBytes.constData(), layerBytes.constData() + layerBytes.size()};
+        QString layerName;
+        QStringList keys;
+        QStringList values;
+        QVector<QByteArray> features;
+        quint64 extent = 4096;
+        while (!layer.atEnd()) {
+            quint64 field = 0;
+            quint64 fieldWire = 0;
+            if (!layer.tag(&field, &fieldWire)) break;
+            if (field == 1 && fieldWire == 2) {
+                layerName = layer.string();
+            } else if (field == 2 && fieldWire == 2) {
+                features.push_back(layer.bytes());
+            } else if (field == 3 && fieldWire == 2) {
+                keys.push_back(layer.string());
+            } else if (field == 4 && fieldWire == 2) {
+                const QByteArray valueBytes = layer.bytes();
+                MvtCursor value{valueBytes.constData(), valueBytes.constData() + valueBytes.size()};
+                QString text;
+                while (!value.atEnd()) {
+                    quint64 valueField = 0;
+                    quint64 valueWire = 0;
+                    if (!value.tag(&valueField, &valueWire)) break;
+                    if (valueField == 1 && valueWire == 2) {
+                        text = value.string();
+                    } else if ((valueField == 2 && valueWire == 5) ||
+                               (valueField == 3 && valueWire == 1)) {
+                        // float/double: irrelevant for uuid matching
+                        value.skip(valueWire);
+                    } else if (valueField >= 4 && valueField <= 7 && valueWire == 0) {
+                        text = QString::number(value.varint());
+                    } else {
+                        value.skip(valueWire);
+                    }
+                }
+                values.push_back(text);
+            } else if (field == 5 && fieldWire == 0) {
+                extent = layer.varint();
+            } else {
+                layer.skip(fieldWire);
+            }
+            if (!layer.ok) break;
+        }
+        if (!layer.ok || layerName != QStringLiteral("areas")) continue;
+        const int uuidKey = keys.indexOf(QStringLiteral("uuid"));
+        if (uuidKey < 0) continue;
+        const double scale = extent > 0 ? static_cast<double>(extent) : 4096.0;
+        for (const auto& featureBytes : features) {
+            MvtCursor feature{featureBytes.constData(),
+                              featureBytes.constData() + featureBytes.size()};
+            QVector<quint64> tags;
+            QByteArray geometry;
+            while (!feature.atEnd()) {
+                quint64 field = 0;
+                quint64 fieldWire = 0;
+                if (!feature.tag(&field, &fieldWire)) break;
+                if (field == 2 && fieldWire == 2) {
+                    const QByteArray packed = feature.bytes();
+                    MvtCursor packedCursor{packed.constData(), packed.constData() + packed.size()};
+                    while (!packedCursor.atEnd()) tags.push_back(packedCursor.varint());
+                } else if (field == 4 && fieldWire == 2) {
+                    geometry = feature.bytes();
+                } else {
+                    feature.skip(fieldWire);
+                }
+                if (!feature.ok) break;
+            }
+            if (!feature.ok || geometry.isEmpty()) continue;
+            QString uuid;
+            for (qsizetype i = 0; i + 1 < tags.size(); i += 2) {
+                if (tags.at(i) == static_cast<quint64>(uuidKey) &&
+                    tags.at(i + 1) < static_cast<quint64>(values.size())) {
+                    uuid = values.at(static_cast<qsizetype>(tags.at(i + 1)));
+                    break;
+                }
+            }
+            if (!wantedUuids.contains(uuid)) continue;
+            const auto rings = mvtDecodeRings(geometry);
+            QVector<WarningPolygon> polygons;
+            WarningPolygon* current = nullptr;
+            double currentArea = 0.0;
+            for (const auto& ring : rings) {
+                if (ring.area == 0.0) continue;  // degenerate
+                // Tile space is y-down: positive shoelace = exterior.
+                QPolygonF exterior;
+                exterior.reserve(ring.points.size());
+                for (const auto& tilePoint : ring.points) {
+                    const double lon =
+                        (static_cast<double>(x) + tilePoint.x() / scale) / tiles * 360.0 - 180.0;
+                    const double mercator =
+                        (static_cast<double>(y) + tilePoint.y() / scale) / tiles;
+                    const double lat = std::atan(std::sinh(
+                                           3.14159265358979323846 * (1.0 - 2.0 * mercator))) *
+                                       180.0 / 3.14159265358979323846;
+                    exterior.push_back(QPointF(std::clamp(lon, -180.0, 180.0),
+                                               std::clamp(lat, -85.0, 85.0)));
+                }
+                if (exterior.size() < 4) continue;
+                if (ring.area > 0.0) {
+                    polygons.push_back(WarningPolygon{});
+                    current = &polygons.last();
+                    current->exterior = std::move(exterior);
+                    currentArea = ring.area;
+                } else if (current != nullptr && -ring.area < currentArea) {
+                    current->holes.push_back(std::move(exterior));
+                } else {
+                    // Oversized or orphan hole: keep it as its own exterior.
+                    polygons.push_back(WarningPolygon{});
+                    current = &polygons.last();
+                    current->exterior = std::move(exterior);
+                    currentArea = -ring.area;
+                }
+            }
+            if (!polygons.isEmpty()) result[uuid].append(polygons);
+        }
+        if (!layer.ok) corrupt = true;
+    }
+    if (!tile.ok) corrupt = true;
+    if (corrupt && result.isEmpty() && error && error->isEmpty()) {
+        *error = QStringLiteral("corrupt MVT tile");
+    }
+    return result;
+#endif
+}
 void WeatherOverlaySource::refresh() {
     if (pending_ != 0) return;
     failures_ = 0;
     firstError_.clear();
     alertResponseReady_ = false;
     if (publishTimer_) publishTimer_->stop();
-    // Report and Meteoalarm sets are intentionally retained: each successful
-    // response replaces its own set wholesale, so a failed request keeps the
-    // previously published contents instead of wiping overlays off the map
-    // until the next success.
-    pending_ = totalRequests_ = 7 + static_cast<int>(kMeteoalarmFeeds.size());
+    // Report sets are intentionally retained: each successful response replaces its
+    // own set wholesale, so a failed request keeps the previously published contents
+    // instead of wiping storm reports off the map until the next success.
+    // Meteoalarm follows the same pattern per country (areas/hazards), while
+    // details and tile geometry accumulate in caches.
+    pending_ = totalRequests_ = 7;
     zoneWarningIndexes_.clear();
+    meteoPendingDetails_.clear();
+    meteoPendingTiles_.clear();
+    meteoReferenceDate_ = meteoReferenceDate(QDateTime::currentDateTimeUtc());
+    pruneMeteoTileCache();
     const auto now = QDateTime::currentDateTimeUtc();
     const auto today = now.time().hour() < 12 ? now.date().addDays(-1) : now.date();
     request(QUrl(QString::fromUtf8(kAlertsUrl)), {RequestKind::Alerts}, QByteArrayLiteral("application/geo+json"));
@@ -548,17 +866,136 @@ void WeatherOverlaySource::refresh() {
         request(QUrl(QString::fromUtf8(yesterdayUrls.at(index))),
                 {RequestKind::Reports, index + 3, kind, today.addDays(-1)}, QByteArrayLiteral("text/csv"));
     }
-    for (const auto* slug : kMeteoalarmFeeds) {
+    if (!meteoTypesRequested_) {
+        meteoTypesRequested_ = true;
+        ++pending_;
+        ++totalRequests_;
+        RequestContext typesContext;
+        typesContext.kind = RequestKind::MeteoTypes;
+        request(QUrl(QStringLiteral("%1/types").arg(QString::fromLatin1(kMeteoVisBase))),
+                std::move(typesContext));
+    }
+    for (const auto* region : kMeteoRegions) {
+        ++pending_;
+        ++totalRequests_;
         RequestContext context;
-        context.kind = RequestKind::Meteoalarm;
-        context.meteoalarmSlug = QString::fromLatin1(slug);
-        // No Accept header: feeds.meteoalarm.org answers 406 to
-        // "application/atom+xml" (verified 2026-09-06) but serves the same
-        // feed for */* / text/html / no header. request() omits the header
-        // when accept is empty.
-        request(QUrl(meteoalarmFeedUrl(slug)), std::move(context), {});
+        context.kind = RequestKind::MeteoRegions;
+        context.meteoArg = QString::fromLatin1(region);
+        QUrl url(QStringLiteral("%1/stream-buffers/live/hazards/%2")
+                     .arg(QString::fromLatin1(kMeteoVisBase), context.meteoArg));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("language"), QStringLiteral("en"));
+        query.addQueryItem(QStringLiteral("preset"), QStringLiteral("now"));
+        query.addQueryItem(QStringLiteral("referenceDate"),
+                           meteoReferenceDateString(meteoReferenceDate_));
+        url.setQuery(query);
+        request(url, std::move(context));
     }
     emit statusChanged(QStringLiteral("updating NWS warnings, SPC reports, and Meteoalarm"));
+}
+
+void WeatherOverlaySource::pruneMeteoTileCache() {
+    // Tile geometry is keyed by reference hour; drop everything from older
+    // rounds so the cache tracks the current frame.
+    const auto hourKey = meteoReferenceDateString(meteoReferenceDate_);
+    for (auto it = meteoTilePolygons_.begin(); it != meteoTilePolygons_.end();) {
+        if (!it.key().endsWith(hourKey)) it = meteoTilePolygons_.erase(it);
+        else ++it;
+    }
+}
+
+void WeatherOverlaySource::requestMeteoFollowUps() {
+    if (!meteoReferenceDate_.isValid()) return;
+    const auto now = QDateTime::currentDateTimeUtc();
+    struct WantedDetail {
+        QString key;
+        QString featureId;
+        int typeId = 0;
+        int levelId = 0;
+    };
+    QVector<WantedDetail> wantedDetails;
+    QSet<QString> warnedUuids;
+    for (auto it = meteoHazardSets_.cbegin(); it != meteoHazardSets_.cend(); ++it) {
+        for (const auto& hazard : it.value()) {
+            warnedUuids.insert(hazard.featureId);
+            const auto key = QStringLiteral("%1|%2|%3").arg(hazard.featureId).arg(hazard.typeId).arg(
+                hazard.levelId);
+            const auto fetched = meteoDetailFetchedAt_.value(key);
+            if (meteoDetails_.contains(key) && fetched.isValid() &&
+                fetched.secsTo(now) < 30 * 60) {
+                continue;
+            }
+            if (meteoPendingDetails_.contains(key)) continue;
+            wantedDetails.push_back({key, hazard.featureId, hazard.typeId, hazard.levelId});
+        }
+    }
+    // Most severe first so a capped round still covers red/orange warnings.
+    std::sort(wantedDetails.begin(), wantedDetails.end(), [](const auto& a, const auto& b) {
+        if (a.levelId != b.levelId) return a.levelId < b.levelId;
+        if (a.featureId != b.featureId) return a.featureId < b.featureId;
+        return a.typeId < b.typeId;
+    });
+    while (wantedDetails.size() > kMeteoMaxNewDetails) wantedDetails.removeLast();
+    for (const auto& wanted : wantedDetails) {
+        meteoPendingDetails_.insert(wanted.key);
+        ++pending_;
+        ++totalRequests_;
+        RequestContext context;
+        context.kind = RequestKind::MeteoDetails;
+        context.meteoArg = wanted.key;
+        context.meteoFeature = wanted.featureId;
+        context.meteoType = wanted.typeId;
+        context.meteoLevel = wanted.levelId;
+        QUrl url(QStringLiteral("%1/stream-buffers/live/features/%2/warnings")
+                     .arg(QString::fromLatin1(kMeteoVisBase), wanted.featureId));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("language"), QStringLiteral("en"));
+        query.addQueryItem(QStringLiteral("preset"), QStringLiteral("now"));
+        query.addQueryItem(QStringLiteral("referenceDate"),
+                           meteoReferenceDateString(meteoReferenceDate_));
+        query.addQueryItem(QStringLiteral("typeId"), QString::number(wanted.typeId));
+        query.addQueryItem(QStringLiteral("levelId"), QString::number(wanted.levelId));
+        url.setQuery(query);
+        request(url, std::move(context));
+    }
+    if (!meteoTilesAvailable() || warnedUuids.isEmpty()) return;
+    // Covering z5 tiles for warned bboxes (deduped, bounded per round).
+    const auto hourKey = meteoReferenceDateString(meteoReferenceDate_);
+    QSet<QString> wantedTiles;
+    for (auto it = meteoAreaSets_.cbegin(); it != meteoAreaSets_.cend(); ++it) {
+        for (auto areaIt = it.value().cbegin(); areaIt != it.value().cend(); ++areaIt) {
+            if (!warnedUuids.contains(areaIt.key())) continue;
+            const auto& area = areaIt.value();
+            for (const auto& tile : meteoTilesForBounds(area.minLon, area.minLat, area.maxLon,
+                                                        area.maxLat)) {
+                wantedTiles.insert(QStringLiteral("%1/%2/%3@%4")
+                                       .arg(kMeteoTileZoom)
+                                       .arg(tile.first)
+                                       .arg(tile.second)
+                                       .arg(hourKey));
+            }
+        }
+    }
+    QStringList ordered = wantedTiles.values();
+    std::sort(ordered.begin(), ordered.end());
+    int started = 0;
+    for (const auto& tileKey : ordered) {
+        if (meteoTilePolygons_.contains(tileKey) || meteoPendingTiles_.contains(tileKey)) continue;
+        if (started >= kMeteoMaxNewTiles) break;
+        ++started;
+        meteoPendingTiles_.insert(tileKey);
+        ++pending_;
+        ++totalRequests_;
+        const auto parts = tileKey.split(QLatin1Char('@')).first().split(QLatin1Char('/'));
+        RequestContext context;
+        context.kind = RequestKind::MeteoTiles;
+        context.meteoArg = tileKey;
+        context.meteoZ = parts.at(0).toInt();
+        context.meteoX = parts.at(1).toInt();
+        context.meteoY = parts.at(2).toInt();
+        request(meteoTileUrl(context.meteoZ, context.meteoX, context.meteoY, meteoReferenceDate_),
+                std::move(context));
+    }
 }
 
 void WeatherOverlaySource::request(const QUrl& url, RequestContext context, const QByteArray& accept) {
@@ -629,9 +1066,109 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
             auto parsed = parseStormReports(data, context.reportKind, &error, context.convectiveDate);
             if (error.isEmpty() && context.reportSet >= 0)
                 reportSets_.at(static_cast<std::size_t>(context.reportSet)) = std::move(parsed);
-        } else if (context.kind == RequestKind::Meteoalarm) {
-            auto parsed = parseMeteoalarmAtom(data, context.meteoalarmSlug, &error);
-            if (error.isEmpty()) meteoalarmSets_.insert(context.meteoalarmSlug, std::move(parsed));
+        } else if (context.kind == RequestKind::MeteoTypes) {
+            const auto document = QJsonDocument::fromJson(data, nullptr);
+            if (document.isObject()) {
+                for (const auto& value :
+                     document.object().value(QStringLiteral("types")).toArray()) {
+                    const auto type = value.toObject();
+                    const auto id = type.value(QStringLiteral("id")).toInt(-1);
+                    const auto label = type.value(QStringLiteral("label")).toString().trimmed();
+                    if (id >= 0 && !label.isEmpty()) meteoTypeNames_.insert(QString::number(id), label);
+                }
+            } else {
+                error = QStringLiteral("Invalid Meteoalarm types response");
+            }
+        } else if (context.kind == RequestKind::MeteoRegions) {
+            const auto document = QJsonDocument::fromJson(data, nullptr);
+            if (document.isObject()) {
+                const auto root = document.object();
+                QHash<QString, MeteoArea> areas;
+                for (const auto& value : root.value(QStringLiteral("areas")).toArray()) {
+                    const auto area = value.toObject();
+                    const auto uuid = area.value(QStringLiteral("featureId")).toString();
+                    if (uuid.isEmpty()) continue;
+                    MeteoArea entry;
+                    entry.name = area.value(QStringLiteral("name")).toString();
+                    entry.region = context.meteoArg;
+                    const auto box = area.value(QStringLiteral("bb")).toArray();
+                    if (box.size() >= 2) {
+                        const auto lo = box.at(0).toArray();
+                        const auto hi = box.at(1).toArray();
+                        if (lo.size() >= 2 && hi.size() >= 2) {
+                            entry.minLon = lo.at(0).toDouble();
+                            entry.minLat = lo.at(1).toDouble();
+                            entry.maxLon = hi.at(0).toDouble();
+                            entry.maxLat = hi.at(1).toDouble();
+                        }
+                    }
+                    areas.insert(uuid, entry);
+                }
+                QVector<MeteoHazard> hazards;
+                for (const auto& value : root.value(QStringLiteral("hazards")).toArray()) {
+                    const auto hazard = value.toObject();
+                    MeteoHazard entry;
+                    entry.featureId = hazard.value(QStringLiteral("featureId")).toString();
+                    entry.typeId = hazard.value(QStringLiteral("typeId")).toInt(0);
+                    entry.levelId = hazard.value(QStringLiteral("levelId")).toInt(0);
+                    if (!entry.featureId.isEmpty() && entry.levelId > 0) hazards.push_back(entry);
+                }
+                meteoAreaSets_.insert(context.meteoArg, std::move(areas));
+                meteoHazardSets_.insert(context.meteoArg, std::move(hazards));
+                requestMeteoFollowUps();
+            } else {
+                error = QStringLiteral("Invalid Meteoalarm hazards for %1").arg(context.meteoArg);
+            }
+        } else if (context.kind == RequestKind::MeteoDetails) {
+            meteoPendingDetails_.remove(context.meteoArg);
+            const auto document = QJsonDocument::fromJson(data, nullptr);
+            const auto warnings = document.isObject()
+                                      ? document.object().value(QStringLiteral("warnings")).toArray()
+                                      : QJsonArray{};
+            if (!document.isObject() || warnings.isEmpty()) {
+                error = QStringLiteral("Invalid Meteoalarm details for %1").arg(context.meteoArg);
+            } else {
+                const auto detail = warnings.first().toObject();
+                MeteoDetail entry;
+                entry.warningId = detail.value(QStringLiteral("id")).toString();
+                entry.headline = localizedText(detail.value(QStringLiteral("headline")));
+                entry.description = localizedText(detail.value(QStringLiteral("description")));
+                entry.instruction = localizedText(detail.value(QStringLiteral("instruction")));
+                const auto originator = detail.value(QStringLiteral("originator")).toObject();
+                entry.senderName = originator.value(QStringLiteral("name")).toString().trimmed();
+                if (entry.senderName.isEmpty()) {
+                    const auto region =
+                        detail.value(QStringLiteral("regionCode")).toString().trimmed();
+                    entry.senderName = region.isEmpty()
+                                           ? QStringLiteral("Meteoalarm")
+                                           : QStringLiteral("Meteoalarm/%1").arg(region);
+                }
+                entry.onset = meteoInstant(detail.value(QStringLiteral("startDate")).toString());
+                entry.expires = meteoInstant(detail.value(QStringLiteral("endDate")).toString());
+                meteoDetails_.insert(context.meteoArg, std::move(entry));
+                meteoDetailFetchedAt_.insert(context.meteoArg, QDateTime::currentDateTimeUtc());
+            }
+        } else if (context.kind == RequestKind::MeteoTiles) {
+            meteoPendingTiles_.remove(context.meteoArg);
+            if (!meteoTilesAvailable()) {
+                error = QStringLiteral("MVT tiles unavailable: build without zlib");
+            } else {
+                // Warned UUIDs at arrival time; tiles only carry geometry.
+                QSet<QString> wanted;
+                for (auto it = meteoHazardSets_.cbegin(); it != meteoHazardSets_.cend(); ++it) {
+                    for (const auto& hazard : it.value()) wanted.insert(hazard.featureId);
+                }
+                QString tileError;
+                const auto parsed =
+                    parseMvtAreas(data, context.meteoZ, context.meteoX, context.meteoY, wanted,
+                                  &tileError);
+                if (!tileError.isEmpty()) {
+                    error = QStringLiteral("Meteoalarm tile %1: %2").arg(context.meteoArg,
+                                                                         tileError);
+                } else {
+                    meteoTilePolygons_.insert(context.meteoArg, std::move(parsed));
+                }
+            }
         } else if (context.kind == RequestKind::Zone) {
             auto polygons = parseZone(data, &error);
             if (error.isEmpty()) {
@@ -668,6 +1205,77 @@ void WeatherOverlaySource::schedulePublish() {
     publishTimer_->start();
 }
 
+QVector<WeatherWarning> WeatherOverlaySource::buildMeteoWarnings() const {
+    // Merge cached tile geometry across tiles (deterministic order).
+    QHash<QString, QVector<WarningPolygon>> geometry;
+    auto tileKeys = meteoTilePolygons_.keys();
+    std::sort(tileKeys.begin(), tileKeys.end());
+    for (const auto& tileKey : tileKeys) {
+        const auto& perTile = meteoTilePolygons_.value(tileKey);
+        for (auto it = perTile.cbegin(); it != perTile.cend(); ++it)
+            geometry[it.key()].append(it.value());
+    }
+    auto areaName = [this](const QString& uuid) -> QString {
+        for (auto it = meteoAreaSets_.cbegin(); it != meteoAreaSets_.cend(); ++it) {
+            const auto found = it.value().constFind(uuid);
+            if (found != it.value().cend() && !found->name.isEmpty()) return found->name;
+        }
+        return {};
+    };
+    // Deterministic hazard order: country, then severity, then area.
+    struct OrderedHazard {
+        QString region;
+        MeteoHazard hazard;
+    };
+    QVector<OrderedHazard> ordered;
+    auto regions = meteoHazardSets_.keys();
+    std::sort(regions.begin(), regions.end());
+    for (const auto& region : regions) {
+        for (const auto& hazard : meteoHazardSets_.value(region))
+            ordered.push_back({region, hazard});
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
+        if (a.hazard.levelId != b.hazard.levelId) return a.hazard.levelId < b.hazard.levelId;
+        if (a.region != b.region) return a.region < b.region;
+        return a.hazard.featureId < b.hazard.featureId;
+    });
+    QSet<QString> emitted;
+    QVector<WeatherWarning> warnings;
+    for (const auto& item : ordered) {
+        const auto& hazard = item.hazard;
+        const auto detailKey = QStringLiteral("%1|%2|%3").arg(hazard.featureId).arg(hazard.typeId).arg(
+            hazard.levelId);
+        const auto detailIt = meteoDetails_.constFind(detailKey);
+        if (detailIt == meteoDetails_.cend()) continue;  // details still in flight
+        if (emitted.contains(detailIt->warningId.isEmpty() ? detailKey : detailIt->warningId))
+            continue;
+        emitted.insert(detailIt->warningId.isEmpty() ? detailKey : detailIt->warningId);
+        const auto& detail = detailIt.value();
+        WeatherWarning warning;
+        warning.id = detail.warningId.isEmpty() ? QStringLiteral("meteoalarm:%1").arg(detailKey)
+                                                : QStringLiteral("meteoalarm:%1").arg(detail.warningId);
+        warning.event = meteoTypeNames_.value(QString::number(hazard.typeId),
+                                              QStringLiteral("Weather warning"));
+        const auto area = areaName(hazard.featureId);
+        warning.headline = detail.headline.isEmpty()
+                               ? (area.isEmpty() ? warning.event
+                                                : QStringLiteral("%1 — %2").arg(area, warning.event))
+                               : detail.headline;
+        warning.severity = meteoSeverityForLevel(hazard.levelId);
+        warning.senderName = detail.senderName;
+        warning.description = detail.description;
+        warning.instruction = detail.instruction;
+        warning.onset = detail.onset;
+        warning.expires = detail.expires;
+        const auto style = meteoalarmLevelStyle(hazard.levelId);
+        warning.alertColor = style.color;
+        warning.alertPriority = style.priority;
+        warning.polygons = geometry.value(hazard.featureId);
+        warnings.push_back(std::move(warning));
+    }
+    return warnings;
+}
+
 void WeatherOverlaySource::publishOverlaySnapshot() {
     reports_.clear();
     const auto cutoff = QDateTime::currentDateTimeUtc().addSecs(-24 * 60 * 60);
@@ -677,14 +1285,11 @@ void WeatherOverlaySource::publishOverlaySnapshot() {
         }
     }
     QVector<WeatherWarning> combined = warnings_;
-    qsizetype meteoalarmCount = 0;
-    // Deterministic feed order so the merged list is stable across refreshes.
-    auto slugs = meteoalarmSets_.keys();
-    std::sort(slugs.begin(), slugs.end());
-    for (const auto& slug : slugs) {
-        const auto& set = meteoalarmSets_.value(slug);
-        meteoalarmCount += set.size();
-        for (const auto& warning : set) combined.push_back(warning);
+    const auto meteoWarnings = buildMeteoWarnings();
+    qsizetype meteoDrawable = 0;
+    for (const auto& warning : meteoWarnings) {
+        if (!warning.polygons.isEmpty()) ++meteoDrawable;
+        combined.push_back(warning);
     }
     emit overlaysReady(combined, reports_, QDateTime::currentDateTimeUtc());
     if (pending_ != 0) return;
@@ -692,7 +1297,7 @@ void WeatherOverlaySource::publishOverlaySnapshot() {
         const auto drawable = std::count_if(combined.cbegin(), combined.cend(),
                                             [](const auto& warning) { return !warning.polygons.isEmpty(); });
         emit statusChanged(QStringLiteral("%1 drawable warnings (%2 NWS + %3 Meteoalarm) | %4 reports (24 h)")
-                               .arg(drawable).arg(warnings_.size()).arg(meteoalarmCount).arg(reports_.size()));
+                               .arg(drawable).arg(warnings_.size()).arg(meteoDrawable).arg(reports_.size()));
     } else {
         emit statusChanged(QStringLiteral("overlay update partial (%1 of %2 requests failed): %3")
                                .arg(failures_).arg(totalRequests_).arg(firstError_));

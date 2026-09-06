@@ -139,6 +139,12 @@ if(CAPPEDWEATHER_BUILD_APP)
 
     find_package(BZip2 QUIET)
 
+    # zlib for Meteoalarm vector-tile (gzip MVT) decoding; optional like the
+    # other codecs — without it European warnings keep working as
+    # alerts without map polygons.
+    find_package(ZLIB QUIET)
+    set(CAPPEDWEATHER_HAS_ZLIB ${ZLIB_FOUND})
+
     if(CAPPEDWEATHER_QT_FOUND AND BZip2_FOUND)
         qt_standard_project_setup()
         get_filename_component(CAPPEDWEATHER_QT_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
@@ -196,6 +202,10 @@ if(CAPPEDWEATHER_BUILD_APP)
         if(CAPPEDWEATHER_QT_MULTIMEDIA)
             target_link_libraries(cappedweather_ui PUBLIC Qt6::Multimedia)
             target_compile_definitions(cappedweather_ui PUBLIC CAPPEDWEATHER_HAS_MULTIMEDIA=1)
+        endif()
+        if(CAPPEDWEATHER_HAS_ZLIB)
+            target_link_libraries(cappedweather_ui PRIVATE ZLIB::ZLIB)
+            target_compile_definitions(cappedweather_ui PUBLIC CAPPEDWEATHER_HAS_ZLIB=1)
         endif()
 
         target_compile_definitions(cappedweather_ui PUBLIC

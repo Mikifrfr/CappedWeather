@@ -4,6 +4,8 @@
 #include <QDate>
 #include <QColor>
 #include <QHash>
+#include <QJsonValue>
+#include <QSet>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QPointF>
@@ -77,17 +79,32 @@ public:
     static QVector<StormReport> parseStormReports(const QByteArray& data, StormReportKind kind,
                                                    QString* error = nullptr,
                                                    QDate convectiveDate = {});
-    // Parses a Meteoalarm legacy Atom feed (feeds.meteoalarm.org,
-    // per-country "meteoalarm-legacy-atom-<slug>") into WeatherWarnings.
-    // CAP severity vocabulary (Minor/Moderate/Severe/Extreme) already matches
-    // the NWS scale consumed by AlertCenter, so no new alert machinery is
-    // needed. Entries carry EMMA/NUTS geocodes but no polygons (Meteoalarm
-    // geometry lives in a separate geocode database); returned warnings have
-    // empty polygons and rely on AlertCenter's zone-only path. countrySlug is
-    // the feed slug (e.g. "france"), recorded in senderName for provenance.
-    static QVector<WeatherWarning> parseMeteoalarmAtom(const QByteArray& data,
-                                                       const QString& countrySlug,
-                                                       QString* error = nullptr);
+    // Meteoalarm warning geometry over the EUMETNET visualization service
+    // (visservice.meteoalarm.org, same backend as meteoalarm.org). Warnings
+    // carry EMMA/NUTS geocodes but no polygons; official area polygons ride
+    // gzip-compressed Mapbox Vector Tiles, joined to warnings by area UUID:
+    // regional hazards list warned areas (uuid, name, bbox) plus one hazard
+    // entry per (area, type, level), per-area details carry the warning text,
+    // and the areas layer of covering z5 tiles carries the polygons.
+    // Hour-truncated UTC reference date shared by one refresh round.
+    static QDateTime meteoReferenceDate(const QDateTime& now);
+    // Maps a visservice awareness levelId onto the NWS severity scale
+    // consumed by AlertCenter (1=Extreme/red, 2=Severe/orange, 3=Moderate/
+    // yellow) with official Meteoalarm colors.
+    static NwsAlertStyle meteoalarmLevelStyle(int levelId);
+    static QString meteoSeverityForLevel(int levelId);
+    // Tile URL + covering-tile computation for the areas layer (z5).
+    static QUrl meteoTileUrl(int z, int x, int y, const QDateTime& referenceDate);
+    static QVector<QPair<int, int>> meteoTilesForBounds(double minLon, double minLat,
+                                                        double maxLon, double maxLat);
+    // Decodes warned-area polygons from one gzip MVT tile (areas layer only).
+    // wantedUuids selects areas; anything else is skipped without decoding
+    // geometry. Returns uuid -> polygons. Needs zlib; without it every call
+    // fails closed, see meteoTilesAvailable().
+    static QHash<QString, QVector<WarningPolygon>> parseMvtAreas(const QByteArray& gzipData,
+                                                                 int z, int x, int y,
+                                                                 const QSet<QString>& wantedUuids,
+                                                                 QString* error = nullptr);
 
 public slots:
     void refresh();
@@ -102,7 +119,10 @@ private:
         Alerts,
         Reports,
         Zone,
-        Meteoalarm,
+        MeteoRegions,
+        MeteoDetails,
+        MeteoTiles,
+        MeteoTypes,
     };
 
     struct RequestContext {
@@ -111,7 +131,16 @@ private:
         StormReportKind reportKind = StormReportKind::Wind;
         QDate convectiveDate;
         QString zoneUrl;
-        QString meteoalarmSlug;
+        // MeteoRegions: visservice region code (e.g. "FR").
+        // MeteoDetails: cache key "featureId|typeId|levelId" + payload.
+        // MeteoTiles: "z/x/y" key + coordinates.
+        QString meteoArg;
+        QString meteoFeature;
+        int meteoType = 0;
+        int meteoLevel = 0;
+        int meteoZ = 0;
+        int meteoX = 0;
+        int meteoY = 0;
     };
 
     void request(const QUrl& url, RequestContext context, const QByteArray& accept = {});
@@ -119,14 +148,55 @@ private:
     void publishIfComplete();
     void schedulePublish();
     void publishOverlaySnapshot();
+    // Meteoalarm follow-ups: warning details for new hazard signatures and
+    // vector tiles covering warned bboxes (both bounded per round).
+    void requestMeteoFollowUps();
+    void pruneMeteoTileCache();
+    // Assembles publishable European warnings from hazard sets + cached
+    // details + cached tile geometry. A warned area publishes once its
+    // details arrive; polygons attach (via republish) when tiles land.
+    QVector<WeatherWarning> buildMeteoWarnings() const;
+    static QString localizedText(const QJsonValue& value);
 
     QNetworkAccessManager network_;
     QHash<QNetworkReply*, RequestContext> requests_;
     QVector<WeatherWarning> warnings_;
-    // Per-feed Meteoalarm warning sets (keyed by feed slug). Each successful
-    // response replaces its own set wholesale so a failed feed keeps its
-    // last-known-good warnings instead of blanking Europe off the alert list.
-    QHash<QString, QVector<WeatherWarning>> meteoalarmSets_;
+    // Meteoalarm state. Regional responses replace their own per-country sets
+    // wholesale (last-known-good survives per-feed failures); details and
+    // tile geometry accumulate in caches keyed by warning signature and tile.
+    struct MeteoArea {
+        QString name;
+        QString region;
+        double minLon = 0.0;
+        double minLat = 0.0;
+        double maxLon = 0.0;
+        double maxLat = 0.0;
+    };
+    struct MeteoHazard {
+        QString featureId;
+        int typeId = 0;
+        int levelId = 0;
+    };
+    struct MeteoDetail {
+        QString warningId;
+        QString headline;
+        QString description;
+        QString instruction;
+        QString senderName;
+        QDateTime onset;
+        QDateTime expires;
+    };
+    QHash<QString, QHash<QString, MeteoArea>> meteoAreaSets_;
+    QHash<QString, QVector<MeteoHazard>> meteoHazardSets_;
+    QHash<QString, MeteoDetail> meteoDetails_;
+    QHash<QString, QDateTime> meteoDetailFetchedAt_;
+    QHash<QString, QHash<QString, QVector<WarningPolygon>>> meteoTilePolygons_;
+    QHash<QString, QString> meteoTypeNames_;
+    bool meteoTypesRequested_ = false;
+    // In-flight dedupe within one refresh round.
+    QSet<QString> meteoPendingDetails_;
+    QSet<QString> meteoPendingTiles_;
+    QDateTime meteoReferenceDate_;
     QVector<StormReport> reports_;
     std::array<QVector<StormReport>, 6> reportSets_;
     QHash<QString, QVector<int>> zoneWarningIndexes_;
@@ -141,5 +211,8 @@ private:
     int failures_ = 0;
     QString firstError_;
 };
+
+// True when this build linked zlib and can actually decode MVT tiles.
+bool meteoTilesAvailable();
 
 } // namespace cappedweather

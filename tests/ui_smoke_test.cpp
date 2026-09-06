@@ -28,6 +28,7 @@
 #include <QPointF>
 #include <QPair>
 #include <QPolygonF>
+#include <QSet>
 #include <QSlider>
 #include <QSpinBox>
 #include <QProgressBar>
@@ -1624,43 +1625,113 @@ UnsupportedThing: ignored safely
         std::cerr << "Empty SPC report response should be a valid zero-report result\n";
         return 1;
     }
-    const QByteArray meteoalarm = R"XML(<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom" xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2">
-  <id>tag:meteoalarm.org,2021-02-19:FR</id>
-  <entry>
-    <cap:geocode><valueName>EMMA_ID</valueName><value>FR003</value></cap:geocode>
-    <link title="Hautes-Pyrenees" href="https://meteoalarm.org?geocode=EMMA_ID:FR003"/>
-    <cap:areaDesc>Hautes-Pyrenees</cap:areaDesc>
-    <cap:event>Moderate high-temperature warning</cap:event>
-    <cap:onset>2026-09-06T22:00:00+00:00</cap:onset>
-    <cap:expires>2026-09-07T22:00:00+00:00</cap:expires>
-    <cap:certainty>Likely</cap:certainty>
-    <cap:severity>Moderate</cap:severity>
-    <cap:urgency>Future</cap:urgency>
-    <cap:identifier>2.49.0.0.250.0.FR.20260906060138.351026</cap:identifier>
-    <link type="application/cap+xml" href="https://feeds.meteoalarm.org/api/v1/warnings/feeds-france/abc123"/>
-  </entry>
-</feed>)XML";
-    const auto meteoWarnings =
-        WeatherOverlaySource::parseMeteoalarmAtom(meteoalarm, QStringLiteral("france"), &parseError);
-    if (!parseError.isEmpty() || meteoWarnings.size() != 1 ||
-        meteoWarnings.front().id !=
-            QStringLiteral("meteoalarm:2.49.0.0.250.0.FR.20260906060138.351026") ||
-        meteoWarnings.front().event != QStringLiteral("Moderate high-temperature warning") ||
-        meteoWarnings.front().severity != QStringLiteral("Moderate") ||
-        meteoWarnings.front().senderName != QStringLiteral("Meteoalarm/france") ||
-        !meteoWarnings.front().polygons.isEmpty() ||
-        !meteoWarnings.front().onset.isValid() || !meteoWarnings.front().expires.isValid()) {
-        std::cerr << "Meteoalarm feed parsing failed\n";
-        return 1;
-    }
     const QByteArray meteoEmpty = R"XML(<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"><id>tag:meteoalarm.org,2021-02-19:NL</id></feed>)XML";
+    // The legacy Atom path is retired (visservice below carries geometry);
+    // an empty feed simply parses to no NWS warnings and is ignored.
     const auto meteoNone =
-        WeatherOverlaySource::parseMeteoalarmAtom(meteoEmpty, QStringLiteral("netherlands"), &parseError);
-    if (!parseError.isEmpty() || !meteoNone.isEmpty()) {
-        std::cerr << "Empty Meteoalarm feed should be a valid zero-warning result\n";
+        WeatherOverlaySource::parseAlerts(meteoEmpty, &parseError);
+    if (!meteoNone.isEmpty()) {
+        std::cerr << "Non-GeoJSON input should not produce NWS warnings\n";
         return 1;
+    }
+    // Meteoalarm visservice helpers: reference hour, level scale, tile math.
+    {
+        const QDateTime now(QDate(2026, 9, 6), QTime(15, 53, 11), QTimeZone::UTC);
+        const auto ref = WeatherOverlaySource::meteoReferenceDate(now);
+        if (ref != QDateTime(QDate(2026, 9, 6), QTime(15, 0, 0), QTimeZone::UTC)) {
+            std::cerr << "Meteoalarm reference date should truncate to the hour\n";
+            return 1;
+        }
+        if (WeatherOverlaySource::meteoSeverityForLevel(1) != QStringLiteral("Extreme") ||
+            WeatherOverlaySource::meteoSeverityForLevel(2) != QStringLiteral("Severe") ||
+            WeatherOverlaySource::meteoSeverityForLevel(3) != QStringLiteral("Moderate") ||
+            WeatherOverlaySource::meteoSeverityForLevel(9) != QStringLiteral("Unknown")) {
+            std::cerr << "Meteoalarm level-to-severity mapping is wrong\n";
+            return 1;
+        }
+        const auto levelStyle = WeatherOverlaySource::meteoalarmLevelStyle(2);
+        if (levelStyle.priority != 4 ||
+            levelStyle.color.name(QColor::HexRgb).compare(QStringLiteral("#ff9300"),
+                                                          Qt::CaseInsensitive) != 0) {
+            std::cerr << "Meteoalarm level style should use official colors\n";
+            return 1;
+        }
+        // France bbox covers tile 16/11 at z5.
+        const auto tiles = WeatherOverlaySource::meteoTilesForBounds(-5.0, 41.0, 10.0, 51.5);
+        bool hasFrance = false;
+        for (const auto& tile : tiles) {
+            if (tile.first == 16 && tile.second == 11) {
+                hasFrance = true;
+                break;
+            }
+        }
+        if (!hasFrance || tiles.isEmpty()) {
+            std::cerr << "Meteoalarm tile coverage misses France\n";
+            return 1;
+        }
+        const auto tileUrl = WeatherOverlaySource::meteoTileUrl(5, 16, 11, ref);
+        if (!tileUrl.toString().contains(QStringLiteral("/stream-buffers/live/tiles/5/16/11.mvt")) ||
+            !tileUrl.toString().contains(QStringLiteral("referenceDate=2026-09-06T15")) ||
+            !tileUrl.toString().contains(QStringLiteral("preset=now"))) {
+            std::cerr << "Meteoalarm tile URL is malformed: " << tileUrl.toString().toStdString()
+                      << '\n';
+            return 1;
+        }
+    }
+    // MVT areas tile: hand-built gzip PBF (layer "areas", one triangle with a
+    // hole, uuid "w1"). Tile z=5 x=16 y=11.
+    {
+        static const unsigned char kMvtGzip[] = {
+            31,  139, 8,   0,   181, 143, 157, 106, 2,   255, 147, 114, 168, 96,  228, 98,
+            77,  44,  74,  77,  44,  22,  82,  227, 96,  23,  98,  98,  96,  144, 96,  86,
+            146, 225, 60,  193, 120, 130, 81,  104, 1,   27,  195, 124, 182, 5,   108, 252,
+            64,  222, 117, 22,  33,  6,   144, 216, 113, 70,  126, 41,  150, 210, 210, 204,
+            20,  37,  22,  46,  166, 114, 67,  141, 6,   5,   0,   213, 55,  30,  92,  66,
+            0,   0,   0};
+        const QByteArray gzip(reinterpret_cast<const char*>(kMvtGzip), sizeof(kMvtGzip));
+        const QSet<QString> wanted{QStringLiteral("w1")};
+        QString tileError;
+        const auto polygons =
+            WeatherOverlaySource::parseMvtAreas(gzip, 5, 16, 11, wanted, &tileError);
+        if (!meteoTilesAvailable()) {
+            if (tileError.isEmpty() || !polygons.isEmpty()) {
+                std::cerr << "MVT without zlib should fail closed\n";
+                return 1;
+            }
+        } else {
+            if (!tileError.isEmpty() || !polygons.contains(QStringLiteral("w1")) ||
+                polygons.value(QStringLiteral("w1")).size() != 1) {
+                std::cerr << "MVT areas parsing failed: " << tileError.toStdString() << '\n';
+                return 1;
+            }
+            const auto& polygon = polygons.value(QStringLiteral("w1")).front();
+            if (polygon.exterior.size() != 4 || polygon.holes.size() != 1 ||
+                polygon.holes.front().size() != 4) {
+                std::cerr << "MVT exterior/hole split is wrong\n";
+                return 1;
+            }
+            const auto& first = polygon.exterior.front();
+            if (std::abs(first.x() - 0.27466) > 0.001 || std::abs(first.y() - 48.74170) > 0.001) {
+                std::cerr << "MVT tile-to-lonlat projection is wrong\n";
+                return 1;
+            }
+            // Unwanted UUIDs are skipped without decoding geometry.
+            const QSet<QString> nobody{QStringLiteral("nope")};
+            const auto skipped =
+                WeatherOverlaySource::parseMvtAreas(gzip, 5, 16, 11, nobody, &tileError);
+            if (!tileError.isEmpty() || !skipped.isEmpty()) {
+                std::cerr << "MVT should skip unrequested areas\n";
+                return 1;
+            }
+            // Corrupt input fails closed, never crashes.
+            const auto garbage = WeatherOverlaySource::parseMvtAreas(
+                QByteArray("definitely not gzip data"), 5, 16, 11, wanted, &tileError);
+            if (tileError.isEmpty() || !garbage.isEmpty()) {
+                std::cerr << "MVT garbage input should fail closed\n";
+                return 1;
+            }
+        }
     }
     map->setWeatherOverlays(warnings, stormReports);
     if (map->warningCount() != 1 || map->stormReportCount() != 1) {
