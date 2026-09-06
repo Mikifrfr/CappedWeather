@@ -26,6 +26,7 @@
 #include <QLabel>
 #include <QList>
 #include <QPointF>
+#include <QPair>
 #include <QPolygonF>
 #include <QSlider>
 #include <QSpinBox>
@@ -41,6 +42,7 @@
 #include <QToolButton>
 
 #include <iostream>
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -609,6 +611,111 @@ static bool testOperaKeys(QString* error) {
             QStringLiteral("nohur"))) {
         *error = QStringLiteral("OPERA key filter should drop VRADH and foreign sites");
         return false;
+    }
+    // Heterogeneous bucket layouts (verified live 2026-09-06): SCAN prefixes,
+    // combined moment lists, and multi-moment PVOL objects.
+    if (OperaSource::scanPrefix(QStringLiteral("DE"), QStringLiteral("deess"),
+                                QDate(2026, 9, 6)) !=
+        QStringLiteral("2026/09/06/DE/deess/SCAN/")) {
+        *error = QStringLiteral("OPERA SCAN prefix mismatch");
+        return false;
+    }
+    if (!OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/06/FI/fianj/SCAN/fianj@20260906T0000@0.3@DBZH_TH_VRADH.h5"),
+            QStringLiteral("fianj")) ||
+        !OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/06/NL/nldhl/PVOL/nldhl@20260906T0000@0.3_0.8@CCORH_DBZH_PHIDP_RHOHV_SQIH_TH_VRADH_WRADH_ZDR.h5"),
+            QStringLiteral("nldhl")) ||
+        !OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/06/DE/deasb/SCAN/deasb@20260906T0000@0.5@DBZH.h5"),
+            QStringLiteral("deasb"))) {
+        *error = QStringLiteral("OPERA DBZH filter should accept SCAN/combined keys");
+        return false;
+    }
+    if (OperaSource::isDbzhKey(
+            QStringLiteral("2026/09/06/DE/deasb/SCAN/deasb@20260906T0000@0.5@TH.h5"),
+            QStringLiteral("deasb"))) {
+        *error = QStringLiteral("OPERA DBZH filter should still drop TH-only keys");
+        return false;
+    }
+    // SCAN bucket grouping: same 5-minute cycle assembles one volume even when
+    // providers stagger elevations across minutes (FR pattern).
+    {
+        QVector<QPair<QString, QDateTime>> candidates{
+            {QStringLiteral("2026/09/06/FR/frabb/SCAN/frabb@20260906T0003@4.5@DBZH_TH_VRADH.h5"),
+             QDateTime(QDate(2026, 9, 6), QTime(0, 3), QTimeZone::UTC)},
+            {QStringLiteral("2026/09/06/FR/frabb/SCAN/frabb@20260906T0001@0.9@DBZH_TH_VRADH.h5"),
+             QDateTime(QDate(2026, 9, 6), QTime(0, 1), QTimeZone::UTC)},
+            {QStringLiteral("2026/09/06/FR/frabb/SCAN/frabb@20260906T0000@7.5@DBZH_TH_VRADH.h5"),
+             QDateTime(QDate(2026, 9, 6), QTime(0, 0), QTimeZone::UTC)},
+            {QStringLiteral("2026/09/06/FR/frabb/SCAN/frabb@20260906T0007@1.5@DBZH_TH_VRADH.h5"),
+             QDateTime(QDate(2026, 9, 6), QTime(0, 7), QTimeZone::UTC)},
+        };
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        const auto groups = OperaSource::groupScanCandidates(candidates, 2);
+        if (groups.size() != 2 || groups.at(0).size() != 1 || groups.at(1).size() != 3) {
+            *error = QStringLiteral("OPERA SCAN grouping should bucket by 5-minute cycle");
+            return false;
+        }
+    }
+    // Filling newest bucket: fewer files than the previous bucket and minutes
+    // old means it is still uploading, so it is skipped (not marked
+    // downloaded) and picked up complete on the next refresh.
+    {
+        const auto now = QDateTime::currentDateTimeUtc();
+        const auto stamp = [now](int secsAgo) { return now.addSecs(-secsAgo); };
+        QVector<QVector<QPair<QString, QDateTime>>> groups{
+            {{{QStringLiteral("new1"), stamp(60)}, {QStringLiteral("new2"), stamp(120)}}},
+            {{{QStringLiteral("old1"), stamp(600)},
+              {QStringLiteral("old2"), stamp(660)},
+              {QStringLiteral("old3"), stamp(720)}}},
+        };
+        const auto trimmed = OperaSource::trimScanGroups(groups, 1, now);
+        if (trimmed.size() != 1 || trimmed.at(0).size() != 3 ||
+            trimmed.at(0).at(0).first != QStringLiteral("old1")) {
+            *error = QStringLiteral("OPERA SCAN should skip a still-filling newest bucket");
+            return false;
+        }
+        // Old filling buckets (stale, e.g. after a scan-mode change) are still
+        // delivered: bounded staleness beats a stuck timeline.
+        QVector<QVector<QPair<QString, QDateTime>>> stale{
+            {{{QStringLiteral("new1"), stamp(3600)}, {QStringLiteral("new2"), stamp(3660)}}},
+            {{{QStringLiteral("old1"), stamp(4200)},
+              {QStringLiteral("old2"), stamp(4260)},
+              {QStringLiteral("old3"), stamp(4320)}}},
+        };
+        const auto kept = OperaSource::trimScanGroups(stale, 1, now);
+        if (kept.size() != 1 || kept.at(0).at(0).first != QStringLiteral("new1")) {
+            *error = QStringLiteral("OPERA SCAN should deliver stale buckets regardless of size");
+            return false;
+        }
+    }
+    // SCAN merge: independently decoded single-elevation parts (all numbered
+    // tilt 1) must come out renumbered and sorted by angle.
+    {
+        std::vector<DecodedChunk> parts(2);
+        parts[0].radarId = "FRABB";
+        parts[0].messageCount = 1;
+        DecodedRay high;
+        high.elevationNumber = 1;
+        high.elevationDegrees = 4.5F;
+        high.azimuthDegrees = 10.0F;
+        parts[0].rays.push_back(high);
+        parts[1].radarId = "FRABB";
+        parts[1].messageCount = 1;
+        DecodedRay low;
+        low.elevationNumber = 1;
+        low.elevationDegrees = 0.9F;
+        low.azimuthDegrees = 20.0F;
+        parts[1].rays.push_back(low);
+        const auto merged = OperaSource::mergeScanParts(std::move(parts), "FRABB");
+        if (merged.rays.size() != 2 || merged.messageCount != 2 ||
+            merged.rays.at(0).elevationNumber != 1 || merged.rays.at(1).elevationNumber != 2 ||
+            merged.rays.at(0).elevationDegrees > merged.rays.at(1).elevationDegrees) {
+            *error = QStringLiteral("OPERA SCAN merge should renumber tilts by angle");
+            return false;
+        }
     }
     return true;
 }
@@ -1515,6 +1622,44 @@ UnsupportedThing: ignored safely
         QByteArray{}, StormReportKind::Tornado, &parseError);
     if (!parseError.isEmpty() || !noReports.isEmpty()) {
         std::cerr << "Empty SPC report response should be a valid zero-report result\n";
+        return 1;
+    }
+    const QByteArray meteoalarm = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2">
+  <id>tag:meteoalarm.org,2021-02-19:FR</id>
+  <entry>
+    <cap:geocode><valueName>EMMA_ID</valueName><value>FR003</value></cap:geocode>
+    <link title="Hautes-Pyrenees" href="https://meteoalarm.org?geocode=EMMA_ID:FR003"/>
+    <cap:areaDesc>Hautes-Pyrenees</cap:areaDesc>
+    <cap:event>Moderate high-temperature warning</cap:event>
+    <cap:onset>2026-09-06T22:00:00+00:00</cap:onset>
+    <cap:expires>2026-09-07T22:00:00+00:00</cap:expires>
+    <cap:certainty>Likely</cap:certainty>
+    <cap:severity>Moderate</cap:severity>
+    <cap:urgency>Future</cap:urgency>
+    <cap:identifier>2.49.0.0.250.0.FR.20260906060138.351026</cap:identifier>
+    <link type="application/cap+xml" href="https://feeds.meteoalarm.org/api/v1/warnings/feeds-france/abc123"/>
+  </entry>
+</feed>)XML";
+    const auto meteoWarnings =
+        WeatherOverlaySource::parseMeteoalarmAtom(meteoalarm, QStringLiteral("france"), &parseError);
+    if (!parseError.isEmpty() || meteoWarnings.size() != 1 ||
+        meteoWarnings.front().id !=
+            QStringLiteral("meteoalarm:2.49.0.0.250.0.FR.20260906060138.351026") ||
+        meteoWarnings.front().event != QStringLiteral("Moderate high-temperature warning") ||
+        meteoWarnings.front().severity != QStringLiteral("Moderate") ||
+        meteoWarnings.front().senderName != QStringLiteral("Meteoalarm/france") ||
+        !meteoWarnings.front().polygons.isEmpty() ||
+        !meteoWarnings.front().onset.isValid() || !meteoWarnings.front().expires.isValid()) {
+        std::cerr << "Meteoalarm feed parsing failed\n";
+        return 1;
+    }
+    const QByteArray meteoEmpty = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><id>tag:meteoalarm.org,2021-02-19:NL</id></feed>)XML";
+    const auto meteoNone =
+        WeatherOverlaySource::parseMeteoalarmAtom(meteoEmpty, QStringLiteral("netherlands"), &parseError);
+    if (!parseError.isEmpty() || !meteoNone.isEmpty()) {
+        std::cerr << "Empty Meteoalarm feed should be a valid zero-warning result\n";
         return 1;
     }
     map->setWeatherOverlays(warnings, stormReports);

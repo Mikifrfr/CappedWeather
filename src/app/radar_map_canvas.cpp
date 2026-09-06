@@ -154,11 +154,16 @@ QColor productColor(const ProductKind product, const double normalized,
         const auto value = descriptor.minimum + normalized * (descriptor.maximum - descriptor.minimum);
         switch (product) {
         case ProductKind::Reflectivity:
+            // NWS-style ramp: visual weight grows with dBZ. Bright cyan lives
+            // at the noise floor (-30s) and fades through blues to green at
+            // 20+. (A previous revision painted the whole -10..+5 band full
+            // cyan, so drizzle-level KNMI/OPERA echo glowed like convection.)
             return discretePalette({
-                {-32, QColor("#646464")}, {-10, QColor("#04e9e7")}, {5, QColor("#019ff4")},
-                {15, QColor("#0300f4")}, {20, QColor("#02fd02")}, {30, QColor("#008e00")},
-                {40, QColor("#fdf802")}, {50, QColor("#fd9500")}, {55, QColor("#fd0000")},
-                {65, QColor("#bc00bc")}, {75, QColor("#f8f8f8")},
+                {-32, QColor("#646464")}, {-30, QColor("#04e9e7")}, {-25, QColor("#00b4d8")},
+                {-20, QColor("#019ff4")}, {-10, QColor("#0245f0")}, {0, QColor("#022cd8")},
+                {5, QColor("#019ff4")}, {15, QColor("#0300f4")}, {20, QColor("#02fd02")},
+                {30, QColor("#008e00")}, {40, QColor("#fdf802")}, {50, QColor("#fd9500")},
+                {55, QColor("#fd0000")}, {65, QColor("#bc00bc")}, {75, QColor("#f8f8f8")},
             }, value, alpha);
         case ProductKind::Velocity:
             return discretePalette({
