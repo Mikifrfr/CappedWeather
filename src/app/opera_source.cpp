@@ -6,6 +6,7 @@
 #include "core/radar_catalog.hpp"
 
 #include <QMetaObject>
+#include <QMap>
 #include <QPair>
 #include <QRegularExpression>
 #include <QSettings>
@@ -13,6 +14,7 @@
 #include <QUrlQuery>
 
 #include <algorithm>
+#include <cmath>
 #include <span>
 
 namespace cappedweather {
@@ -26,7 +28,7 @@ constexpr char kBucket[] = "openradar-24h";
 constexpr char kUserAgentSuffix[] = " OPERA ODIM client";
 
 QString findOdimSite(const QString& radarId, QString* odimCode, QString* countryCode) {
-    // Cheap linear scan over 179 sites, cached after first use.
+    // Cheap linear scan over the OPERA sites, cached after first use.
     static const std::vector<RadarSite> sites = RadarCatalog::operaSites();
     const std::string wanted = radarId.toUpper().toStdString();
     for (const auto& site : sites) {
@@ -51,8 +53,16 @@ OperaSource::OperaSource(QObject* parent) : QObject(parent) {
 }
 
 QString OperaSource::pvolPrefix(const QString& countryCode, const QString& odimCode,
-                                const QDate& date) {
+                                 const QDate& date) {
     return QStringLiteral("%1/%2/%3/%4/%5/PVOL/")
+        .arg(date.toString(QStringLiteral("yyyy")),
+             date.toString(QStringLiteral("MM")), date.toString(QStringLiteral("dd")),
+             countryCode, odimCode);
+}
+
+QString OperaSource::scanPrefix(const QString& countryCode, const QString& odimCode,
+                                const QDate& date) {
+    return QStringLiteral("%1/%2/%3/%4/%5/SCAN/")
         .arg(date.toString(QStringLiteral("yyyy")),
              date.toString(QStringLiteral("MM")), date.toString(QStringLiteral("dd")),
              countryCode, odimCode);
@@ -73,8 +83,118 @@ QDateTime OperaSource::timestampFromKey(const QString& key) {
 
 bool OperaSource::isDbzhKey(const QString& key, const QString& odimCode) {
     const auto file = key.section(QLatin1Char('/'), -1);
-    return file.startsWith(odimCode + QStringLiteral("@"), Qt::CaseInsensitive) &&
-           file.endsWith(QStringLiteral("@DBZH.h5"), Qt::CaseInsensitive);
+    if (!file.startsWith(odimCode + QStringLiteral("@"), Qt::CaseInsensitive)) return false;
+    // Moment lists vary by provider: "@DBZH.h5" (separate objects) as well as
+    // combined single objects such as "@DBZH_TH_VRADH.h5" (FI/SE/FR/DE-SCAN)
+    // and "@CCORH_DBZH_PHIDP_RHOHV_SQIH_TH_VRADH_WRADH_ZDR.h5" (NL PVOL).
+    return file.toUpper().contains(QStringLiteral("DBZH"));
+}
+
+bool OperaSource::isThKey(const QString& key, const QString& odimCode) {
+    const auto file = key.section(QLatin1Char('/'), -1);
+    if (!file.startsWith(odimCode + QStringLiteral("@"), Qt::CaseInsensitive)) return false;
+    return file.toUpper().contains(QStringLiteral("TH"));
+}
+
+QVector<QVector<QPair<QString, QDateTime>>> OperaSource::groupScanCandidates(
+    const QVector<QPair<QString, QDateTime>>& newestFirst, int requestedCount,
+    int maxPerGroup) {
+    QVector<QVector<QPair<QString, QDateTime>>> groups;
+    if (requestedCount <= 0) return groups;
+    // SCAN providers sweep elevations across several minutes (FR spreads a
+    // volume over ~5 min); bucket by 5-minute scan cycle so one bucket holds
+    // one volume's elevations regardless of provider staggering.
+    QMap<QString, QVector<QPair<QString, QDateTime>>> buckets;
+    for (const auto& candidate : newestFirst) {
+        const auto stamp = candidate.second;
+        const QDateTime bucketTime(
+            stamp.date(), QTime(stamp.time().hour(), (stamp.time().minute() / 5) * 5, 0),
+            QTimeZone::UTC);
+        buckets[bucketTime.toString(QStringLiteral("yyyyMMddTHHmm"))].push_back(candidate);
+    }
+    auto bucketKeys = buckets.keys();
+    std::sort(bucketKeys.begin(), bucketKeys.end(),
+              [](const QString& a, const QString& b) { return a > b; });
+    for (const auto& bucketKey : bucketKeys) {
+        if (groups.size() >= requestedCount) break;
+        auto files = buckets.value(bucketKey);
+        std::sort(files.begin(), files.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        // Dedupe identical keys (listing overlaps across date prefixes).
+        QVector<QPair<QString, QDateTime>> unique;
+        for (const auto& file : files) {
+            bool seen = false;
+            for (const auto& kept : unique) {
+                if (kept.first == file.first) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) unique.push_back(file);
+            if (unique.size() >= static_cast<std::size_t>(maxPerGroup)) break;
+        }
+        if (!unique.isEmpty()) groups.push_back(std::move(unique));
+    }
+    return groups;
+}
+
+QVector<QVector<QPair<QString, QDateTime>>> OperaSource::trimScanGroups(
+    QVector<QVector<QPair<QString, QDateTime>>> groups, int requestedCount,
+    const QDateTime& now) {
+    // Ask for one spare bucket upstream so a filling newest bucket can be
+    // skipped in favor of the previous complete one.
+    if (groups.size() > 1) {
+        const auto& newest = groups.front();
+        const auto& previous = groups.at(1);
+        QDateTime newestFile = newest.front().second;
+        for (const auto& file : newest) newestFile = std::max(newestFile, file.second);
+        const auto ageSecs = newestFile.secsTo(now);
+        if (newest.size() < previous.size() && ageSecs >= 0 && ageSecs < 8 * 60) {
+            groups.removeFirst();
+        }
+    }
+    while (groups.size() > requestedCount && !groups.isEmpty()) groups.removeLast();
+    return groups;
+}
+
+DecodedChunk OperaSource::mergeScanParts(std::vector<DecodedChunk> parts,
+                                         const std::string& radarId) {    DecodedChunk merged;
+    merged.radarId = radarId;
+    std::vector<DecodedRay> all;
+    for (auto& part : parts) {
+        merged.messageCount += part.messageCount;
+        merged.rejectedMessages += part.rejectedMessages;
+        merged.rejectedBlocks += part.rejectedBlocks;
+        for (auto& ray : part.rays) all.push_back(std::move(ray));
+    }
+    if (all.empty()) return merged;
+    // Unique elevations within 0.05 deg tolerance, sorted ascending.
+    std::vector<float> elevations;
+    elevations.reserve(all.size());
+    for (const auto& ray : all) elevations.push_back(ray.elevationDegrees);
+    std::sort(elevations.begin(), elevations.end());
+    std::vector<float> unique;
+    for (const auto value : elevations) {
+        if (unique.empty() || std::fabs(value - unique.back()) > 0.05F) unique.push_back(value);
+    }
+    for (auto& ray : all) {
+        std::size_t best = 0;
+        float bestDistance = std::fabs(ray.elevationDegrees - unique.front());
+        for (std::size_t index = 1; index < unique.size(); ++index) {
+            const float distance = std::fabs(ray.elevationDegrees - unique[index]);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = index;
+            }
+        }
+        ray.elevationNumber = static_cast<std::uint8_t>(std::min<std::size_t>(best + 1, 255));
+    }
+    std::sort(all.begin(), all.end(), [](const DecodedRay& a, const DecodedRay& b) {
+        if (a.elevationNumber != b.elevationNumber) return a.elevationNumber < b.elevationNumber;
+        return a.azimuthDegrees < b.azimuthDegrees;
+    });
+    merged.rays = std::move(all);
+    return merged;
 }
 
 QUrl OperaSource::listingUrl(const QString& prefix, const QString& startAfter) {
@@ -115,8 +235,21 @@ void OperaSource::requestLatest(const QString& radarId) {
     if (inFlightRadars_.contains(radarId)) return;
     inFlightRadars_.insert(radarId);
     const auto today = QDateTime::currentDateTimeUtc().date();
+    const auto yesterday = today.addDays(-1);
     // Date rollover: yesterday's objects are still today's newest volumes.
-    startListing({radarId, odimCode, countryCode, {today, today.addDays(-1)}, 0, 1, {}});
+    // Providers disagree on container: PVOL (multi-tilt, e.g. NO/NL) vs SCAN
+    // (single elevation, e.g. FR/DE/FI/SE). List both; PVOL wins when present.
+    ListingContext context;
+    context.radarId = radarId;
+    context.odimCode = odimCode;
+    context.countryCode = countryCode;
+    context.prefixes = {pvolPrefix(countryCode, odimCode, today),
+                        pvolPrefix(countryCode, odimCode, yesterday),
+                        scanPrefix(countryCode, odimCode, today),
+                        scanPrefix(countryCode, odimCode, yesterday)};
+    context.prefixIndex = 0;
+    context.requestedCount = 1;
+    startListing(std::move(context));
 }
 
 void OperaSource::requestRecent(const QString& radarId, int volumeCount) {
@@ -130,8 +263,18 @@ void OperaSource::requestRecent(const QString& radarId, int volumeCount) {
     if (inFlightRadars_.contains(radarId)) return;
     inFlightRadars_.insert(radarId);
     const auto today = QDateTime::currentDateTimeUtc().date();
-    startListing({radarId, odimCode, countryCode,
-                  {today, today.addDays(-1)}, 0, qMax(1, volumeCount), {}});
+    const auto yesterday = today.addDays(-1);
+    ListingContext context;
+    context.radarId = radarId;
+    context.odimCode = odimCode;
+    context.countryCode = countryCode;
+    context.prefixes = {pvolPrefix(countryCode, odimCode, today),
+                        pvolPrefix(countryCode, odimCode, yesterday),
+                        scanPrefix(countryCode, odimCode, today),
+                        scanPrefix(countryCode, odimCode, yesterday)};
+    context.prefixIndex = 0;
+    context.requestedCount = qMax(1, volumeCount);
+    startListing(std::move(context));
 }
 
 void OperaSource::clearDownloaded(const QString& radarId) {
@@ -142,6 +285,8 @@ void OperaSource::cancel(const QString& radarId) {
     cancelledRadars_.insert(radarId);
     inFlightRadars_.remove(radarId);
     pendingBacklog_.remove(radarId);
+    pendingScanVolumes_.remove(radarId);
+    activeScanGroups_.remove(radarId);
     for (auto it = listingRequests_.begin(); it != listingRequests_.end();) {
         if (it.value().radarId == radarId) {
             auto* reply = it.key();
@@ -163,8 +308,8 @@ void OperaSource::cancel(const QString& radarId) {
 }
 
 void OperaSource::startListing(ListingContext context) {
-    const auto prefix = pvolPrefix(context.countryCode, context.odimCode,
-                                   context.dates.at(context.dateIndex));
+    if (context.prefixIndex < 0 || context.prefixIndex >= context.prefixes.size()) return;
+    const auto prefix = context.prefixes.at(context.prefixIndex);
     emit statusChanged(context.radarId,
                        QStringLiteral("OPERA listing %1").arg(context.radarId));
     auto* reply = network_.get(makeRequest(listingUrl(prefix, context.startAfter), {},
@@ -180,14 +325,17 @@ void OperaSource::finishListing(QNetworkReply* reply) {
         finish();
         return;
     }
+    const auto advancePrefix = [this](ListingContext moved) {
+        ++moved.prefixIndex;
+        moved.startAfter.clear();
+        startListing(std::move(moved));
+    };
     if (reply->error() != QNetworkReply::NoError) {
-        // Try the next date before giving up (today may be empty); keep
-        // whatever this date already contributed.
-        if (context.dateIndex + 1 < context.dates.size()) {
-            ++context.dateIndex;
-            context.startAfter.clear();
+        // Try the next prefix before giving up; keep whatever already
+        // contributed.
+        if (context.prefixIndex + 1 < context.prefixes.size()) {
             finish();
-            startListing(std::move(context));
+            advancePrefix(std::move(context));
             return;
         }
         inFlightRadars_.remove(context.radarId);
@@ -200,41 +348,158 @@ void OperaSource::finishListing(QNetworkReply* reply) {
     const auto parsed = parseS3Objects(reply->readAll(), &error);
     finish();
     for (const auto& object : parsed.objects) {
-        if (!isDbzhKey(object.key, context.odimCode)) continue;
         const auto stamp = timestampFromKey(object.key);
         if (!stamp.isValid()) continue;
-        context.candidates.push_back({object.key, stamp});
+        if (isDbzhKey(object.key, context.odimCode)) {
+            if (!context.seenKeys.contains(object.key)) {
+                context.seenKeys.insert(object.key);
+                context.candidates.push_back({object.key, stamp});
+            }
+        } else if (isThKey(object.key, context.odimCode)) {
+            // TH-only fallback for sites/moments with no DBZH object.
+            if (!context.seenThKeys.contains(object.key)) {
+                context.seenThKeys.insert(object.key);
+                context.thCandidates.push_back({object.key, stamp});
+            }
+        }
     }
     if (parsed.truncated) {
         context.startAfter = parsed.lastKey;
         startListing(std::move(context));
         return;
     }
-    // One date exhausted: fall through to the next before deciding.
-    if (context.dateIndex + 1 < context.dates.size()) {
-        ++context.dateIndex;
-        context.startAfter.clear();
-        startListing(std::move(context));
+    // One prefix exhausted: fall through to the next before deciding.
+    if (context.prefixIndex + 1 < context.prefixes.size()) {
+        advancePrefix(std::move(context));
         return;
     }
-    std::sort(context.candidates.begin(), context.candidates.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-    // Newest-first, skipping volumes already delivered in this session.
-    QVector<QPair<QString, QDateTime>> fresh;
-    auto& seen = downloadedVolumeIds_[context.radarId];
+    // All prefixes listed. Prefer PVOL multi-tilt objects; fall back to SCAN
+    // single-elevation assembly, then to TH-only objects.
+    QVector<QPair<QString, QDateTime>> pvol;
+    QVector<QPair<QString, QDateTime>> scan;
     for (const auto& candidate : context.candidates) {
-        const auto volumeId = candidate.second.toString(QStringLiteral("yyyyMMddTHHmm"));
-        if (seen.contains(volumeId)) continue;
-        if (!fresh.contains(candidate)) fresh.push_back(candidate);
-        if (fresh.size() >= static_cast<std::size_t>(context.requestedCount)) break;
+        if (candidate.first.contains(QStringLiteral("/SCAN/")))
+            scan.push_back(candidate);
+        else
+            pvol.push_back(candidate);
     }
-    if (fresh.isEmpty()) {
-        inFlightRadars_.remove(context.radarId);
-        emit statusChanged(context.radarId, QStringLiteral("OPERA %1 up to date")
-                                                     .arg(context.radarId));
+    if (!pvol.isEmpty()) {
+        std::sort(pvol.begin(), pvol.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        QVector<QPair<QString, QDateTime>> fresh;
+        auto& seen = downloadedVolumeIds_[context.radarId];
+        for (const auto& candidate : pvol) {
+            const auto volumeId = candidate.second.toString(QStringLiteral("yyyyMMddTHHmm"));
+            if (seen.contains(volumeId)) continue;
+            if (!fresh.contains(candidate)) fresh.push_back(candidate);
+            if (fresh.size() >= static_cast<std::size_t>(context.requestedCount)) break;
+        }
+        if (fresh.isEmpty()) {
+            inFlightRadars_.remove(context.radarId);
+            emit statusChanged(context.radarId, QStringLiteral("OPERA %1 up to date")
+                                                         .arg(context.radarId));
+            return;
+        }
+        beginDownloads(context.radarId, std::move(fresh), context.requestedCount);
         return;
     }
-    beginDownloads(context.radarId, std::move(fresh), context.requestedCount);
+    // TH-only PVOL fallback (a site temporarily serving unfiltered moments).
+    QVector<QPair<QString, QDateTime>> pvolTh;
+    for (const auto& candidate : context.thCandidates) {
+        if (!candidate.first.contains(QStringLiteral("/SCAN/"))) pvolTh.push_back(candidate);
+    }
+    if (!pvolTh.isEmpty() && scan.isEmpty()) {
+        std::sort(pvolTh.begin(), pvolTh.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        QVector<QPair<QString, QDateTime>> fresh;
+        auto& seen = downloadedVolumeIds_[context.radarId];
+        for (const auto& candidate : pvolTh) {
+            const auto volumeId = candidate.second.toString(QStringLiteral("yyyyMMddTHHmm"));
+            if (seen.contains(volumeId)) continue;
+            if (!fresh.contains(candidate)) fresh.push_back(candidate);
+            if (fresh.size() >= static_cast<std::size_t>(context.requestedCount)) break;
+        }
+        if (!fresh.isEmpty()) {
+            beginDownloads(context.radarId, std::move(fresh), context.requestedCount);
+            return;
+        }
+    }
+    if (!scan.isEmpty()) {
+        std::sort(scan.begin(), scan.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        // Skip buckets already delivered this session.
+        auto& seen = downloadedVolumeIds_[context.radarId];
+        QVector<QPair<QString, QDateTime>> unseen;
+        for (const auto& candidate : scan) {
+            const QDateTime bucketTime(candidate.second.date(),
+                                       QTime(candidate.second.time().hour(),
+                                             (candidate.second.time().minute() / 5) * 5, 0),
+                                       QTimeZone::UTC);
+            const auto bucketId = bucketTime.toString(QStringLiteral("yyyyMMddTHHmm"));
+            if (seen.contains(bucketId)) continue;
+            unseen.push_back(candidate);
+        }
+        if (unseen.isEmpty()) {
+            inFlightRadars_.remove(context.radarId);
+            emit statusChanged(context.radarId, QStringLiteral("OPERA %1 up to date")
+                                                         .arg(context.radarId));
+            return;
+        }
+        const auto groups = trimScanGroups(groupScanCandidates(unseen, context.requestedCount + 1),
+                                             context.requestedCount,
+                                             QDateTime::currentDateTimeUtc());
+        if (groups.isEmpty()) {
+            inFlightRadars_.remove(context.radarId);
+            emit statusChanged(context.radarId, QStringLiteral("OPERA %1 up to date")
+                                                         .arg(context.radarId));
+            return;
+        }
+        QVector<VolumePlan> plans;
+        for (const auto& group : groups) {
+            QDateTime newest = group.front().second;
+            for (const auto& file : group) newest = std::max(newest, file.second);
+            const QDateTime bucketTime(newest.date(),
+                                       QTime(newest.time().hour(),
+                                             (newest.time().minute() / 5) * 5, 0),
+                                       QTimeZone::UTC);
+            plans.push_back({bucketTime.toString(QStringLiteral("yyyyMMddTHHmm")),
+                             newest, group});
+        }
+        beginScanVolumes(context.radarId, std::move(plans));
+        return;
+    }
+    // Last resort: SCAN TH-only files (no DBZH anywhere for the site).
+    if (!context.thCandidates.isEmpty()) {
+        QVector<QPair<QString, QDateTime>> scanTh;
+        for (const auto& candidate : context.thCandidates) {
+            if (candidate.first.contains(QStringLiteral("/SCAN/"))) scanTh.push_back(candidate);
+        }
+        if (!scanTh.isEmpty()) {
+            std::sort(scanTh.begin(), scanTh.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            const auto groups = trimScanGroups(groupScanCandidates(scanTh, context.requestedCount + 1),
+                                               context.requestedCount,
+                                               QDateTime::currentDateTimeUtc());
+            if (!groups.isEmpty()) {
+                QVector<VolumePlan> plans;
+                for (const auto& group : groups) {
+                    QDateTime newest = group.front().second;
+                    for (const auto& file : group) newest = std::max(newest, file.second);
+                    const QDateTime bucketTime(
+                        newest.date(),
+                        QTime(newest.time().hour(), (newest.time().minute() / 5) * 5, 0),
+                        QTimeZone::UTC);
+                    plans.push_back({bucketTime.toString(QStringLiteral("yyyyMMddTHHmm")),
+                                     newest, group});
+                }
+                beginScanVolumes(context.radarId, std::move(plans));
+                return;
+            }
+        }
+    }
+    inFlightRadars_.remove(context.radarId);
+    emit statusChanged(context.radarId, QStringLiteral("OPERA %1: no DBZH volumes found")
+                                                 .arg(context.radarId));
 }
 
 void OperaSource::beginDownloads(const QString& radarId,
@@ -253,6 +518,52 @@ void OperaSource::beginDownloads(const QString& radarId,
     // The remainder follow as downloads complete (see completeVolume).
     if (!candidates.isEmpty()) {
         pendingBacklog_[radarId].append(candidates);
+    }
+}
+
+void OperaSource::beginScanVolumes(const QString& radarId, QVector<VolumePlan> plans) {
+    if (plans.isEmpty()) {
+        inFlightRadars_.remove(radarId);
+        emit statusChanged(radarId, QStringLiteral("OPERA %1 up to date").arg(radarId));
+        return;
+    }
+    pendingScanVolumes_[radarId].append(plans);
+    startNextScanVolume(radarId);
+}
+
+void OperaSource::startNextScanVolume(const QString& radarId) {
+    if (cancelledRadars_.contains(radarId)) return;
+    if (activeScanGroups_.contains(radarId)) return;
+    auto it = pendingScanVolumes_.find(radarId);
+    if (it == pendingScanVolumes_.end() || it->isEmpty()) {
+        // No more queued volumes: release the radar once in-flight parts drain.
+        for (const auto& pending : downloadRequests_) {
+            if (pending.radarId == radarId) return;
+        }
+        inFlightRadars_.remove(radarId);
+        return;
+    }
+    const VolumePlan plan = it->takeFirst();
+    if (it->isEmpty()) pendingScanVolumes_.erase(it);
+    downloadedVolumeIds_[radarId].insert(plan.volumeId);
+    ScanGroupState state;
+    state.dataTime = plan.dataTime;
+    state.expected = plan.files.size();
+    state.receivedAt = QDateTime::currentDateTimeUtc();
+    activeScanGroups_.insert(radarId, std::move(state));
+    emit volumeStarted(radarId, plan.volumeId, 1);
+    emit statusChanged(radarId, QStringLiteral("OPERA downloading %1 %2 (%3 scans)")
+                                         .arg(radarId, plan.volumeId)
+                                         .arg(plan.files.size()));
+    for (const auto& file : plan.files) {
+        DownloadContext download;
+        download.radarId = radarId;
+        download.volumeId = plan.volumeId;
+        download.key = file.first;
+        download.dataTime = file.second;
+        download.attempt = 0;
+        download.scanPart = true;
+        requestObject(std::move(download));
     }
 }
 
@@ -283,6 +594,10 @@ void OperaSource::finishObject(QNetworkReply* reply) {
         }
         const auto message = reply->errorString();
         reply->deleteLater();
+        if (context.scanPart) {
+            completeScanPart(context, QDateTime::currentDateTimeUtc(), std::nullopt);
+            return;
+        }
         completeVolume(context, QDateTime::currentDateTimeUtc(), std::nullopt,
                        QStringLiteral("OPERA download failed: %1").arg(message));
         return;
@@ -307,6 +622,11 @@ void OperaSource::decodeObject(DownloadContext context, QByteArray payload) {
             guarded,
             [guarded, context, decoded = std::move(decoded), failure]() mutable {
                 if (guarded.isNull() || guarded->cancelledRadars_.contains(context.radarId)) {
+                    return;
+                }
+                if (context.scanPart) {
+                    guarded->completeScanPart(context, QDateTime::currentDateTimeUtc(),
+                                              std::move(decoded));
                     return;
                 }
                 guarded->completeVolume(context, QDateTime::currentDateTimeUtc(),
@@ -344,6 +664,52 @@ void OperaSource::completeVolume(DownloadContext context, const QDateTime& recei
         if (pending.radarId == context.radarId) return;
     }
     inFlightRadars_.remove(context.radarId);
+}
+
+void OperaSource::completeScanPart(DownloadContext context, const QDateTime& receivedAt,
+                                     std::optional<DecodedChunk> decoded) {
+    auto groupIt = activeScanGroups_.find(context.radarId);
+    if (groupIt == activeScanGroups_.end()) return;
+    // Stale part from a previous group with a reused volume id: ignore.
+    ScanGroupState& state = groupIt.value();
+    if (decoded.has_value()) {
+        state.parts.push_back(std::move(*decoded));
+    } else {
+        ++state.failed;
+    }
+    ++state.finished;
+    state.receivedAt = receivedAt;
+    if (state.finished < state.expected) {
+        emit volumeProgress(context.radarId, context.volumeId, state.finished, state.expected,
+                            static_cast<int>(state.parts.size()), state.failed);
+        return;
+    }
+    // Move everything out before erasing: state dangles after this point.
+    auto parts = std::move(state.parts);
+    const int failed = state.failed;
+    const int expected = state.expected;
+    activeScanGroups_.erase(groupIt);
+    if (!parts.empty()) {
+        auto merged = mergeScanParts(std::move(parts), context.radarId.toStdString());
+        emit chunkDecoded(context.radarId, context.volumeId, context.volumeId, merged, receivedAt);
+        emit volumeProgress(context.radarId, context.volumeId, 1, 1, 1, 0);
+        emit volumeReady(context.radarId, context.volumeId, 1, 0, receivedAt);
+        if (failed > 0) {
+            emit statusChanged(context.radarId,
+                               QStringLiteral("OPERA %1 %2: %3 of %4 scans unavailable")
+                                   .arg(context.radarId, context.volumeId)
+                                   .arg(failed)
+                                   .arg(expected));
+        }
+    } else {
+        emit volumeProgress(context.radarId, context.volumeId, 1, 1, 0, 1);
+        emit volumeReady(context.radarId, context.volumeId, 1, 1, receivedAt);
+        emit statusChanged(context.radarId, QStringLiteral("OPERA %1 %2: all %3 scans failed")
+                                                     .arg(context.radarId, context.volumeId)
+                                                     .arg(expected));
+    }
+    // Next queued volume, if any; otherwise release the radar when drained.
+    startNextScanVolume(context.radarId);
 }
 
 void OperaSource::failRadar(const QString& radarId, const QString& message) {
