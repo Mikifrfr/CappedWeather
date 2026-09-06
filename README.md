@@ -102,7 +102,7 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Importable, persistent custom palettes using `native_value,#RRGGBB` lines, plus Capped and color-safe presets.
 - TDWR volumes expose their available base moments (reflectivity, radial velocity, and spectrum width); unavailable dual-polarization products are disabled automatically.
 - Searchable radar selection with persistent favorites, recent sites, optional manual-position chase mode, zoom-aware station decluttering, station details, and national/recenter controls.
-- 179 operational EUMETNET OPERA radars (ODIM volumes over anonymous S3, CC BY 4.0) alongside NEXRAD: same panels, tilts, products, timeline, and export. Dual-pol products unlock automatically once OPERA serves them.
+- 132 bucket-active EUMETNET OPERA radars (ODIM volumes over anonymous S3, CC BY 4.0) alongside NEXRAD: same panels, tilts, products, timeline, and export. Networks that stopped sharing (ES/UK/HU/SK/GR/PT/RS/IL/LV/MD) are excluded; Lithuania/Iceland additions included. Dual-pol products unlock automatically once OPERA serves them.
 - Cursor sampling for value, range, azimuth, and elevation tilt, including below-threshold and range-folded gates.
 - Up to eight recent NOAA volumes per radar session in memory, with explicit live-follow mode, timestamped frame stepping, looping playback, 1x/2x/4x speeds, and repeated supplemental tilts retained separately.
 - Scoped Archive-II case-study loading from local files/folders or a selected radar/time window in the public AWS archive. Bzip records decode off the UI thread and join the normal timeline/product pipeline.

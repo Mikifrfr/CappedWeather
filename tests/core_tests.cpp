@@ -181,7 +181,9 @@ void testCatalog() {
 
 void testOperaCatalog() {
     const auto sites = RadarCatalog::operaSites();
-    assert(sites.size() >= 150);
+    // Bucket-active sites only; dark national networks are excluded by the
+    // generator (see tools/generate_opera_sites.py).
+    assert(sites.size() >= 120);
     const auto hurum =
         std::find_if(sites.begin(), sites.end(),
                      [](const RadarSite& site) { return site.id == "NOHUR"; });
@@ -190,6 +192,18 @@ void testOperaCatalog() {
     assert(hurum->odimCode == "nohur");
     assert(hurum->countryCode == "NO");
     assert(hurum->latitude.has_value() && hurum->longitude.has_value());
+    // Dark networks stay out of the picker (verified empty 2026-09-06).
+    for (const char* dark : {"UKCLE", "ESMAD", "HUBUD", "SKKOJ"}) {
+        assert(std::none_of(sites.begin(), sites.end(), [dark](const RadarSite& site) {
+            return site.id == dark;
+        }));
+    }
+    // Bucket-active additions are in (Croatia rename + new sharers).
+    for (const char* live : {"HRPUN", "LTLAU", "LTVIL", "DKSAM", "FIKAU"}) {
+        assert(std::find_if(sites.begin(), sites.end(), [live](const RadarSite& site) {
+                   return site.id == live;
+               }) != sites.end());
+    }
     for (const auto& site : sites) {
         assert(site.dataSource == "opera");
         assert(!site.odimCode.empty() && !site.countryCode.empty());

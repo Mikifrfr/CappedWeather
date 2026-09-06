@@ -10,15 +10,28 @@ straight at ODIM polar volumes.
 
 - Bucket `openradar-24h` on CloudFerro S3, anonymous List + Get:
   `https://s3.waw3-1.cloudferro.com/openradar-24h?list-type=2&prefix=...`
-- Layout: `YYYY/MM/DD/CC/site/PVOL/`, e.g. `2026/09/05/NO/nohur/PVOL/`
-- Object naming: `<site>@<YYYYMMDDTHHMM>@<el1>_<el2>_...@<MOMENT>.h5`
-  e.g. `nohur@20260905T0000@0.5_1.0_1.6_2.4_3.2_4.2_5.4_6.8_8.5_10.4_12.8_15.5@DBZH.h5`
-  (~0.5–2 MB). The filename itself lists every elevation: tilt discovery
-  without downloading.
-- One object = one moment × N elevations. A "volume" is a single GET
-  (compare: NEXRAD needs ~70 chunk GETs). Moments ride separate objects
-  on their own schedules (DBZH/TH share a scan table, VRADH interleaves
-  its own, e.g. `...T0006@2.6_5.2_..._90.0@VRADH.h5`).
+- Layout: `YYYY/MM/DD/CC/site/<PVOL|SCAN>/`, e.g. `2026/09/05/NO/nohur/PVOL/`.
+  Providers disagree on container: PVOL sites (Norway, Netherlands) upload one
+  object per moment covering N elevations; SCAN sites (France, Germany,
+  Finland, Sweden, ...) upload one object per elevation. The app lists both
+  prefixes and prefers PVOL when present, otherwise assembles a volume from
+  the SCAN elevations sharing a 5-minute scan bucket.
+- Object naming: `<site>@<YYYYMMDDTHHMM>@<elevations>@<MOMENTS>.h5`
+  e.g. `nohur@20260905T0000@0.5_1.0_..._15.5@DBZH.h5`
+  (~0.5–2 MB for separate moments, up to ~24 MB for combined). The filename
+  itself lists every elevation for PVOL objects: tilt discovery without
+  downloading. Moment lists vary: separate `@DBZH.h5` / `@TH.h5` / `@VRADH.h5`
+  vs combined `@DBZH_TH_VRADH.h5` (FI/SE/FR/DE SCAN) vs
+  `@CCORH_DBZH_PHIDP_RHOHV_SQIH_TH_VRADH_WRADH_ZDR.h5` (NL PVOL). Any object
+  whose moment list contains DBZH is treated as reflectivity; TH backs
+  Reflectivity only when an elevation carries no DBZH.
+- One PVOL object = one moment × N elevations. A PVOL "volume" is a single
+  GET (compare: NEXRAD needs ~70 chunk GETs). A SCAN "volume" is one GET per
+  elevation in the scan bucket (typically 5–14 small files). Moments ride
+  separate objects on their own schedules on PVOL sites (DBZH/TH share a scan
+  table, VRADH interleaves its own, e.g. `...T0006@2.6_..._90.0@VRADH.h5`).
+  SCAN sites sweep elevations across minutes (FR staggers a volume over
+  ~5 min), so assembly buckets by 5-minute scan cycle, not exact timestamp.
 - Moments available now: DBZH (QC reflectivity), TH (unfiltered
   reflectivity), VRADH (radial velocity). Dual-pol (CC, ZDR, PHI, KDP)
   is announced for 2027+. This maps exactly onto the existing TDWR
@@ -41,9 +54,15 @@ straight at ODIM polar volumes.
   them; polling S3 listings on the overlay cadence is enough.
 - Station catalog source of truth:
   `EUMETNET/openradardata-validator/.../stations/OPERA_RADARS.csv`
-  (220 radar rows with lat/lon, ODIM code, WIGOS id, band, max range).
+  (219 radar rows with lat/lon, ODIM code, WIGOS id, band, max range).
   The S3 country segment is the uppercased first two letters of the
   ODIM code (`nohur` → `NO`, `deess` → `DE`, `bezav` → `BE`).
+  Upstream "operational" status does NOT track bucket sharing: as of
+  2026-09-06 ten national networks share nothing (ES/UK/HU/SK/GR/PT/RS/IL/LV/MD)
+  and are excluded from the app catalog, while eight sharing sites the CSV
+  flags non-operational are included (DK/FI/IS/PL/LT additions) plus the
+  HRZAG→HRPUN rename. `tools/generate_opera_sites.py` holds these lists;
+  `tools/check_opera_availability.py` re-probes the bucket (132 sites).
 
 ### 3. DWD open data — fallback / Germany depth (probed live, no key)
 
@@ -65,8 +84,12 @@ straight at ODIM polar volumes.
 - OPERA NIMBUS composites as a map layer (user: skip the detour).
 - KNMI/SMHI/FMI national APIs (per-service keys, redundant once OPERA
   volumes flow; revisit only for sites OPERA lacks).
-- Meteoalarm warnings: natural follow-up onto the WeatherWarning
-  pipeline, not this phase.
+- Meteoalarm warnings: live since v0.5.x — per-country legacy Atom feeds
+  (`feeds.meteoalarm.org`) parsed into the existing `WeatherWarning` pipeline
+  (`WeatherOverlaySource` + `AlertCenter` + severity/age filters). CAP entries
+  carry EMMA/NUTS geocodes but no polygons, so European warnings notify and
+  list but do not draw map polygons yet; resolving geocodes to geometry is
+  the remaining follow-up, not a new alert path.
 - OPERA BUFR volumes: HDF5 covers everything recent; do not write a
   BUFR decoder.
 
@@ -100,22 +123,27 @@ pick station, LIVE follow, tilts, products, timeline, cross-sections.
 ### App: `src/app/opera_source.{hpp,cpp}`
 
 - Mirrors `NexradSource` responsibilities against CloudFerro S3:
-  ListObjectsV2 on `<date>/<CC>/<site>/PVOL/`, pick newest timestamp,
-  GET the DBZH object (+ VRADH object at the closest timestamp when
-  the Velocity product is selected; TH ignored v1).
+  ListObjectsV2 on `<date>/<CC>/<site>/{PVOL,SCAN}/` (today + yesterday),
+  pick newest timestamps, GET the DBZH objects (+ VRADH object at the closest
+  timestamp when the Velocity product is selected on PVOL sites; TH ignored
+  v1 unless no DBZH exists).
+- PVOL volumes decode from a single object; SCAN volumes merge one object per
+  elevation in the newest 5-minute scan bucket (elevations renumbered sorted
+  by angle so tilts, timeline, Echo Tops/VIL, probing, and export work
+  unmodified — SCAN volumes with ≥2 tilts derive ET/VIL like PVOL ones).
 - Reuse `app/http_client` (UA/timeout/redirect) and `app/s3_listing`
   (the ListObjectsV2 parser from the dedup task) unchanged.
 - Decode off the UI thread via the shared decode executor, publish
   through the same `volumeReady` path so timeline, tilts, derived
-  products (Echo Tops/VIL need ≥2 tilts — DBZH objects carry 12),
-  probing, and GIF export work unmodified.
+  products (Echo Tops/VIL need ≥2 tilts — PVOL DBZH objects carry 12,
+  SCAN buckets typically 5–14), probing, and GIF export work unmodified.
 - Refresh cadence: follow the overlay timer (60 s default); volumes
   appear every 5 min per site.
 
 ### Catalog + UI
 
 - Vendor `OPERA_RADARS.csv` → generated `europeSites()` list (script
-  run once, output committed; ~220 sites with id, name, lat/lon,
+  run once, output committed; 132 bucket-active sites with id, name, lat/lon,
   ODIM code, country segment). Station picker, favorites, chase, and
   the Esri basemap all work unchanged (panels are projection-agnostic).
 - CC BY 4.0 credit: extend the on-canvas attribution chip when the
