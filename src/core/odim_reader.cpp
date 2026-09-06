@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 namespace cappedweather {
@@ -259,6 +260,14 @@ bool odimReaderAvailable() {
 std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes, std::string radarId,
                                          std::string* error) {
 #ifdef CAPPEDWEATHER_HAS_HDF5
+    // The HDF5 C library here is built WITHOUT thread safety
+    // (H5_HAVE_THREADSAFE off), yet volumes decode on a thread pool where
+    // SCAN sites fan out to ~10 concurrent files. Serialize every HDF5 call
+    // site-wide: downloads stay parallel, decodes stay off the UI thread,
+    // they just take the lock one at a time. Concurrent H5* calls otherwise
+    // corrupt global library state and crash (seen as AV on DETUR).
+    static std::mutex odimHdf5Mutex;
+    const std::lock_guard<std::mutex> hdf5Lock(odimHdf5Mutex);
     DecodedChunk chunk;
     chunk.radarId = std::move(radarId);
     if (!hasHdf5Signature(bytes)) {
