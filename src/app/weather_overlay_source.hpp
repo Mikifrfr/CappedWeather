@@ -77,6 +77,17 @@ public:
     static QVector<StormReport> parseStormReports(const QByteArray& data, StormReportKind kind,
                                                    QString* error = nullptr,
                                                    QDate convectiveDate = {});
+    // Parses a Meteoalarm legacy Atom feed (feeds.meteoalarm.org,
+    // per-country "meteoalarm-legacy-atom-<slug>") into WeatherWarnings.
+    // CAP severity vocabulary (Minor/Moderate/Severe/Extreme) already matches
+    // the NWS scale consumed by AlertCenter, so no new alert machinery is
+    // needed. Entries carry EMMA/NUTS geocodes but no polygons (Meteoalarm
+    // geometry lives in a separate geocode database); returned warnings have
+    // empty polygons and rely on AlertCenter's zone-only path. countrySlug is
+    // the feed slug (e.g. "france"), recorded in senderName for provenance.
+    static QVector<WeatherWarning> parseMeteoalarmAtom(const QByteArray& data,
+                                                       const QString& countrySlug,
+                                                       QString* error = nullptr);
 
 public slots:
     void refresh();
@@ -91,6 +102,7 @@ private:
         Alerts,
         Reports,
         Zone,
+        Meteoalarm,
     };
 
     struct RequestContext {
@@ -99,6 +111,7 @@ private:
         StormReportKind reportKind = StormReportKind::Wind;
         QDate convectiveDate;
         QString zoneUrl;
+        QString meteoalarmSlug;
     };
 
     void request(const QUrl& url, RequestContext context, const QByteArray& accept = {});
@@ -110,6 +123,10 @@ private:
     QNetworkAccessManager network_;
     QHash<QNetworkReply*, RequestContext> requests_;
     QVector<WeatherWarning> warnings_;
+    // Per-feed Meteoalarm warning sets (keyed by feed slug). Each successful
+    // response replaces its own set wholesale so a failed feed keeps its
+    // last-known-good warnings instead of blanking Europe off the alert list.
+    QHash<QString, QVector<WeatherWarning>> meteoalarmSets_;
     QVector<StormReport> reports_;
     std::array<QVector<StormReport>, 6> reportSets_;
     QHash<QString, QVector<int>> zoneWarningIndexes_;

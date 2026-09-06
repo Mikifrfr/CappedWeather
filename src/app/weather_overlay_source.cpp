@@ -9,6 +9,7 @@
 #include <QTimer>
 #include <QTimeZone>
 #include <QUrl>
+#include <QXmlStreamReader>
 
 #include <algorithm>
 #include <array>
@@ -24,6 +25,21 @@ constexpr auto kWindReportsUrl = "https://www.spc.noaa.gov/climo/reports/today_w
 constexpr auto kYesterdayTornadoReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_torn.csv";
 constexpr auto kYesterdayHailReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_hail.csv";
 constexpr auto kYesterdayWindReportsUrl = "https://www.spc.noaa.gov/climo/reports/yesterday_wind.csv";
+
+// Meteoalarm legacy Atom feeds (EUMETNET, CC BY 4.0 equivalent + ToS at
+// meteoalarm.org). One feed per country; slugs verified live 2026-09-06.
+// Covers the OPERA radar footprint so European sessions get alerts through
+// the same WeatherWarning pipeline as NWS. Extend here to add countries.
+constexpr std::array kMeteoalarmFeeds{
+    "france",         "germany",   "netherlands", "belgium",  "finland",  "sweden",
+    "norway",         "denmark",   "ireland",     "united-kingdom", "spain", "poland",
+    "italy",          "austria",
+};
+
+QString meteoalarmFeedUrl(const char* slug) {
+    return QStringLiteral("https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-%1")
+        .arg(QString::fromLatin1(slug));
+}
 
 struct OfficialAlertStyle {
     const char* event;
@@ -240,6 +256,22 @@ NwsAlertStyle nwsAlertStyle(const QString& event) {
     return {QColor(QStringLiteral("#F4D35E")), 1000};
 }
 
+NwsAlertStyle meteoalarmAlertStyle(const QString& severity) {
+    // Meteoalarm awareness colors onto the NWS severity scale: red/orange for
+    // Severe+, yellow for Moderate, grey for Minor. Priorities sit alongside
+    // the NWS table so European warnings interleave sanely in the card list.
+    const auto normalized = severity.trimmed();
+    if (normalized.compare(QStringLiteral("Extreme"), Qt::CaseInsensitive) == 0)
+        return {QColor(QStringLiteral("#FF0000")), 2};
+    if (normalized.compare(QStringLiteral("Severe"), Qt::CaseInsensitive) == 0)
+        return {QColor(QStringLiteral("#FF8C00")), 4};
+    if (normalized.compare(QStringLiteral("Moderate"), Qt::CaseInsensitive) == 0)
+        return {QColor(QStringLiteral("#FFD700")), 60};
+    if (normalized.compare(QStringLiteral("Minor"), Qt::CaseInsensitive) == 0)
+        return {QColor(QStringLiteral("#808080")), 100};
+    return {QColor(QStringLiteral("#F4D35E")), 1000};
+}
+
 WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
     : QObject(parent) {
     connect(&network_, &QNetworkAccessManager::finished, this, &WeatherOverlaySource::requestFinished);
@@ -349,16 +381,159 @@ QVector<StormReport> WeatherOverlaySource::parseStormReports(const QByteArray& d
     return reports;
 }
 
+QVector<WeatherWarning> WeatherOverlaySource::parseMeteoalarmAtom(const QByteArray& data,
+                                                                  const QString& countrySlug,
+                                                                  QString* error) {
+    QVector<WeatherWarning> warnings;
+    QXmlStreamReader xml(data);
+    // Empty feeds (no active warnings) are a valid ~1 KB Atom shell.
+    QString entryIdentifier;
+    QString entryEvent;
+    QString entrySeverity;
+    QString entryCertainty;
+    QString entryUrgency;
+    QString entryOnset;
+    QString entryExpires;
+    QString entryEffective;
+    QString entryAreaDesc;
+    QString entryCapLink;
+    QStringList entryGeocodes;
+    bool inEntry = false;
+    bool inGeocode = false;
+    QString geocodeValueName;
+    QString currentText;
+    const auto flushEntry = [&] {
+        if (entryIdentifier.isEmpty() && entryEvent.isEmpty()) return;
+        WeatherWarning warning;
+        warning.id = entryIdentifier.isEmpty()
+                         ? QStringLiteral("meteoalarm:%1:%2").arg(countrySlug, entryCapLink)
+                         : QStringLiteral("meteoalarm:%1").arg(entryIdentifier);
+        warning.event = entryEvent.isEmpty() ? QStringLiteral("Weather warning") : entryEvent;
+        warning.headline = entryAreaDesc.isEmpty()
+                               ? warning.event
+                               : QStringLiteral("%1 — %2").arg(entryAreaDesc, warning.event);
+        warning.severity = entrySeverity.isEmpty() ? QStringLiteral("Unknown") : entrySeverity;
+        warning.senderName = QStringLiteral("Meteoalarm/%1").arg(countrySlug);
+        QStringList descriptionParts;
+        if (!entryAreaDesc.isEmpty()) descriptionParts.push_back(entryAreaDesc);
+        if (!entryGeocodes.isEmpty())
+            descriptionParts.push_back(
+                QStringLiteral("Areas: %1").arg(entryGeocodes.join(QStringLiteral(", "))));
+        QStringList qualifierParts;
+        if (!entryCertainty.isEmpty())
+            qualifierParts.push_back(QStringLiteral("certainty %1").arg(entryCertainty));
+        if (!entryUrgency.isEmpty())
+            qualifierParts.push_back(QStringLiteral("urgency %1").arg(entryUrgency));
+        if (!qualifierParts.isEmpty())
+            descriptionParts.push_back(qualifierParts.join(QStringLiteral(", ")));
+        if (!entryCapLink.isEmpty()) descriptionParts.push_back(entryCapLink);
+        warning.description = descriptionParts.join(QStringLiteral(" · "));
+        if (!entryOnset.isEmpty())
+            warning.onset = QDateTime::fromString(entryOnset, Qt::ISODate);
+        else if (!entryEffective.isEmpty())
+            warning.onset = QDateTime::fromString(entryEffective, Qt::ISODate);
+        if (!entryExpires.isEmpty())
+            warning.expires = QDateTime::fromString(entryExpires, Qt::ISODate);
+        const auto style = meteoalarmAlertStyle(warning.severity);
+        warning.alertColor = style.color;
+        warning.alertPriority = style.priority;
+        // No polygons: Meteoalarm CAP carries EMMA/NUTS geocodes without
+        // geometry. AlertCenter treats these as zone-only warnings (they
+        // notify when the geographic filter is off and are skipped by the
+        // proximity filter, same as unresolved NWS zones).
+        warnings.push_back(std::move(warning));
+    };
+    while (!xml.atEnd()) {
+        const auto token = xml.readNext();
+        if (token == QXmlStreamReader::StartElement) {
+            const auto local = xml.name().toString();
+            currentText.clear();
+            if (local == QStringLiteral("entry")) {
+                inEntry = true;
+                entryIdentifier.clear();
+                entryEvent.clear();
+                entrySeverity.clear();
+                entryCertainty.clear();
+                entryUrgency.clear();
+                entryOnset.clear();
+                entryExpires.clear();
+                entryEffective.clear();
+                entryAreaDesc.clear();
+                entryCapLink.clear();
+                entryGeocodes.clear();
+            } else if (inEntry && local == QStringLiteral("link")) {
+                const auto attrs = xml.attributes();
+                // The CAP detail link carries type="application/cap+xml".
+                if (attrs.value(QStringLiteral("type")).toString() ==
+                        QStringLiteral("application/cap+xml") &&
+                    entryCapLink.isEmpty())
+                    entryCapLink = attrs.value(QStringLiteral("href")).toString();
+            } else if (inEntry && local == QStringLiteral("geocode")) {
+                inGeocode = true;
+                geocodeValueName.clear();
+            }
+        } else if (token == QXmlStreamReader::Characters) {
+            if (inEntry && !xml.isWhitespace()) currentText += xml.text().toString();
+        } else if (token == QXmlStreamReader::EndElement) {
+            const auto local = xml.name().toString();
+            const auto text = currentText.trimmed();
+            currentText.clear();
+            if (!inEntry) continue;
+            if (local == QStringLiteral("entry")) {
+                flushEntry();
+                inEntry = false;
+            } else if (local == QStringLiteral("identifier")) {
+                if (entryIdentifier.isEmpty()) entryIdentifier = text;
+            } else if (local == QStringLiteral("event")) {
+                if (entryEvent.isEmpty()) entryEvent = text;
+            } else if (local == QStringLiteral("severity")) {
+                if (entrySeverity.isEmpty()) entrySeverity = text;
+            } else if (local == QStringLiteral("certainty")) {
+                if (entryCertainty.isEmpty()) entryCertainty = text;
+            } else if (local == QStringLiteral("urgency")) {
+                if (entryUrgency.isEmpty()) entryUrgency = text;
+            } else if (local == QStringLiteral("onset")) {
+                if (entryOnset.isEmpty()) entryOnset = text;
+            } else if (local == QStringLiteral("expires")) {
+                if (entryExpires.isEmpty()) entryExpires = text;
+            } else if (local == QStringLiteral("effective")) {
+                if (entryEffective.isEmpty()) entryEffective = text;
+            } else if (local == QStringLiteral("areaDesc")) {
+                if (entryAreaDesc.isEmpty()) entryAreaDesc = text;
+            } else if (local == QStringLiteral("valueName")) {
+                if (inGeocode) geocodeValueName = text;
+            } else if (local == QStringLiteral("value")) {
+                if (inGeocode && !text.isEmpty()) {
+                    entryGeocodes.push_back(geocodeValueName.isEmpty()
+                                                ? text
+                                                : QStringLiteral("%1:%2").arg(geocodeValueName, text));
+                }
+            } else if (local == QStringLiteral("geocode")) {
+                inGeocode = false;
+                geocodeValueName.clear();
+            }
+        }
+    }
+    if (xml.hasError()) {
+        if (error) *error = QStringLiteral("Invalid Meteoalarm feed %1: %2").arg(
+                                countrySlug, xml.errorString());
+        return {};
+    }
+    if (error) error->clear();
+    return warnings;
+}
+
 void WeatherOverlaySource::refresh() {
     if (pending_ != 0) return;
     failures_ = 0;
     firstError_.clear();
     alertResponseReady_ = false;
     if (publishTimer_) publishTimer_->stop();
-    // Report sets are intentionally retained: each successful response replaces its
-    // own set wholesale, so a failed request keeps the previously published contents
-    // instead of wiping storm reports off the map until the next success.
-    pending_ = totalRequests_ = 7;
+    // Report and Meteoalarm sets are intentionally retained: each successful
+    // response replaces its own set wholesale, so a failed request keeps the
+    // previously published contents instead of wiping overlays off the map
+    // until the next success.
+    pending_ = totalRequests_ = 7 + static_cast<int>(kMeteoalarmFeeds.size());
     zoneWarningIndexes_.clear();
     const auto now = QDateTime::currentDateTimeUtc();
     const auto today = now.time().hour() < 12 ? now.date().addDays(-1) : now.date();
@@ -373,7 +548,17 @@ void WeatherOverlaySource::refresh() {
         request(QUrl(QString::fromUtf8(yesterdayUrls.at(index))),
                 {RequestKind::Reports, index + 3, kind, today.addDays(-1)}, QByteArrayLiteral("text/csv"));
     }
-    emit statusChanged(QStringLiteral("updating NWS warnings and SPC reports"));
+    for (const auto* slug : kMeteoalarmFeeds) {
+        RequestContext context;
+        context.kind = RequestKind::Meteoalarm;
+        context.meteoalarmSlug = QString::fromLatin1(slug);
+        // No Accept header: feeds.meteoalarm.org answers 406 to
+        // "application/atom+xml" (verified 2026-09-06) but serves the same
+        // feed for */* / text/html / no header. request() omits the header
+        // when accept is empty.
+        request(QUrl(meteoalarmFeedUrl(slug)), std::move(context), {});
+    }
+    emit statusChanged(QStringLiteral("updating NWS warnings, SPC reports, and Meteoalarm"));
 }
 
 void WeatherOverlaySource::request(const QUrl& url, RequestContext context, const QByteArray& accept) {
@@ -444,6 +629,9 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
             auto parsed = parseStormReports(data, context.reportKind, &error, context.convectiveDate);
             if (error.isEmpty() && context.reportSet >= 0)
                 reportSets_.at(static_cast<std::size_t>(context.reportSet)) = std::move(parsed);
+        } else if (context.kind == RequestKind::Meteoalarm) {
+            auto parsed = parseMeteoalarmAtom(data, context.meteoalarmSlug, &error);
+            if (error.isEmpty()) meteoalarmSets_.insert(context.meteoalarmSlug, std::move(parsed));
         } else if (context.kind == RequestKind::Zone) {
             auto polygons = parseZone(data, &error);
             if (error.isEmpty()) {
@@ -488,13 +676,23 @@ void WeatherOverlaySource::publishOverlaySnapshot() {
             if (!report.occurredAt.isValid() || report.occurredAt >= cutoff) reports_.push_back(report);
         }
     }
-    emit overlaysReady(warnings_, reports_, QDateTime::currentDateTimeUtc());
+    QVector<WeatherWarning> combined = warnings_;
+    qsizetype meteoalarmCount = 0;
+    // Deterministic feed order so the merged list is stable across refreshes.
+    auto slugs = meteoalarmSets_.keys();
+    std::sort(slugs.begin(), slugs.end());
+    for (const auto& slug : slugs) {
+        const auto& set = meteoalarmSets_.value(slug);
+        meteoalarmCount += set.size();
+        for (const auto& warning : set) combined.push_back(warning);
+    }
+    emit overlaysReady(combined, reports_, QDateTime::currentDateTimeUtc());
     if (pending_ != 0) return;
     if (failures_ == 0) {
-        const auto drawable = std::count_if(warnings_.cbegin(), warnings_.cend(),
+        const auto drawable = std::count_if(combined.cbegin(), combined.cend(),
                                             [](const auto& warning) { return !warning.polygons.isEmpty(); });
-        emit statusChanged(QStringLiteral("%1 drawable warnings | %2 reports (24 h)")
-                               .arg(drawable).arg(reports_.size()));
+        emit statusChanged(QStringLiteral("%1 drawable warnings (%2 NWS + %3 Meteoalarm) | %4 reports (24 h)")
+                               .arg(drawable).arg(warnings_.size()).arg(meteoalarmCount).arg(reports_.size()));
     } else {
         emit statusChanged(QStringLiteral("overlay update partial (%1 of %2 requests failed): %3")
                                .arg(failures_).arg(totalRequests_).arg(firstError_));
