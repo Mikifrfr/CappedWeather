@@ -211,6 +211,24 @@ std::optional<double> vilKilogramsPerSquareMeter(const std::vector<VerticalSampl
 
 } // namespace
 
+// Cheap pre-check before paying for a deep copy + derive: true when the
+// chunk holds reflectivity on at least two distinct elevation numbers.
+// Mirrors the <2 tilts early-out inside appendDerivedProducts.
+bool chunkSupportsDerivedProducts(const DecodedChunk& chunk) {
+    int firstElevation = 0;
+    bool haveFirst = false;
+    for (const auto& ray : chunk.rays) {
+        if (!ray.has(ProductKind::Reflectivity)) continue;
+        if (!haveFirst) {
+            firstElevation = ray.elevationNumber;
+            haveFirst = true;
+        } else if (ray.elevationNumber != firstElevation) {
+            return true;
+        }
+    }
+    return false;
+}
+
 DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
                                             const double radarElevationMeters) {
     DerivedProductSummary summary;

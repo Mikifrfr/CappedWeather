@@ -37,6 +37,7 @@
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTabWidget>
 #include <QTest>
 #include <QTemporaryDir>
 #include <QTimeZone>
@@ -463,13 +464,39 @@ static bool testThemeSwitcher(MainWindow* window, QString* error) {
 }
 
 static bool testSidebarRedesign(MainWindow* window, QString* error) {
+    // Tabbed sidebar: Radar / Layers / Display / Alerts. Groups live on
+    // tab pages now, so collapse assertions must target a visible header.
+    auto* tabs = window->findChild<QTabWidget*>(QStringLiteral("sidebarTabs"));
+    if (!tabs || tabs->count() != 4) {
+        *error = QStringLiteral("sidebar should have 4 tabs, got %1")
+                     .arg(tabs ? tabs->count() : -1);
+        return false;
+    }
+    if (!window->findChild<QWidget*>(QStringLiteral("warningList"))) {
+        *error = QStringLiteral("Alerts tab should host the warning inbox list");
+        return false;
+    }
+    if (!window->findChild<QWidget*>(QStringLiteral("timelineStrip"))) {
+        *error = QStringLiteral("playback dock should host the filmstrip timeline");
+        return false;
+    }
     // Collapsible task groups.
     const auto headers = window->findChildren<QToolButton*>(QStringLiteral("groupHeader"));
     if (headers.size() < 5) {
         *error = QStringLiteral("dock should have 5+ collapsible groups, got %1").arg(headers.size());
         return false;
     }
-    auto* firstHeader = headers.constFirst();
+    QToolButton* firstHeader = nullptr;
+    for (auto* header : headers) {
+        if (header->isVisibleTo(window)) {
+            firstHeader = header;
+            break;
+        }
+    }
+    if (!firstHeader) {
+        *error = QStringLiteral("at least one group header should be visible");
+        return false;
+    }
     const auto bodies = window->findChildren<QWidget*>();
     QWidget* toggledBody = nullptr;
     // Collapse the first group via its header and confirm something hides.
@@ -526,7 +553,9 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
         *error = QStringLiteral("tilt stepper/grid widgets missing");
         return false;
     }
-    // Scope selector drives the per-panel override box.
+    // Scope selector drives the per-panel override box (Layers tab).
+    tabs->setCurrentIndex(1);
+    QCoreApplication::processEvents();
     auto* scope = window->findChild<QComboBox*>(QStringLiteral("scopeCombo"));
     auto* perPanelBox = window->findChild<QWidget*>(QStringLiteral("perPanelBox"));
     if (!scope || scope->count() != 2 || !perPanelBox) {
@@ -570,7 +599,9 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
         *error = QStringLiteral("dock alert controls should accept edits");
         return false;
     }
-    // Velocity controls hide outside the Velocity product.
+    // Velocity controls hide outside the Velocity product (Radar tab).
+    tabs->setCurrentIndex(0);
+    QCoreApplication::processEvents();
     auto* velocityBox = window->findChild<QWidget*>(QStringLiteral("velocityBox"));
     if (!velocityBox || velocityBox->isVisibleTo(window)) {
         *error = QStringLiteral("velocity box should hide while product is Reflectivity");

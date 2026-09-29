@@ -117,7 +117,12 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - PNG snapshots, animated GIF timelines, and cross-section CSV export.
 - Cached, color-batched radar geometry built off the UI thread; decoded frames are shared across panels instead of copied.
 - Dock-based console layout with movable control and playback docks, a flat dark theme, and a dark Esri World Dark Gray basemap (base + reference labels, no API key).
-- Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
+- Tabbed sidebar (Radar / Layers / Display / Alerts) with a pinned station card, so the dock stops scrolling on laptop windows.
+- Warning inbox on the Alerts tab: every active warning sorted by severity then newest — click to fly the panel there and pin the card, hover to outline the polygon.
+- Filmstrip timeline under the transport buttons: one block per loaded volume, red ticks for warning onsets, amber caps for bookmarks (`B` or right-click).
+- Linked cursor probe: hovering one panel shows a ghost readout with the same gate sampled in every other visible panel (each in its own product).
+- `Ctrl+K` command palette over radars, products, layouts, and actions.
+- Storm-track extrapolation (+10/+20/+30 min dead reckoning), double-click a pinned card to expand it, dark-halo warning outlines that survive bright echo.- Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
 - Persistent operational settings for panels, products, palettes, overlays, opacity, playback, timeline depth, and window geometry.
 
 ## Performance
@@ -127,6 +132,8 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Cached overlay images survive zoom transitions: they are rescaled on screen and reused until the background rebuild lands, so zooming stays fluid instead of hitching on a re-render.
 - Warnings and storm reports publish progressively — polygons appear as soon as their own responses land rather than after the slowest request, and failed requests keep the last known good overlay instead of blanking the map.
 - Chunk downloads are bounded-parallel with per-chunk retries, timeouts, and backoff; basemap tiles use bounded memory and disk caches shared across panels.
+- Level II chunks stream in progressively: the map starts painting at 500 rays and fills in every 4000 more, while Echo Tops/VIL derive in the background and swap in when ready.
+- Downloaded chunks persist in a 512 MB on-disk cache per source, so revisiting a radar (or restarting) skips bytes instead of re-downloading; listings always bypass the cache so the newest scan is never hidden.
 - A full volume is on the order of 8,000+ rays across ~70 chunks, and up to eight volumes per radar are held in memory for instant timeline scrubbing.
 
 ## Operator notes

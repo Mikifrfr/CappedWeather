@@ -114,6 +114,27 @@ public:
     [[nodiscard]] int warningOpacity() const { return warningOpacity_; }
     [[nodiscard]] bool warningsOnTop() const { return warningsOnTop_; }
     void clearPinnedOverlay();
+    // Warning inbox support: fly the view to a warning polygon and pin its
+    // card (index into the warnings vector, same order MainWindow holds).
+    void focusWarning(int warningIndex);
+    void setHighlightedWarning(int warningIndex);
+    [[nodiscard]] int highlightedWarning() const { return highlightedWarning_; }
+    [[nodiscard]] bool pinnedCardContains(const QPointF& screenPos) const;
+    void togglePinnedCardExpanded();
+    // Cross-panel linked probe: sample this panel's current volume at a
+    // geographic position (longitude, latitude) hovered in another panel.
+    struct ProbeSample {
+        bool valid = false;
+        QPointF lonLat;
+        QString valueText;
+        double groundRangeMeters = 0.0;
+        double azimuthDegrees = 0.0;
+        double elevationDegrees = 0.0;
+        double beamMslMeters = 0.0;
+    };
+    [[nodiscard]] ProbeSample sampleAtGeo(const QPointF& lonLat) const;
+    void setLinkedProbe(const QPointF& lonLat, const QString& text, const QString& sourceLabel);
+    void clearLinkedProbe();
     void setBelowThresholdVisible(bool visible);
     void setVelocityProcessing(VelocityProcessingOptions options);
     void setMeasureMode(bool enabled);
@@ -190,6 +211,11 @@ signals:
     // can stay in sync with the canvas.
     void measureModeToggled(bool enabled);
     void crossSectionModeToggled(bool enabled);
+    // Emitted (debounced, same path as the local probe) when the cursor
+    // samples a geographic position; MainWindow fans it out to the other
+    // panels for the linked readout. probeHidden clears those readouts.
+    void probeMoved(const QPointF& lonLat);
+    void probeHidden();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -251,6 +277,8 @@ private:
     void paintLegend(QPainter& painter);
     void paintScaleBar(QPainter& painter);
     void paintProbe(QPainter& painter);
+    void paintWarningHighlight(QPainter& painter);
+    void paintLinkedProbe(QPainter& painter);
     void paintStationCard(QPainter& painter);
     void paintMeasurement(QPainter& painter);
     void paintLoadingChip(QPainter& painter);
@@ -344,6 +372,13 @@ private:
     int pinnedInfoContentHeight_ = 0;
     bool draggingPinnedInfoCard_ = false;
     bool pinnedInfoLocked_ = false;
+    bool pinnedInfoExpanded_ = false;
+    int highlightedWarning_ = -1;
+    // Linked cross-panel readout: a ghost of another panel's cursor.
+    QPointF linkedProbeGeo_;
+    QString linkedProbeText_;
+    QString linkedProbeSource_;
+    bool linkedProbeVisible_ = false;
     QPointF center_{-96.5, 38.5}; // longitude, latitude
     int zoom_ = 4;
     // Pan/zoom undo/redo. Bounded ring of (center, zoom) snapshots.

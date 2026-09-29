@@ -22,16 +22,17 @@ int main(int argc, char** argv) {
     std::size_t rayCount = 0;
     QObject::connect(
         &source, &OperaSource::chunkDecoded,
-        [&](const QString&, const QString&, const QString&, const DecodedChunk& decoded,
-            const QDateTime&) {
+        [&](const QString&, const QString&, const QString&,
+            const std::shared_ptr<const DecodedChunk>& decoded, const QDateTime&) {
+            if (!decoded) return;
             const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
             std::size_t rays = 0;
-            for (const auto& ray : decoded.rays) {
+            for (const auto& ray : decoded->rays) {
                 if (ray.has(ProductKind::Reflectivity)) ++rays;
             }
-            if (!decoded.rays.empty() && rays > 0) {
+            if (!decoded->rays.empty() && rays > 0) {
                 sawChunk = true;
-                rayCount = decoded.rays.size();
+                rayCount = decoded->rays.size();
             }
             Q_UNUSED(index);
         });

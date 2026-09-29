@@ -34,8 +34,11 @@ class QProgressBar;
 class QResizeEvent;
 class QLabel;
 class QGridLayout;
+class QListWidget;
+class QListWidgetItem;
 class QSlider;
 class QSpinBox;
+class QTabWidget;
 class QTimer;
 class QToolButton;
 
@@ -51,6 +54,8 @@ class WeatherOverlaySource;
 class PlacefileSource;
 class ArchiveSource;
 class AlertCenter;
+class TimelineStrip;
+class CommandPalette;
 
 enum class RadarHealthState { Unknown, Online, Stale, Offline };
 
@@ -88,7 +93,7 @@ private slots:
     void volumeProgress(const QString& radarId, const QString& volumeId, int completed,
                         int total, int decoded, int failed);
     void chunkDecoded(const QString& radarId, const QString& volumeId, const QString& key,
-                      DecodedChunk decoded, const QDateTime& receivedAt);
+                      std::shared_ptr<DecodedChunk> decoded, const QDateTime& receivedAt);
     void volumeReady(const QString& radarId, const QString& volumeId, int chunkCount,
                      int failedChunks, const QDateTime& receivedAt);
     void showFrame(int index);
@@ -105,10 +110,15 @@ private:
     void updatePlaybackControls();
     void ensureHistoryLoaded(bool playWhenReady = false);
     void stopAnimation();
-    void acceptDecodedChunk(const QString& radarId, const QString& volumeId, DecodedChunk decoded);
+    void acceptDecodedChunk(const QString& radarId, const QString& volumeId,
+                            std::shared_ptr<DecodedChunk> decoded);
     void finalizeVolumeReady(const QString& radarId, const QString& volumeId, int chunkCount,
                              int failedChunks, const QDateTime& receivedAt,
                              std::shared_ptr<DecodedChunk> volume);
+    // Background derived-product swap: replaces a published base frame's
+    // chunk once ET18/VIL finish off the critical path.
+    void swapDerivedVolume(const QString& radarId, const QString& volumeId,
+                           std::shared_ptr<DecodedChunk> derived);
     void updateCrossSectionAvailability();
     void restoreSettings();
     void saveSettings() const;
@@ -124,6 +134,9 @@ private:
     void synchronizeMapView(RadarMapCanvas* source);
     void refreshActivePanelOverlayUi();
     void refreshLayerBadges();
+    void refreshWarningList();
+    void refreshTimelineStrip();
+    void toggleFrameBookmark();
     void refreshScopeVisibility();
     void syncProductChips();
     void rebuildTiltGrid();
@@ -148,6 +161,7 @@ private:
     void updateOfflineBanner();
     void applyDataSaverPreset();
     void setupMenus();
+    void showCommandPalette();
     void importCustomPalette();
     void exportSnapshot();
     void exportTimelineAnimation();
@@ -179,6 +193,8 @@ private:
         int pendingChunkCount = 0;
         int pendingFailedChunks = 0;
         int pendingDecodeTasks = 0;
+        int pendingDecodedChunks = 0;
+        std::size_t pendingPartialRays = 0; // rays at the last progressive publish
         bool pendingVolumeNetworkReady = false;
         QSet<QString> derivingVolumeIds;
         QString pendingReadyVolumeId;
@@ -187,6 +203,7 @@ private:
         QDateTime pendingReadyReceivedAt;
         std::vector<RadarFrame> history;
         int frameIndex = -1;
+        QSet<QString> bookmarks; // volumeIds starred on the filmstrip
         bool followLatest = true;
         bool requestActive = false;
         bool historyRequested = false;
@@ -200,6 +217,11 @@ private:
     QGridLayout* mapGrid_ = nullptr;
     QDockWidget* controlDock_ = nullptr;
     QDockWidget* playbackDock_ = nullptr;
+    QTabWidget* sidebarTabs_ = nullptr;
+    QListWidget* warningList_ = nullptr;
+    // Last overlaysReady snapshot (same order the canvases hold): feeds the
+    // warning inbox. Indexes double as canvas warning indexes.
+    QVector<WeatherWarning> latestWarnings_;
     QComboBox* productCombo_ = nullptr;
     QVector<QToolButton*> productChips_;
     // Spells out the active product; the chips themselves only carry the short
@@ -234,6 +256,7 @@ private:
     QToolButton* emptyStateGoButton_ = nullptr;
     QProgressBar* loadingProgress_ = nullptr;
     QSlider* frameSlider_ = nullptr;
+    TimelineStrip* timelineStrip_ = nullptr;
     QDateTimeEdit* timeJumpEdit_ = nullptr;
     QSlider* radarOpacitySlider_ = nullptr;
     QSlider* warningOpacitySlider_ = nullptr;

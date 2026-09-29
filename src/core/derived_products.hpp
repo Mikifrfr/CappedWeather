@@ -20,5 +20,8 @@ struct DerivedProductSummary {
 // capped at 56 dBZ. At least two distinct reflectivity tilts are required.
 DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
                                             double radarElevationMeters = 0.0);
+// O(rays) pre-check before paying for a deep copy + derive: true when the
+// chunk holds reflectivity on at least two distinct elevation numbers.
+[[nodiscard]] bool chunkSupportsDerivedProducts(const DecodedChunk& chunk);
 
 } // namespace cappedweather

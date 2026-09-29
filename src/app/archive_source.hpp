@@ -33,7 +33,7 @@ signals:
     void volumeProgress(QString radarId, QString volumeId, int completed, int total,
                         int decoded, int failed);
     void chunkDecoded(QString radarId, QString volumeId, QString key,
-                      cappedweather::DecodedChunk decoded, QDateTime receivedAt);
+                      std::shared_ptr<cappedweather::DecodedChunk> decoded, QDateTime receivedAt);
     void volumeReady(QString radarId, QString volumeId, int chunkCount, int failedChunks,
                      QDateTime receivedAt);
     void statusChanged(QString radarId, QString status);

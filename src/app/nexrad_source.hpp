@@ -11,6 +11,8 @@
 #include <QSet>
 #include <QStringList>
 #include <QThreadPool>
+
+#include <memory>
 #include <QVector>
 #include <QUrl>
 
@@ -35,7 +37,8 @@ signals:
     void volumeStarted(QString radarId, QString volumeId, int chunkCount);
     void volumeProgress(QString radarId, QString volumeId, int completed, int total,
                         int decoded, int failed);
-    void chunkDecoded(QString radarId, QString volumeId, QString key, cappedweather::DecodedChunk decoded,
+    void chunkDecoded(QString radarId, QString volumeId, QString key,
+                      std::shared_ptr<cappedweather::DecodedChunk> decoded,
                       QDateTime receivedAt);
     void volumeReady(QString radarId, QString volumeId, int chunkCount, int failedChunks,
                      QDateTime receivedAt);

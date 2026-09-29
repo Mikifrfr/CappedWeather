@@ -29,7 +29,8 @@ int archiveParallelDownloads() {
 
 ArchiveSource::ArchiveSource(QObject* parent)
     : QObject(parent) {
-    processingPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount() / 2, 1, 6));
+    qRegisterMetaType<std::shared_ptr<cappedweather::DecodedChunk>>();
+    processingPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount(), 2, 8));
     connect(&network_, &QNetworkAccessManager::finished, this, [this](QNetworkReply* reply) {
         if (listingRequests_.contains(reply)) listingFinished(reply);
         else if (objectRequests_.contains(reply)) objectFinished(reply);
@@ -94,7 +95,8 @@ void ArchiveSource::loadFiles(const QString& requestedRadarId, const QStringList
                 emit guard->volumeProgress(radarId, volumeId, recordCount, recordCount,
                                            decodedRecords, decoded->failedRecords);
                 emit guard->chunkDecoded(radarId, volumeId, QFileInfo(path).absoluteFilePath(),
-                                         std::move(decoded->decoded), observedAt);
+                                         std::make_shared<DecodedChunk>(std::move(decoded->decoded)),
+                                         observedAt);
                 emit guard->volumeReady(radarId, volumeId, recordCount,
                                         decoded->failedRecords, observedAt);
                 emit guard->statusChanged(radarId,
@@ -249,7 +251,8 @@ void ArchiveSource::completeObject(const std::shared_ptr<Job>& job, const AwsArc
         emit volumeProgress(job->radarId, object.key, recordCount, recordCount,
                             decodedRecords, decoded->failedRecords);
         emit chunkDecoded(job->radarId, object.key, object.key,
-                          std::move(decoded->decoded), object.observedAt);
+                          std::make_shared<DecodedChunk>(std::move(decoded->decoded)),
+                          object.observedAt);
         emit volumeReady(job->radarId, object.key, recordCount,
                          decoded->failedRecords, object.observedAt);
     } else {

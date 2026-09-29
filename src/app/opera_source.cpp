@@ -21,7 +21,7 @@ namespace cappedweather {
 
 namespace {
 
-constexpr int kListingPageSize = 100;
+constexpr int kListingPageSize = 1000;
 constexpr int kMaxActiveDownloads = 3;
 constexpr char kBucketHost[] = "s3.waw3-1.cloudferro.com";
 constexpr char kBucket[] = "openradar-24h";
@@ -44,7 +44,10 @@ QString findOdimSite(const QString& radarId, QString* odimCode, QString* country
 } // namespace
 
 OperaSource::OperaSource(QObject* parent) : QObject(parent) {
-    processingPool_.setMaxThreadCount(qMax(1, QThreadPool::globalInstance()->maxThreadCount() / 2));
+    qRegisterMetaType<std::shared_ptr<cappedweather::DecodedChunk>>();
+    processingPool_.setMaxThreadCount(
+        std::clamp(QThreadPool::globalInstance()->maxThreadCount(), 2, 8));
+    attachChunkDiskCache(network_, QStringLiteral("opera"));
     connect(&network_, &QNetworkAccessManager::finished, this, [this](QNetworkReply* reply) {
         if (listingRequests_.contains(reply)) finishListing(reply);
         else if (downloadRequests_.contains(reply)) finishObject(reply);
@@ -313,7 +316,8 @@ void OperaSource::startListing(ListingContext context) {
     emit statusChanged(context.radarId,
                        QStringLiteral("OPERA listing %1").arg(context.radarId));
     auto* reply = network_.get(makeRequest(listingUrl(prefix, context.startAfter), {},
-                                           QString::fromLatin1(kUserAgentSuffix)));
+                                           QString::fromLatin1(kUserAgentSuffix),
+                                           CacheMode::AlwaysNetwork));
     listingRequests_.insert(reply, std::move(context));
 }
 
@@ -571,7 +575,8 @@ void OperaSource::requestObject(DownloadContext context) {
     emit statusChanged(context.radarId, QStringLiteral("OPERA downloading %1 %2")
                                                  .arg(context.radarId, context.volumeId));
     auto* reply = network_.get(
-        makeRequest(objectUrl(context.key), {}, QString::fromLatin1(kUserAgentSuffix)));
+        makeRequest(objectUrl(context.key), {}, QString::fromLatin1(kUserAgentSuffix),
+                    CacheMode::PreferCache));
     downloadRequests_.insert(reply, std::move(context));
 }
 
@@ -639,7 +644,9 @@ void OperaSource::completeVolume(DownloadContext context, const QDateTime& recei
                                  std::optional<DecodedChunk> decoded, const QString& failure) {
     const bool ok = decoded.has_value();
     if (ok) {
-        emit chunkDecoded(context.radarId, context.volumeId, context.key, *decoded, receivedAt);
+        auto shared = std::make_shared<DecodedChunk>(std::move(*decoded));
+        emit chunkDecoded(context.radarId, context.volumeId, context.key, std::move(shared),
+                          receivedAt);
     }
     emit volumeProgress(context.radarId, context.volumeId, 1, 1, ok ? 1 : 0, ok ? 0 : 1);
     emit volumeReady(context.radarId, context.volumeId, 1, ok ? 0 : 1, receivedAt);
@@ -691,7 +698,9 @@ void OperaSource::completeScanPart(DownloadContext context, const QDateTime& rec
     activeScanGroups_.erase(groupIt);
     if (!parts.empty()) {
         auto merged = mergeScanParts(std::move(parts), context.radarId.toStdString());
-        emit chunkDecoded(context.radarId, context.volumeId, context.volumeId, merged, receivedAt);
+        auto shared = std::make_shared<DecodedChunk>(std::move(merged));
+        emit chunkDecoded(context.radarId, context.volumeId, context.volumeId, std::move(shared),
+                          receivedAt);
         emit volumeProgress(context.radarId, context.volumeId, 1, 1, 1, 0);
         emit volumeReady(context.radarId, context.volumeId, 1, 0, receivedAt);
         if (failed > 0) {

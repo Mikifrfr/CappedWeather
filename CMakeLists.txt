@@ -180,6 +180,10 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/s3_listing.hpp
             src/app/theme.cpp
             src/app/theme.hpp
+            src/app/command_palette.cpp
+            src/app/command_palette.hpp
+            src/app/timeline_strip.cpp
+            src/app/timeline_strip.hpp
             src/app/radar_list_model.cpp
             src/app/radar_list_model.hpp
             src/app/shortcut_help_dialog.cpp

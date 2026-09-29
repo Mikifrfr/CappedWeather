@@ -510,6 +510,13 @@ RadarMapCanvas::RadarMapCanvas(QWidget* parent)
         }
         hoverRadarId_ = radarAt(pendingProbePosition_);
         updateProbe(pendingProbePosition_);
+        // Linked cross-panel readout: broadcast the sampled geography (not
+        // the value — each panel samples its own product/volume). Emitting
+        // the raw position keeps products honest across REF/VEL panels.
+        if (pinnedInfo_.isEmpty()) {
+            const auto geographic = geographicPoint(pendingProbePosition_);
+            emit probeMoved(QPointF(geographic.x(), geographic.y()));
+        }
     });
     pinnedInfoScrollTimer_ = new QTimer(this);
     pinnedInfoScrollTimer_->setTimerType(Qt::PreciseTimer);
@@ -851,8 +858,125 @@ void RadarMapCanvas::clearPinnedOverlay() {
     pinnedInfoScrollTarget_ = 0.0;
     pinnedInfoScrollTimer_->stop();
     pinnedInfoLocked_ = false;
+    pinnedInfoExpanded_ = false;
     probeText_.clear();
     update();
+}
+
+void RadarMapCanvas::focusWarning(const int warningIndex) {
+    if (warningIndex < 0 || warningIndex >= warnings_.size()) return;
+    const auto& warning = warnings_.at(warningIndex);
+    // Centroid of every exterior ring: cheap, and good enough to land the
+    // polygon on screen for polygons of any shape.
+    double longitude = 0.0, latitude = 0.0;
+    int count = 0;
+    for (const auto& polygon : warning.polygons) {
+        for (const auto& point : polygon.exterior) {
+            longitude += point.x();
+            latitude += point.y();
+            ++count;
+        }
+    }
+    if (count == 0) return;
+    const QPointF center(longitude / count, latitude / count);
+    setHighlightedWarning(-1);
+    if (viewZoom() < 5) setView(center, 6);
+    else setView(center, viewZoom());
+    const QPointF screen = screenPoint(center.y(), center.x());
+    const auto hit = overlayAt(screen);
+    if (!hit.text.isEmpty()) setPinnedOverlay(hit, screen);
+}
+
+void RadarMapCanvas::setHighlightedWarning(const int warningIndex) {
+    if (highlightedWarning_ == warningIndex) return;
+    highlightedWarning_ = warningIndex;
+    update();
+}
+
+bool RadarMapCanvas::pinnedCardContains(const QPointF& screenPos) const {
+    return !pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(screenPos);
+}
+
+void RadarMapCanvas::togglePinnedCardExpanded() {
+    if (pinnedInfo_.isEmpty()) return;
+    pinnedInfoExpanded_ = !pinnedInfoExpanded_;
+    update();
+}
+
+void RadarMapCanvas::setLinkedProbe(const QPointF& lonLat, const QString& text,
+                                    const QString& sourceLabel) {
+    linkedProbeGeo_ = lonLat;
+    linkedProbeText_ = text;
+    linkedProbeSource_ = sourceLabel;
+    linkedProbeVisible_ = true;
+    update();
+}
+
+void RadarMapCanvas::clearLinkedProbe() {
+    if (!linkedProbeVisible_) return;
+    linkedProbeVisible_ = false;
+    linkedProbeText_.clear();
+    update();
+}
+
+void RadarMapCanvas::paintWarningHighlight(QPainter& painter) {
+    if (highlightedWarning_ < 0 || !warningsVisible_) return;
+    ensureWeatherPaths();
+    bool found = false;
+    for (const auto& cached : warningPaths_) {
+        if (cached.warningIndex == highlightedWarning_) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
+    // Foreground pass over the cached image: theme accent core over a dark
+    // halo, same two-pass treatment as the rasterized warnings themselves.
+    // Paths are cached in current-zoom world coordinates, so world pixels
+    // map 1:1 to screen pixels after the center translation.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const auto world = static_cast<double>(kTileSize * (1 << zoom_));
+    const auto center = mapCenterWorld();
+    painter.translate(width() / 2.0 - center.x(), height() / 2.0 - center.y());
+    painter.setBrush(Qt::NoBrush);
+    for (const auto& cached : warningPaths_) {
+        if (cached.warningIndex != highlightedWarning_) continue;
+        for (const auto xOffset : {0.0, -world, world}) {
+            painter.setPen(QPen(QColor(5, 8, 10, 210), 4.5));
+            painter.drawPath(cached.path.translated(xOffset, 0.0));
+            painter.setPen(QPen(activeBorderColor_, 2.0));
+            painter.drawPath(cached.path.translated(xOffset, 0.0));
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintLinkedProbe(QPainter& painter) {
+    if (!linkedProbeVisible_ || linkedProbeText_.isEmpty()) return;
+    const QPointF screen = screenPoint(linkedProbeGeo_.y(), linkedProbeGeo_.x());
+    if (!rect().contains(screen.toPoint())) return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setFont(hudFont(8));
+    const auto text = QStringLiteral("%1: %2").arg(linkedProbeSource_, linkedProbeText_);
+    const auto metrics = painter.fontMetrics();
+    const auto textWidth = static_cast<double>(metrics.horizontalAdvance(text));
+    const bool flipX = screen.x() + 16.0 + textWidth + 16.0 > width();
+    const bool flipY = screen.y() + 16.0 + 26.0 > height();
+    const QPointF anchor(screen.x() + (flipX ? -16.0 : 16.0), screen.y() + (flipY ? -16.0 : 16.0));
+    const QRectF box(flipX ? anchor.x() - textWidth - 16.0 : anchor.x(),
+                     flipY ? anchor.y() - 22.0 : anchor.y(), textWidth + 16.0, 22.0);
+    auto accent = activeBorderColor_;
+    painter.setPen(QPen(accent, 1.5, Qt::DashLine));
+    painter.setBrush(QColor(8, 15, 19, 215));
+    painter.drawRoundedRect(box, 4, 4);
+    painter.setPen(QColor(225, 235, 240));
+    painter.drawText(box.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter, text);
+    painter.setPen(QPen(accent, 1.5));
+    painter.setBrush(accent);
+    painter.drawEllipse(screen, 3.0, 3.0);
+    painter.restore();
 }
 
 void RadarMapCanvas::setBelowThresholdVisible(const bool visible) {
@@ -937,11 +1061,14 @@ void RadarMapCanvas::setCrossSectionMode(const bool enabled) {
 void RadarMapCanvas::setVolumeQuality(const int decodedChunks, const int totalChunks,
                                       const int failedChunks, const std::size_t rejectedMessages,
                                       const std::size_t rejectedBlocks) {
+    // failedChunks < 0 is the progressive path: chunks are still landing,
+    // so "N/M chunks | loading…" instead of a premature "complete".
     qualityText_ = totalChunks > 0
                        ? QStringLiteral("%1/%2 chunks%3")
                              .arg(decodedChunks).arg(totalChunks)
                              .arg(failedChunks > 0 ? QStringLiteral(" | %1 missing").arg(failedChunks)
-                                                   : QStringLiteral(" | complete"))
+                                 : failedChunks < 0 ? QStringLiteral(" | loading…")
+                                                    : QStringLiteral(" | complete"))
                        : QString{};
     if (rejectedMessages > 0 || rejectedBlocks > 0)
         qualityText_ += QStringLiteral(" | parser rejected %1 message(s), %2 block(s)")
@@ -1082,7 +1209,8 @@ QString RadarMapCanvas::elidedStatusText() const {
     // depends on the panel width.
     if (!statusTextCacheValid_) {
         const auto dataDate = dataTime_.isValid()
-                                  ? dataTime_.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t"))
+                                  ? dataTime_.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) +
+                                        QStringLiteral(" local")
                                   : QStringLiteral("time unavailable");
         const auto rayCount = chunk_ ? chunk_->rays.size() : 0;
         statusTextCache_ = QStringLiteral("%1 real rays  |  NOAA data: %2").arg(rayCount).arg(dataDate);
@@ -1474,8 +1602,14 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
                 color.setAlpha(std::clamp(static_cast<int>(std::round(color.alpha() * alphaScale)), 0, 255));
                 auto fill = color;
                 fill.setAlpha(std::clamp(static_cast<int>(std::round(90.0 * alphaScale)), 8, 110));
-                overlayPainter.setPen(QPen(color, 2.0));
+                // Two-pass stroke: a dark halo under the alert color keeps the
+                // polygon readable over bright echo (white/pink velocity wash)
+                // instead of dissolving into it.
+                overlayPainter.setPen(QPen(QColor(5, 8, 10, 210), 3.5));
                 overlayPainter.setBrush(fill);
+                overlayPainter.drawPath(*group);
+                overlayPainter.setPen(QPen(color, 1.5));
+                overlayPainter.setBrush(Qt::NoBrush);
                 overlayPainter.drawPath(*group);
             }
         }
@@ -2021,6 +2155,83 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
                              QStringLiteral("trail %1 dBZ").arg(t.maxDbz, 0, 'f', 0));
         }
     }
+    // Extrapolated motion from a least-squares fit over the newest fixes
+    // (+10/+20/+30 min). This is dead reckoning on the centroid track, not
+    // a forecast: it answers "where is this core headed" at a glance while
+    // chasing. Three gates keep a centroid jump from becoming a cross-state
+    // arrow: enough fixes with a real time span, a plausible storm speed,
+    // and a hard cap on the drawn length.
+    if (zoom_ >= 6 && stormTrail_.size() >= 3) {
+        const auto window = std::min<std::size_t>(5, stormTrail_.size());
+        const auto& newest = stormTrail_.back();
+        double sumT = 0.0, sumTT = 0.0, sumLat = 0.0, sumLon = 0.0, sumTLat = 0.0, sumTLon = 0.0;
+        int fitted = 0;
+        const TrailPoint* oldest = nullptr;
+        for (std::size_t i = stormTrail_.size() - window; i < stormTrail_.size(); ++i) {
+            const auto& fix = stormTrail_[i];
+            if (!fix.time.isValid() || !newest.time.isValid()) continue;
+            // Seconds before the newest fix (<= 0), so the fit is anchored at now.
+            const auto dt = static_cast<double>(fix.time.secsTo(newest.time));
+            sumT += dt;
+            sumTT += dt * dt;
+            sumLat += fix.latitudeDeg;
+            sumLon += fix.longitudeDeg;
+            sumTLat += dt * fix.latitudeDeg;
+            sumTLon += dt * fix.longitudeDeg;
+            oldest = &fix;
+            ++fitted;
+        }
+        const auto denom = fitted * sumTT - sumT * sumT;
+        const auto spanSeconds =
+            (fitted > 0 && oldest) ? static_cast<double>(oldest->time.secsTo(newest.time)) : 0.0;
+        // Gate 1: at least 3 fixes spanning 2+ minutes — two points only ever
+        // describe a jump, never motion.
+        if (fitted >= 3 && spanSeconds >= 120.0 && std::abs(denom) > 1e-6 && oldest) {
+            const auto latRate = (fitted * sumTLat - sumT * sumLat) / denom;
+            const auto lonRate = (fitted * sumTLon - sumT * sumLon) / denom;
+            // Gate 2: the window's end-to-end speed must look like weather.
+            // Below ~1 m/s there is no meaningful direction (just centroid
+            // wobble); above ~35 m/s the max jumped cells and the vector is
+            // fiction — exactly the cross-state arrow from the KAMX screenshot.
+            const auto windowSpeed = haversineMeters(oldest->latitudeDeg, oldest->longitudeDeg,
+                                                     newest.latitudeDeg, newest.longitudeDeg) /
+                                     spanSeconds;
+            if (windowSpeed >= 1.0 && windowSpeed <= 35.0) {
+                // Gate 3: never draw past 120 km from the current core.
+                constexpr double kExtrapolationCapMeters = 120000.0;
+                QPolygonF extrapolated;
+                extrapolated << screenPoint(newest.latitudeDeg, newest.longitudeDeg);
+                for (int step = 1; step <= 3; ++step) {
+                    const auto seconds = step * 600.0;
+                    const auto lat =
+                        std::clamp(newest.latitudeDeg + latRate * seconds, -85.0, 85.0);
+                    const auto lon = newest.longitudeDeg + lonRate * seconds;
+                    if (haversineMeters(newest.latitudeDeg, newest.longitudeDeg, lat, lon) >
+                        kExtrapolationCapMeters)
+                        break;
+                    extrapolated << screenPoint(lat, lon);
+                }
+                if (extrapolated.size() >= 2) {
+                    painter.setPen(
+                        QPen(QColor(255, 209, 122, 160), 1.5, Qt::DashLine, Qt::RoundCap));
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawPolyline(extrapolated);
+                    painter.setFont(hudFont(7));
+                    for (int step = 1; step < extrapolated.size(); ++step) {
+                        const auto point = extrapolated.at(step);
+                        if (!rect().adjusted(-30, -30, 30, 30).contains(point.toPoint())) continue;
+                        painter.setPen(QPen(QColor(255, 209, 122, 190), 1.5));
+                        painter.setBrush(Qt::NoBrush);
+                        painter.drawEllipse(point, 4.0, 4.0);
+                        painter.setPen(QColor(255, 235, 200, 220));
+                        painter.drawText(QRectF(point.x() + 7, point.y() - 8, 44, 14),
+                                         Qt::AlignLeft | Qt::AlignVCenter,
+                                         QStringLiteral("+%1").arg(step * 10));
+                    }
+                }
+            }
+        }
+    }
     painter.restore();
 }
 
@@ -2213,7 +2424,11 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         }
 
         const auto cardWidth = std::min(390.0, std::max(280.0, width() - 24.0));
-        const auto maximumHeight = std::max(130.0, std::min(270.0, height() - 24.0));
+        // Double-clicking the card toggles the expanded budget so a long
+        // warning description (the Flash Flood instruction text runs long)
+        // reads without scrolling.
+        const auto maximumHeight = std::max(
+            130.0, std::min(pinnedInfoExpanded_ ? 520.0 : 270.0, height() - 24.0));
         const auto contentWidth = cardWidth - 32.0;
         const auto fixedPrefix = 38.0 + (isWarning ? 29.0 : 0.0);
         painter.setFont(hudFont(9, QFont::DemiBold));
@@ -2815,34 +3030,24 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
     return {};
 }
 
-void RadarMapCanvas::updateProbe(const QPointF& point) {
-    probePosition_ = point;
-    if (!pinnedInfo_.isEmpty()) {
-        probeText_ = pinnedInfo_;
-        update();
-        return;
-    }
-    probeText_.clear();
+RadarMapCanvas::ProbeSample RadarMapCanvas::sampleAtGeo(const QPointF& lonLat) const {
+    // Shared sampler behind the local hover probe and the linked cross-panel
+    // readout: same rays, same gates, same value formatting. Invalid when
+    // this panel has nothing to sample (no radar, no volume, no ray near the
+    // bearing) so callers can fall back silently.
+    ProbeSample sample;
+    sample.lonLat = lonLat;
     const auto* site = selectedSite();
-    if (!site || !site->latitude || !site->longitude || !chunk_ || chunk_->rays.empty()) {
-        update();
-        return;
-    }
-
-    const auto geographic = geographicPoint(point);
+    if (!site || !site->latitude || !site->longitude || !chunk_ || chunk_->rays.empty()) return sample;
+    if (probeRayIndex_.empty()) return sample;
     const auto location = rangeAndBearing({*site->latitude, *site->longitude},
-                                          {geographic.y(), geographic.x()});
-    const auto groundRangeMeters = location.distanceMeters;
-    const auto azimuth = location.bearingDegrees;
-
-    if (probeRayIndex_.empty()) {
-        update();
-        return;
-    }
+                                          {lonLat.y(), lonLat.x()});
+    sample.groundRangeMeters = location.distanceMeters;
+    sample.azimuthDegrees = location.bearingDegrees;
     const auto candidate = std::lower_bound(
-        probeRayIndex_.cbegin(), probeRayIndex_.cend(), azimuth,
+        probeRayIndex_.cbegin(), probeRayIndex_.cend(), sample.azimuthDegrees,
         [](const auto& indexedRay, const double target) { return indexedRay.first < target; });
-    const auto circularDifference = [azimuth](const double candidateAzimuth) {
+    const auto circularDifference = [azimuth = sample.azimuthDegrees](const double candidateAzimuth) {
         const auto direct = std::abs(candidateAzimuth - azimuth);
         return std::min(direct, 360.0 - direct);
     };
@@ -2859,32 +3064,22 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
     const auto nearestRayIndex = nearest->second;
     const auto* nearestRay = &chunk_->rays.at(nearestRayIndex);
     if (!nearestRay || nearestDifference > std::max(1.5, nearestRay->azimuthResolutionDegrees * 1.5)) {
-        update();
-        return;
+        return sample;
     }
-
     const auto index = static_cast<std::size_t>(product_);
     const auto spacing = nearestRay->gateSpacingByProduct.at(index);
-    if (spacing == 0) {
-        update();
-        return;
-    }
+    if (spacing == 0) return sample;
     const auto firstGate = nearestRay->firstGateByProduct.at(index);
-    const auto slantRangeMeters = slantRangeForSurfaceDistance(groundRangeMeters,
+    const auto slantRangeMeters = slantRangeForSurfaceDistance(sample.groundRangeMeters,
                                                                nearestRay->elevationDegrees);
     const auto& values = nearestRay->fields.at(index);
     const auto gate = gateIndexForSlantRange(slantRangeMeters, firstGate, spacing, values.size());
-    if (!gate) {
-        update();
-        return;
-    }
-
+    if (!gate) return sample;
     const auto encoded = values.at(*gate);
-    QString valueText;
     if (encoded == 0) {
-        valueText = QStringLiteral("Below threshold");
+        sample.valueText = QStringLiteral("Below threshold");
     } else if (encoded == 1) {
-        valueText = QStringLiteral("Range folded");
+        sample.valueText = QStringLiteral("Range folded");
     } else {
         std::optional<double> value;
         if (product_ == ProductKind::Velocity && processedVelocity_ &&
@@ -2898,23 +3093,42 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
         }
         if (value.has_value()) {
         const auto unit = QString::fromUtf8(productDescriptor(product_).unit.data());
-        valueText = QStringLiteral("%1%2%3")
+        sample.valueText = QStringLiteral("%1%2%3")
                         .arg(*value, 0, 'f', product_ == ProductKind::CorrelationCoefficient ? 3 : 1)
                         .arg(unit.isEmpty() ? QString{} : QStringLiteral(" "))
                         .arg(unit);
         } else {
-            valueText = QStringLiteral("No data");
+            sample.valueText = QStringLiteral("No data");
         }
     }
+    sample.elevationDegrees = nearestRay->elevationDegrees;
     const auto beam = standardBeamGeometry(slantRangeMeters, nearestRay->elevationDegrees);
-    const auto beamMsl = beam.heightAboveRadarMeters + site->antennaElevationMeters;
+    sample.beamMslMeters = beam.heightAboveRadarMeters + site->antennaElevationMeters;
+    sample.valid = true;
+    return sample;
+}
+
+void RadarMapCanvas::updateProbe(const QPointF& point) {
+    probePosition_ = point;
+    if (!pinnedInfo_.isEmpty()) {
+        probeText_ = pinnedInfo_;
+        update();
+        return;
+    }
+    probeText_.clear();
+    const auto geographic = geographicPoint(point);
+    const auto sample = sampleAtGeo(QPointF(geographic.x(), geographic.y()));
+    if (!sample.valid) {
+        update();
+        return;
+    }
     probeText_ = QStringLiteral("%1 | %2 km | %3%4 | tilt %5%4 | beam %6 km MSL")
-                     .arg(valueText)
-                     .arg(groundRangeMeters / 1000.0, 0, 'f', 1)
-                     .arg(azimuth, 0, 'f', 1)
+                     .arg(sample.valueText)
+                     .arg(sample.groundRangeMeters / 1000.0, 0, 'f', 1)
+                     .arg(sample.azimuthDegrees, 0, 'f', 1)
                      .arg(QChar(0x00b0))
-                     .arg(nearestRay->elevationDegrees, 0, 'f', 1)
-                     .arg(beamMsl / 1000.0, 0, 'f', 2);
+                     .arg(sample.elevationDegrees, 0, 'f', 1)
+                     .arg(sample.beamMslMeters / 1000.0, 0, 'f', 2);
     update();
 }
 
@@ -3049,6 +3263,8 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     // download. Draw it under the cards instead.
     paintLoadingChip(painter);
     paintProbe(painter);
+    paintWarningHighlight(painter);
+    paintLinkedProbe(painter);
     paintMeasurement(painter);
     paintStationCard(painter);
 
@@ -3261,6 +3477,7 @@ void RadarMapCanvas::leaveEvent(QEvent* event) {
     hoverRadarId_.clear();
     probeTimer_->stop();  // a debounced hover must not fire after the cursor left
     if (pinnedInfo_.isEmpty()) probeText_.clear();
+    emit probeHidden();
     update();
     QWidget::leaveEvent(event);
 }

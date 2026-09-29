@@ -11,6 +11,8 @@
 #include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
 #include "app/cross_section_widget.hpp"
+#include "app/command_palette.hpp"
+#include "app/timeline_strip.hpp"
 #include "app/gif_writer.hpp"
 #include "app/shortcut_help_dialog.hpp"
 #include "core/level2_decoder.hpp"
@@ -44,6 +46,8 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QHBoxLayout>
+#include <QListWidget>
+#include <QTabWidget>
 #include <QFormLayout>
 #include <QFile>
 #include <QFileDialog>
@@ -53,6 +57,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMouseEvent>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPainter>
@@ -85,6 +90,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <iterator>
 #include <span>
@@ -261,6 +267,31 @@ MainWindow::MainWindow(QWidget* parent)
                         crossSectionButton_->setChecked(enabled);
                     }
                 });
+        // Linked probe: one panel's hovered geography becomes a ghost readout
+        // on every other visible panel. Each target samples its own product
+        // and volume, so REF vs VEL can never cross-contaminate.
+        connect(panel, &RadarMapCanvas::probeMoved, this,
+                [this, panel](const QPointF& lonLat) {
+                    for (auto* target : maps_) {
+                        if (target == panel || target->isHidden()) continue;
+                        const auto sample = target->sampleAtGeo(lonLat);
+                        if (!sample.valid) {
+                            target->clearLinkedProbe();
+                            continue;
+                        }
+                        const auto& descriptor = productDescriptor(target->product());
+                        const auto productLabel =
+                            QString::fromUtf8(descriptor.label.data()).section(QLatin1Char(' '), 0, 0);
+                        target->setLinkedProbe(lonLat, sample.valueText,
+                                               QStringLiteral("%1 %2").arg(target->radarId(), productLabel));
+                    }
+                });
+        connect(panel, &RadarMapCanvas::probeHidden, this, [this, panel] {
+            for (auto* target : maps_) {
+                if (target == panel) continue;
+                target->clearLinkedProbe();
+            }
+        });
     }
     connect(stationCombo_, qOverload<int>(&QComboBox::activated), this, [this](const int index) {
         const auto radarId = stationCombo_->itemData(index).toString();
@@ -418,6 +449,9 @@ MainWindow::MainWindow(QWidget* parent)
             [this](QVector<WeatherWarning> warnings, QVector<StormReport> reports, const QDateTime&) {
                 for (auto* panel : maps_) panel->setWeatherOverlays(warnings, reports);
                 if (alertCenter_) alertCenter_->ingestWarnings(warnings);
+                latestWarnings_ = std::move(warnings);
+                refreshWarningList();
+                refreshTimelineStrip();
                 refreshLayerBadges();
             });
     connect(overlaySource_, &WeatherOverlaySource::statusChanged, this, [this](const QString& status) {
@@ -529,6 +563,8 @@ MainWindow::MainWindow(QWidget* parent)
     addShortcut(QKeySequence(Qt::Key_Minus), [this] { map_->zoomOut(); });
     addShortcut(QKeySequence(Qt::Key_R), [this] { map_->recenterSelected(); });
     addShortcut(QKeySequence(Qt::Key_L), [this] { liveButton_->setChecked(true); });
+    addShortcut(QKeySequence(Qt::Key_B), [this] { toggleFrameBookmark(); });
+    addShortcut(QKeySequence(QStringLiteral("Ctrl+K")), [this] { showCommandPalette(); });
     for (int product = 0; product < productCombo_->count() && product < 9; ++product) {
         addShortcut(QKeySequence(Qt::Key_1 + product), [this, product] { productCombo_->setCurrentIndex(product); });
     }
@@ -699,19 +735,20 @@ void MainWindow::buildUi() {
     auto* controlLayout = new QVBoxLayout(controlBody);
     controlLayout->setContentsMargins(12, 8, 12, 12);
     controlLayout->setSpacing(4);
-    const auto makeGroup = [this, controlBody, controlLayout](const QString& title,
-                                                              const QString& key) {
-        auto* header = new QToolButton(controlBody);
+    const auto makeGroup = [this](QVBoxLayout* pageLayout, const QString& title,
+                              const QString& key) {
+        auto* page = pageLayout->parentWidget();
+        auto* header = new QToolButton(page);
         header->setObjectName(QStringLiteral("groupHeader"));
         header->setText(title);
         header->setCheckable(true);
         header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        auto* body = new QWidget(controlBody);
+        auto* body = new QWidget(page);
         auto* bodyLayout = new QVBoxLayout(body);
         bodyLayout->setContentsMargins(0, 2, 0, 8);
         bodyLayout->setSpacing(5);
-        controlLayout->addWidget(header);
-        controlLayout->addWidget(body);
+        pageLayout->addWidget(header);
+        pageLayout->addWidget(body);
         const bool collapsed =
             QSettings().value(QStringLiteral("ui/collapsed/") + key, false).toBool();
         header->setChecked(!collapsed);
@@ -782,7 +819,34 @@ void MainWindow::buildUi() {
     statusLabel_->hide();
     controlLayout->addWidget(statusLabel_);
 
-    auto* radarGroup = makeGroup(QStringLiteral("Radar"), QStringLiteral("radar"));
+    // Tabbed sidebar: one long scrolling column became four short ones, so
+    // the dock stops scrolling on a laptop window. The pinned station card
+    // above stays visible on every tab; groups keep their collapse state.
+    sidebarTabs_ = new QTabWidget(controlBody);
+    sidebarTabs_->setObjectName(QStringLiteral("sidebarTabs"));
+    QVBoxLayout* radarPageLayout = nullptr;
+    QVBoxLayout* layersPageLayout = nullptr;
+    QVBoxLayout* displayPageLayout = nullptr;
+    QVBoxLayout* alertsPageLayout = nullptr;
+    const auto makeTabPage = [this, controlBody](const QString& title, QVBoxLayout*& pageLayout) {
+        auto* page = new QWidget(controlBody);
+        // Same background as the old flat body; the theme paints #dockBody.
+        page->setObjectName(QStringLiteral("dockBody"));
+        pageLayout = new QVBoxLayout(page);
+        pageLayout->setContentsMargins(0, 4, 0, 0);
+        pageLayout->setSpacing(4);
+        sidebarTabs_->addTab(page, title);
+    };
+    makeTabPage(QStringLiteral("Radar"), radarPageLayout);
+    makeTabPage(QStringLiteral("Layers"), layersPageLayout);
+    makeTabPage(QStringLiteral("Display"), displayPageLayout);
+    makeTabPage(QStringLiteral("Alerts"), alertsPageLayout);
+    controlLayout->addWidget(sidebarTabs_, 1);
+    connect(sidebarTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+        QSettings().setValue(QStringLiteral("ui/sidebarTab"), index);
+    });
+
+    auto* radarGroup = makeGroup(radarPageLayout, QStringLiteral("Radar"), QStringLiteral("radar"));
     auto* stationRow = new QHBoxLayout();
     stationRow->setSpacing(4);
     stationCombo_ = new QComboBox(controlBody);
@@ -810,7 +874,7 @@ void MainWindow::buildUi() {
     stationRow->addWidget(favoriteButton_);
     radarGroup->addLayout(stationRow);
 
-    auto* productGroup = makeGroup(QStringLiteral("Product and tilt"), QStringLiteral("product"));
+    auto* productGroup = makeGroup(radarPageLayout, QStringLiteral("Product and tilt"), QStringLiteral("product"));
     // The combo stays the data owner (logic, persistence, tests address it);
     // the chip grid is its visible face. It is hidden, never removed.
     productCombo_ = new QComboBox(controlBody);
@@ -916,7 +980,34 @@ void MainWindow::buildUi() {
     productGroup->addWidget(velocityBox_);
     velocityBox_->hide();
 
-    auto* layersGroup = makeGroup(QStringLiteral("Layers"), QStringLiteral("layers"));
+    auto* layersGroup = makeGroup(layersPageLayout, QStringLiteral("Layers"), QStringLiteral("layers"));
+    auto* displayGroup = makeGroup(displayPageLayout, QStringLiteral("Display"), QStringLiteral("display"));
+    auto* alertsGroup = makeGroup(alertsPageLayout, QStringLiteral("Alerts"), QStringLiteral("alerts"));
+    // Warning inbox: the sorted worklist for the 181-warning days. Click a
+    // row to fly the active panel to the polygon and pin its card; hovering
+    // a row outlines the polygon on the map. Populated by refreshWarningList
+    // from the overlaysReady snapshot.
+    auto* inboxCaption = new QLabel(QStringLiteral("Active warnings"), controlBody);
+    inboxCaption->setObjectName(QStringLiteral("groupCaption"));
+    alertsGroup->addWidget(inboxCaption);
+    warningList_ = new QListWidget(controlBody);
+    warningList_->setObjectName(QStringLiteral("warningList"));
+    warningList_->setMinimumHeight(120);
+    warningList_->setMaximumHeight(220);
+    warningList_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
+    warningList_->setMouseTracking(true);
+    warningList_->viewport()->setMouseTracking(true);
+    warningList_->viewport()->installEventFilter(this);
+    warningList_->setToolTip(QStringLiteral("Warnings sorted by severity, then newest. Click to locate, hover to highlight."));
+    alertsGroup->addWidget(warningList_);
+    connect(warningList_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        if (!item || !map_) return;
+        map_->focusWarning(item->data(Qt::UserRole).toInt());
+    });
+    connect(warningList_, &QListWidget::itemEntered, this, [this](QListWidgetItem* item) {
+        if (!map_) return;
+        map_->setHighlightedWarning(item ? item->data(Qt::UserRole).toInt() : -1);
+    });
     auto* scopeRow = new QHBoxLayout();
     auto* scopeLabel = new QLabel(QStringLiteral("Show layers on"), controlBody);
     scopeCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 9);
@@ -1098,7 +1189,7 @@ void MainWindow::buildUi() {
     glmStatusNote_->setObjectName(QStringLiteral("glmStatusNote"));
     glmStatusNote_->setWordWrap(true);
     glmStatusNote_->setVisible(false);
-    controlLayout->addWidget(glmStatusNote_);
+    alertsGroup->addWidget(glmStatusNote_);
     warningFilterCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 11);
     warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
                                    QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
@@ -1108,6 +1199,7 @@ void MainWindow::buildUi() {
     connect(warningFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
         for (auto* panel : maps_)
             panel->setWarningFilter(index == 0 ? QString{} : warningFilterCombo_->itemText(index));
+        refreshWarningList();
     });
     auto* reportKindRow = new QHBoxLayout();
     reportKindRow->setSpacing(8);
@@ -1139,7 +1231,7 @@ void MainWindow::buildUi() {
     radarOpacitySlider_->setValue(80);
     radarOpacitySlider_->setToolTip(QStringLiteral("Radar opacity"));
     opacityRow->addWidget(radarOpacitySlider_, 1);
-    layersGroup->addLayout(opacityRow);
+    displayGroup->addLayout(opacityRow);
     connect(radarOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
         for (auto* panel : maps_) panel->setRadarOpacity(opacity);
     });
@@ -1155,7 +1247,7 @@ void MainWindow::buildUi() {
     warningOpacitySlider_->setToolTip(
         QStringLiteral("Warning polygon opacity. Lower it when polygons hide the echo."));
     warningOpacityRow->addWidget(warningOpacitySlider_, 1);
-    layersGroup->addLayout(warningOpacityRow);
+    displayGroup->addLayout(warningOpacityRow);
     connect(warningOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
         for (auto* panel : maps_) panel->setWarningOpacity(opacity);
     });
@@ -1164,7 +1256,7 @@ void MainWindow::buildUi() {
     warningsOnTopCheck_->setChecked(true);
     warningsOnTopCheck_->setToolTip(
         QStringLiteral("When off, radar echo paints over warning polygons (useful for debris-ball inspection)."));
-    layersGroup->addWidget(warningsOnTopCheck_);
+    displayGroup->addWidget(warningsOnTopCheck_);
     connect(warningsOnTopCheck_, &QCheckBox::toggled, this, [this](bool onTop) {
         for (auto* panel : maps_) panel->setWarningsOnTop(onTop);
     });
@@ -1185,10 +1277,10 @@ void MainWindow::buildUi() {
     paletteButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
     paletteRow->addWidget(paletteButton);
-    layersGroup->addLayout(paletteRow);
+    displayGroup->addLayout(paletteRow);
     belowThresholdCheck_ = new QCheckBox(QStringLiteral("Below threshold"), controlBody);
     belowThresholdCheck_->setObjectName(QStringLiteral("belowThresholdCheck"));
-    layersGroup->addWidget(belowThresholdCheck_);
+    displayGroup->addWidget(belowThresholdCheck_);
     connect(belowThresholdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setBelowThresholdVisible(visible);
     });
@@ -1196,7 +1288,7 @@ void MainWindow::buildUi() {
     trailCheck_->setObjectName(QStringLiteral("trailCheck"));
     trailCheck_->setChecked(true);
     trailCheck_->setToolTip(QStringLiteral("One honest point per volume: strongest reflectivity object, fading with age"));
-    layersGroup->addWidget(trailCheck_);
+    displayGroup->addWidget(trailCheck_);
     connect(trailCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setStormTrailVisible(visible);
     });
@@ -1204,7 +1296,7 @@ void MainWindow::buildUi() {
     smoothingCheck_->setObjectName(QStringLiteral("smoothingCheck"));
     smoothingCheck_->setChecked(false);
     smoothingCheck_->setToolTip(QStringLiteral("Display-only azimuth overlap to hide gate gaps. Gates stay honest when off."));
-    layersGroup->addWidget(smoothingCheck_);
+    displayGroup->addWidget(smoothingCheck_);
     connect(smoothingCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
         for (auto* panel : maps_) panel->setDisplaySmoothing(enabled);
     });
@@ -1212,15 +1304,15 @@ void MainWindow::buildUi() {
     scanDiagnosticsLabel_->setObjectName(QStringLiteral("layerSub"));
     scanDiagnosticsLabel_->setWordWrap(true);
     scanDiagnosticsLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layersGroup->addWidget(scanDiagnosticsLabel_);
-    controlLayout->addSpacing(10);
+    displayGroup->addWidget(scanDiagnosticsLabel_);
+    displayPageLayout->addSpacing(2);
 
-    // Alert tuning lives next to the layers it governs, not in Settings.
+    // Alert tuning lives next to the inbox it governs, on the Alerts tab.
     auto* notifyCaption = new QLabel(QStringLiteral("Notify me about new items"), controlBody);
     notifyCaption->setObjectName(QStringLiteral("groupCaption"));
-    layersGroup->addWidget(notifyCaption);
-    layersGroup->addWidget(proximityFilterCheck_);
-    layersGroup->addLayout(proximityRow);
+    alertsGroup->addWidget(notifyCaption);
+    alertsGroup->addWidget(proximityFilterCheck_);
+    alertsGroup->addLayout(proximityRow);
     auto* severityRow = new QHBoxLayout();
     auto* severityLabel = new QLabel(QStringLiteral("Minimum severity"), controlBody);
     severityCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 11);
@@ -1232,7 +1324,7 @@ void MainWindow::buildUi() {
     severityCombo_->setToolTip(QStringLiteral("Warnings below this NWS severity never notify"));
     severityRow->addWidget(severityLabel);
     severityRow->addWidget(severityCombo_, 1);
-    layersGroup->addLayout(severityRow);
+    alertsGroup->addLayout(severityRow);
     auto* ageRow = new QHBoxLayout();
     auto* ageLabel = new QLabel(QStringLiteral("Only if issued within"), controlBody);
     ageLabel->setToolTip(QStringLiteral("Older warnings are logged silently"));
@@ -1246,13 +1338,13 @@ void MainWindow::buildUi() {
     ageSpin_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     ageRow->addWidget(ageLabel);
     ageRow->addWidget(ageSpin_, 1);
-    layersGroup->addLayout(ageRow);
+    alertsGroup->addLayout(ageRow);
     soundCheck_ = new QCheckBox(QStringLiteral("Sound"), controlBody);
     soundCheck_->setObjectName(QStringLiteral("soundCheck"));
-    layersGroup->addWidget(soundCheck_);
+    alertsGroup->addWidget(soundCheck_);
     trayCheck_ = new QCheckBox(QStringLiteral("Tray notification"), controlBody);
     trayCheck_->setObjectName(QStringLiteral("trayCheck"));
-    layersGroup->addWidget(trayCheck_);
+    alertsGroup->addWidget(trayCheck_);
     connect(severityCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this] { pushAlertDockToCenter(); });
     connect(ageSpin_, qOverload<int>(&QSpinBox::valueChanged), this,
@@ -1300,7 +1392,7 @@ void MainWindow::buildUi() {
     connect(stormSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
             [applyVelocitySettings](double) { applyVelocitySettings(); });
 
-    auto* viewGroup = makeGroup(QStringLiteral("View"), QStringLiteral("view"));
+    auto* viewGroup = makeGroup(displayPageLayout, QStringLiteral("View"), QStringLiteral("view"));
     panelLayoutCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 5);
     panelLayoutCombo_->setObjectName(QStringLiteral("panelLayoutCombo"));
     panelLayoutCombo_->addItems({QStringLiteral("1x1"), QStringLiteral("1x2"),
@@ -1379,7 +1471,7 @@ void MainWindow::buildUi() {
     connect(settingsButton, &QToolButton::clicked, this, &MainWindow::showSettingsDialog);
     viewGroup->addLayout(navigationGrid);
 
-    auto* toolsGroup = makeGroup(QStringLiteral("Tools"), QStringLiteral("tools"));
+    auto* toolsGroup = makeGroup(displayPageLayout, QStringLiteral("Tools"), QStringLiteral("tools"));
     auto* toolsGrid = new QGridLayout();
     toolsGrid->setSpacing(4);
     int toolsPosition = 0;
@@ -1410,7 +1502,11 @@ void MainWindow::buildUi() {
         map_->setCrossSectionMode(enabled);
     });
     toolsGroup->addLayout(toolsGrid);
-    controlLayout->addStretch(1);
+    // One stretch per tab page, so each tab's groups pack to the top.
+    radarPageLayout->addStretch(1);
+    layersPageLayout->addStretch(1);
+    displayPageLayout->addStretch(1);
+    alertsPageLayout->addStretch(1);
     controlScroll->setWidget(controlBody);
     controlDock_->setWidget(controlScroll);
     addDockWidget(Qt::LeftDockWidgetArea, controlDock_);
@@ -1430,6 +1526,27 @@ void MainWindow::buildUi() {
     auto* playbackLayout = new QVBoxLayout(playbackBody);
     playbackLayout->setContentsMargins(8, 6, 8, 7);
     playbackLayout->setSpacing(4);
+    // Filmstrip above the transport row: one block per loaded volume, red
+    // ticks for warning onsets, amber caps for bookmarks.
+    timelineStrip_ = new TimelineStrip(playbackBody);
+    playbackLayout->addWidget(timelineStrip_);
+    connect(timelineStrip_, &TimelineStrip::frameSelected, this, [this](int index) {
+        const auto session = activeSession();
+        if (!session) return;
+        stopAnimation();
+        session->followLatest = index >= static_cast<int>(session->history.size()) - 1 &&
+                                liveButton_->isChecked();
+        showFrame(index);
+    });
+    connect(timelineStrip_, &TimelineStrip::bookmarkToggled, this, [this](const QString& volumeId) {
+        const auto session = activeSession();
+        if (!session || volumeId.isEmpty()) return;
+        if (session->bookmarks.contains(volumeId)) session->bookmarks.remove(volumeId);
+        else session->bookmarks.insert(volumeId);
+        QSettings().setValue(QStringLiteral("bookmarks/") + session->radarId,
+                             session->bookmarks.values());
+        refreshTimelineStrip();
+    });
     auto* transportRow = new QHBoxLayout();
     transportRow->setContentsMargins(0, 0, 0, 0);
     transportRow->setSpacing(4);
@@ -1672,6 +1789,9 @@ std::shared_ptr<MainWindow::RadarSession> MainWindow::sessionFor(const QString& 
     if (!create) return {};
     auto session = std::make_shared<RadarSession>();
     session->radarId = radarId;
+    for (const auto& bookmarked :
+         QSettings().value(QStringLiteral("bookmarks/") + radarId).toStringList())
+        session->bookmarks.insert(bookmarked);
     radarSessions_.insert(radarId, session);
     return session;
 }
@@ -1693,9 +1813,20 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (watched == statusBar() && event->type() == QEvent::Resize) {
         applyUnifiedStatusElision();
     }
+    if (warningList_ && watched == warningList_->viewport() && event->type() == QEvent::Leave) {
+        if (map_) map_->setHighlightedWarning(-1);
+    }
     if (event->type() == QEvent::MouseButtonDblClick) {
         for (auto* panel : maps_) {
             if (watched == panel) {
+                // Double-clicking the pinned detail card expands it instead
+                // of maximizing the panel; everywhere else keeps the old
+                // maximize gesture.
+                const auto* mouse = static_cast<const QMouseEvent*>(event);
+                if (panel->pinnedCardContains(mouse->position())) {
+                    panel->togglePinnedCardExpanded();
+                    return true;
+                }
                 activateMap(panel);
                 if (maximizePanelButton_) maximizePanelButton_->toggle();
                 else togglePanelMaximized();
@@ -1926,6 +2057,8 @@ void MainWindow::volumeStarted(const QString& radarId, const QString& volumeId, 
     session->pendingChunkCount = chunkCount;
     session->pendingFailedChunks = 0;
     session->pendingDecodeTasks = 0;
+    session->pendingDecodedChunks = 0;
+    session->pendingPartialRays = 0;
     session->pendingVolumeNetworkReady = false;
 
     for (auto* panel : maps_) {
@@ -1961,9 +2094,9 @@ void MainWindow::volumeProgress(const QString& radarId, const QString& volumeId,
 }
 
 void MainWindow::chunkDecoded(const QString& radarId, const QString& volumeId, const QString&,
-                              DecodedChunk decoded, const QDateTime&) {
+                              std::shared_ptr<DecodedChunk> decoded, const QDateTime&) {
     const auto session = sessionFor(radarId, false);
-    if (!session || volumeId != session->pendingVolumeId) return;
+    if (!session || !decoded || volumeId != session->pendingVolumeId) return;
     acceptDecodedChunk(radarId, volumeId, std::move(decoded));
 }
 
@@ -1986,35 +2119,68 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
         return;
     }
     session->pendingVolumeNetworkReady = false;
-    if (session->derivingVolumeIds.contains(volumeId)) return;
-    session->derivingVolumeIds.insert(volumeId);
+    // First paint happens HERE, on the base volume: Echo Tops / VIL used to
+    // run serially before anything reached the screen, so every load paid
+    // the full derive cost up front. Derive now runs on a copy in the
+    // background and swaps into the published frame when it lands; panels
+    // showing REF/VEL never wait for products they aren't viewing.
     auto volume = std::make_shared<DecodedChunk>(std::move(session->pendingVolume));
     double radarElevationMeters = 0.0;
     const auto radarRow = model_->rowForRadar(radarId);
     if (radarRow >= 0) radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
-    for (auto* panel : maps_) {
-        if (panel->radarId() == radarId)
-            panel->setLoading(true, QStringLiteral("%1 deriving ET18 + VIL").arg(radarId));
-    }
-    if (radarId == selectedRadarId()) {
-        radarStatus_ = QStringLiteral("%1 deriving Echo Tops + VIL in background").arg(radarId);
-        updateUnifiedStatus();
-    }
+    finalizeVolumeReady(radarId, volumeId, chunkCount, failedChunks, receivedAt, volume);
+    // Derive only pays off for multi-tilt reflectivity volumes; single-tilt
+    // TDWR/SCAN pieces can never grow Echo Tops, so skip the copy entirely.
+    const bool multiTilt = chunkSupportsDerivedProducts(*volume);
+    if (!multiTilt || session->derivingVolumeIds.contains(volumeId)) return;
+    session->derivingVolumeIds.insert(volumeId);
     const QPointer<MainWindow> guard(this);
     QThreadPool::globalInstance()->start(
-        [guard, volume, radarId, volumeId, chunkCount, failedChunks, receivedAt,
-         radarElevationMeters] {
-            appendDerivedProducts(*volume, radarElevationMeters);
+        [guard, volume, radarId, volumeId, radarElevationMeters] {
+            // Deep copy on the pool thread (never on the GUI thread), then
+            // derive in place. The published base frame stays immutable and
+            // readable the whole time.
+            auto derived = std::make_shared<DecodedChunk>(*volume);
+            appendDerivedProducts(*derived, radarElevationMeters);
             if (!guard) return;
             QMetaObject::invokeMethod(
                 guard.data(),
-                [guard, volume, radarId, volumeId, chunkCount, failedChunks, receivedAt] {
-                    if (guard)
-                        guard->finalizeVolumeReady(radarId, volumeId, chunkCount, failedChunks,
-                                                   receivedAt, volume);
+                [guard, radarId, volumeId, derived] {
+                    if (guard) guard->swapDerivedVolume(radarId, volumeId, derived);
                 },
                 Qt::QueuedConnection);
         });
+    if (radarId == selectedRadarId()) {
+        radarStatus_ = QStringLiteral("%1 live · Echo Tops + VIL deriving in background").arg(radarId);
+        updateUnifiedStatus();
+    }
+}
+
+void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volumeId,
+                                   std::shared_ptr<DecodedChunk> derived) {
+    const auto session = sessionFor(radarId, false);
+    if (!session) return;
+    session->derivingVolumeIds.remove(volumeId);
+    if (!derived) return;
+    const auto it = std::find_if(session->history.begin(), session->history.end(),
+                                 [&volumeId](const RadarFrame& frame) {
+                                     return frame.volumeId == volumeId;
+                                 });
+    // Evicted while deriving (history cap) or superseded: nothing to swap.
+    if (it == session->history.end()) return;
+    it->chunk = std::move(derived);
+    if (radarId == selectedRadarId() &&
+        session->frameIndex >= 0 &&
+        session->frameIndex < static_cast<int>(session->history.size()) &&
+        session->history.at(static_cast<std::size_t>(session->frameIndex)).volumeId == volumeId) {
+        // Refreshes chips (ET18/VIL enable now), tilt grid, badges, strip.
+        showFrame(session->frameIndex);
+    } else {
+        for (auto* panel : maps_) {
+            if (panel->radarId() != radarId) continue;
+            panel->setDecodedChunk(it->chunk, it->dataTime);
+        }
+    }
 }
 
 void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volumeId,
@@ -2022,7 +2188,7 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
                                      const QDateTime& receivedAt,
                                      std::shared_ptr<DecodedChunk> volume) {
     const auto session = sessionFor(radarId, false);
-    if (!session || !session->derivingVolumeIds.remove(volumeId)) return;
+    if (!session) return;
     const auto isCurrentVolume = volumeId == session->pendingVolumeId;
     const auto followLatest = session->history.empty() || session->followLatest;
     const auto selectedVolume = session->frameIndex >= 0 &&
@@ -2034,6 +2200,14 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
     });
     if (duplicate == session->history.end()) {
         session->history.push_back({volumeId, std::move(volume), receivedAt, chunkCount, failedChunks});
+    } else {
+        // Already published (e.g. a late duplicate delivery): the frame in
+        // history wins, refresh the display and stop. Never showFrame() for
+        // a radar that isn't selected — that would paint another session's
+        // frame over the user's timeline position.
+        if (isCurrentVolume) session->pendingVolumeId.clear();
+        if (radarId == selectedRadarId() && session->frameIndex >= 0) showFrame(session->frameIndex);
+        return;
     }
     std::sort(session->history.begin(), session->history.end(), [](const RadarFrame& left, const RadarFrame& right) {
         return left.dataTime == right.dataTime ? left.volumeId < right.volumeId
@@ -2110,16 +2284,41 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
     }
 }
 
-void MainWindow::acceptDecodedChunk(const QString& radarId, const QString& volumeId, DecodedChunk decoded) {
+void MainWindow::acceptDecodedChunk(const QString& radarId, const QString& volumeId,
+                                    std::shared_ptr<DecodedChunk> decoded) {
     const auto session = sessionFor(radarId, false);
-    if (!session || volumeId != session->pendingVolumeId) return;
-    session->pendingVolume.messageCount += decoded.messageCount;
-    session->pendingVolume.rejectedMessages += decoded.rejectedMessages;
-    session->pendingVolume.rejectedBlocks += decoded.rejectedBlocks;
+    if (!session || !decoded || volumeId != session->pendingVolumeId) return;
+    session->pendingVolume.messageCount += decoded->messageCount;
+    session->pendingVolume.rejectedMessages += decoded->rejectedMessages;
+    session->pendingVolume.rejectedBlocks += decoded->rejectedBlocks;
     session->pendingVolume.rays.insert(session->pendingVolume.rays.end(),
-                                       std::make_move_iterator(decoded.rays.begin()),
-                                       std::make_move_iterator(decoded.rays.end()));
+                                       std::make_move_iterator(decoded->rays.begin()),
+                                       std::make_move_iterator(decoded->rays.end()));
+    ++session->pendingDecodedChunks;
     session->pendingDecodeTasks = std::max(0, session->pendingDecodeTasks - 1);
+    // Progressive first paint: sweep the map as chunks land instead of
+    // holding a spinner for the whole volume. First glimpse at 500 rays,
+    // then every 4000 more. Snapshots are deep copies, but each step fires
+    // at most once per volume and the copy is a few ms against seconds of
+    // downloads. Guarded to follow-latest so scrubbing the timeline never
+    // gets clobbered by a still-downloading volume.
+    const auto rays = session->pendingVolume.rays.size();
+    const bool firstGlimpse = session->pendingPartialRays == 0 && rays >= 500;
+    const bool nextStep = session->pendingPartialRays > 0 &&
+                          rays >= session->pendingPartialRays + 4000;
+    if ((firstGlimpse || nextStep) &&
+        (session->history.empty() || session->followLatest)) {
+        session->pendingPartialRays = rays;
+        auto snapshot = std::make_shared<DecodedChunk>(session->pendingVolume);
+        for (auto* panel : maps_) {
+            if (panel->radarId() != radarId) continue;
+            panel->setDecodedChunk(snapshot, {});
+            panel->setVolumeQuality(session->pendingDecodedChunks,
+                                    std::max(session->pendingChunkCount, session->pendingDecodedChunks),
+                                    -1, session->pendingVolume.rejectedMessages,
+                                    session->pendingVolume.rejectedBlocks);
+        }
+    }
     if (session->pendingVolumeNetworkReady && session->pendingDecodeTasks == 0) {
         volumeReady(radarId, session->pendingReadyVolumeId, session->pendingReadyChunkCount,
                     session->pendingReadyFailedChunks, session->pendingReadyReceivedAt);
@@ -2329,6 +2528,7 @@ void MainWindow::updatePlaybackControls() {
         frameLabel_->setText(QStringLiteral("LIVE · click timeline or Play to load history"));
         frameSlider_->setToolTip(QStringLiteral("Click to load historical volumes"));
     }
+    refreshTimelineStrip();
 }
 
 void MainWindow::stopAnimation() {
@@ -2462,6 +2662,9 @@ void MainWindow::restoreSettings() {
                                                   0, panelLayoutCombo_->count() - 1));
     scopeCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("ui/layerScope"), 0).toInt(),
                                             0, scopeCombo_->count() - 1));
+    if (sidebarTabs_)
+        sidebarTabs_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("ui/sidebarTab"), 0).toInt(),
+                                                 0, sidebarTabs_->count() - 1));
     refreshAlertDockFromCenter();
     syncProductChips();
     rebuildTiltGrid();
@@ -2583,8 +2786,8 @@ void MainWindow::showSettingsDialog() {
     auto* synchronize = new QCheckBox(QStringLiteral("Link pan and zoom across radar panels"), &dialog);
     synchronize->setChecked(synchronizePanels_);
     auto* parallelChunks = new QSpinBox(&dialog);
-    parallelChunks->setRange(1, 12);
-    parallelChunks->setValue(QSettings().value(QStringLiteral("network/parallelChunks"), 6).toInt());
+    parallelChunks->setRange(1, 16);
+    parallelChunks->setValue(QSettings().value(QStringLiteral("network/parallelChunks"), 10).toInt());
     auto* timeout = new QSpinBox(&dialog);
     timeout->setRange(5, 120);
     timeout->setSuffix(QStringLiteral(" s"));
@@ -3023,6 +3226,9 @@ void MainWindow::setupMenus() {
     });
     connect(this, &MainWindow::destroyed, maxAct, &QObject::deleteLater);
     auto* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+    auto* paletteAction = helpMenu->addAction(QStringLiteral("Command palette…"));
+    paletteAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+K")));
+    connect(paletteAction, &QAction::triggered, this, &MainWindow::showCommandPalette);
     auto* shortcutsAction = helpMenu->addAction(QStringLiteral("Keyboard shortcuts…"));
     shortcutsAction->setShortcuts({QKeySequence(Qt::Key_F1), QKeySequence(QStringLiteral("?"))});
     connect(shortcutsAction, &QAction::triggered, this, [this] {
@@ -3031,6 +3237,70 @@ void MainWindow::setupMenus() {
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->show();
     });
+}
+
+void MainWindow::showCommandPalette() {
+    auto* palette = new CommandPalette(this);
+    QVector<CommandPalette::Entry> entries;
+    auto actions = std::make_shared<std::vector<std::function<void()>>>();
+    const auto addEntry = [&entries, &actions](QString title, QString detail,
+                                               std::function<void()> action) {
+        entries.push_back({std::move(title), std::move(detail)});
+        actions->push_back(std::move(action));
+    };
+    // Radars first: the most common palette trip is jumping stations.
+    if (model_) {
+        for (const auto& site : model_->sites()) {
+            const auto id = QString::fromStdString(site.id);
+            const auto name = QString::fromStdString(site.name);
+            addEntry(QStringLiteral("Radar %1").arg(id),
+                     name.isEmpty() ? QStringLiteral("Jump to radar")
+                                    : QStringLiteral("Jump to radar (%1)").arg(name),
+                     [this, id] {
+                         const auto row = model_ ? model_->rowForRadar(id) : -1;
+                         if (row >= 0) radarSelected(model_->index(row, 0));
+                     });
+        }
+    }
+    for (int product = 0; product < productCombo_->count(); ++product) {
+        addEntry(QStringLiteral("Product: %1").arg(productCombo_->itemText(product)),
+                 QStringLiteral("Switch the active panel (1–8)"),
+                 [this, product] { productCombo_->setCurrentIndex(product); });
+    }
+    for (int layout = 0; layout < panelLayoutCombo_->count(); ++layout) {
+        addEntry(QStringLiteral("Layout: %1").arg(panelLayoutCombo_->itemText(layout)),
+                 QStringLiteral("Rearrange panels"),
+                 [this, layout] { setPanelLayout(layout); });
+    }
+    addEntry(QStringLiteral("Go: national view"), QStringLiteral("Zoom out to CONUS"),
+             [this] { map_->showNationalView(); });
+    addEntry(QStringLiteral("Go: recenter on radar"), QStringLiteral("Shortcut R"),
+             [this] { map_->recenterSelected(); });
+    addEntry(QStringLiteral("Timeline: play / pause"), QStringLiteral("Shortcut Space"),
+             [this] { playButton_->toggle(); });
+    addEntry(QStringLiteral("Timeline: follow LIVE"), QStringLiteral("Shortcut L"),
+             [this] { liveButton_->setChecked(true); });
+    addEntry(QStringLiteral("Timeline: bookmark this frame"), QStringLiteral("Shortcut B"),
+             [this] { toggleFrameBookmark(); });
+    addEntry(QStringLiteral("View: maximize active panel"), QStringLiteral("Shortcut F11"),
+             [this] {
+                 if (maximizePanelButton_) maximizePanelButton_->toggle();
+                 else togglePanelMaximized();
+             });
+    addEntry(QStringLiteral("View: data-saver preset"), QStringLiteral("Flaky-cellular chase mode"),
+             [this] { applyDataSaverPreset(); });
+    addEntry(QStringLiteral("Export: snapshot PNG"), QStringLiteral("Shortcut Ctrl+S"),
+             [this] { exportSnapshot(); });
+    addEntry(QStringLiteral("Export: timeline GIF"), QStringLiteral("Cancellable, with progress"),
+             [this] { exportTimelineAnimation(); });
+    addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
+             [this] { showSettingsDialog(); });
+    palette->setEntries(std::move(entries));
+    connect(palette, &CommandPalette::entryChosen, this,
+            [actions](int index) {
+                if (index >= 0 && index < static_cast<int>(actions->size())) (*actions)[index]();
+            });
+    palette->show();
 }
 
 void MainWindow::activateMap(RadarMapCanvas* map) {
@@ -3213,6 +3483,86 @@ void MainWindow::refreshLayerBadges() {
         scanDiagnosticsLabel_->setText(text.isEmpty() ? QStringLiteral("Scan: —")
                                                       : QStringLiteral("Scan: %1").arg(text));
     }
+}
+
+void MainWindow::refreshWarningList() {
+    if (!warningList_) return;
+    // Same order the canvas paints: severity priority first, then newest.
+    // Indexes stored in UserRole address latestWarnings_ (and therefore the
+    // canvases, which hold the same vector in the same order).
+    QVector<int> order;
+    order.reserve(latestWarnings_.size());
+    QString filter;
+    if (warningFilterCombo_ && warningFilterCombo_->currentIndex() > 0)
+        filter = warningFilterCombo_->itemText(warningFilterCombo_->currentIndex());
+    for (int i = 0; i < latestWarnings_.size(); ++i) {
+        const auto& w = latestWarnings_.at(i);
+        if (!filter.isEmpty() && !w.event.contains(filter, Qt::CaseInsensitive) &&
+            !w.severity.contains(filter, Qt::CaseInsensitive))
+            continue;
+        order.push_back(i);
+    }
+    std::sort(order.begin(), order.end(), [this](int left, int right) {
+        const auto& l = latestWarnings_.at(left);
+        const auto& r = latestWarnings_.at(right);
+        if (l.alertPriority != r.alertPriority) return l.alertPriority < r.alertPriority;
+        return l.onset > r.onset;
+    });
+    warningList_->setUpdatesEnabled(false);
+    warningList_->clear();
+    constexpr int kInboxCap = 200;
+    for (int n = 0; n < order.size() && n < kInboxCap; ++n) {
+        const auto& w = latestWarnings_.at(order.at(n));
+        const auto when = w.onset.isValid() ? w.onset.toLocalTime().toString(QStringLiteral("MMM d HH:mm"))
+                                            : QStringLiteral("—");
+        auto* item = new QListWidgetItem(
+            QStringLiteral("%1 — %2 (%3)").arg(w.event, w.headline.isEmpty() ? w.severity : w.headline, when),
+            warningList_);
+        item->setData(Qt::UserRole, order.at(n));
+        item->setToolTip(QStringLiteral("%1\n%2\nValid: %3 – %4")
+                             .arg(w.event, w.headline,
+                                  w.onset.isValid() ? w.onset.toLocalTime().toString(Qt::TextDate) : QStringLiteral("?"),
+                                  w.expires.isValid() ? w.expires.toLocalTime().toString(Qt::TextDate) : QStringLiteral("?")));
+    }
+    if (order.size() > kInboxCap)
+        warningList_->addItem(QStringLiteral("… plus %1 more (zoom in or filter)").arg(order.size() - kInboxCap));
+    warningList_->setUpdatesEnabled(true);
+}
+
+void MainWindow::refreshTimelineStrip() {
+    if (!timelineStrip_) return;
+    const auto session = activeSession();
+    if (!session || session->history.empty()) {
+        timelineStrip_->setFrames({}, -1);
+        timelineStrip_->setEvents({});
+        return;
+    }
+    QVector<TimelineStrip::Frame> frames;
+    frames.reserve(static_cast<qsizetype>(session->history.size()));
+    for (const auto& frame : session->history) {
+        frames.push_back({frame.dataTime, frame.failedChunks == 0,
+                          session->bookmarks.contains(frame.volumeId), frame.volumeId});
+    }
+    timelineStrip_->setFrames(std::move(frames), session->frameIndex);
+    QVector<QDateTime> events;
+    events.reserve(latestWarnings_.size());
+    for (const auto& warning : latestWarnings_) {
+        if (warning.onset.isValid()) events.push_back(warning.onset);
+    }
+    timelineStrip_->setEvents(std::move(events));
+}
+
+void MainWindow::toggleFrameBookmark() {
+    const auto session = activeSession();
+    if (!session || session->frameIndex < 0 ||
+        session->frameIndex >= static_cast<int>(session->history.size()))
+        return;
+    const auto& volumeId = session->history.at(static_cast<std::size_t>(session->frameIndex)).volumeId;
+    if (session->bookmarks.contains(volumeId)) session->bookmarks.remove(volumeId);
+    else session->bookmarks.insert(volumeId);
+    QSettings().setValue(QStringLiteral("bookmarks/") + session->radarId,
+                         session->bookmarks.values());
+    refreshTimelineStrip();
 }
 
 void MainWindow::refreshScopeVisibility() {

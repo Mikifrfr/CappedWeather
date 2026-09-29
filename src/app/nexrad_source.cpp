@@ -23,7 +23,10 @@ constexpr auto kRadarCatalogUrl = "https://api.weather.gov/radar/stations";
 constexpr int kVolumeQuietSeconds = 45;
 
 int maximumConcurrentObjects() {
-    return std::clamp(QSettings().value(QStringLiteral("network/parallelChunks"), 6).toInt(), 1, 12);
+    // S3 happily serves dozens of small chunk GETs in parallel (and HTTP/2
+    // multiplexes them); 6 was a browser-era default that left bandwidth —
+    // and CPU decode slots — idle on modern links.
+    return std::clamp(QSettings().value(QStringLiteral("network/parallelChunks"), 10).toInt(), 1, 16);
 }
 
 int maximumAttempts() {
@@ -100,7 +103,11 @@ QStringList newestFirstVolumePrefixes(const QStringList& prefixes) {
 
 NexradSource::NexradSource(QObject* parent)
     : QObject(parent) {
-    processingPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount() / 2, 1, 4));
+    // Shared-pointer chunk handoff crosses threads via queued delivery, so
+    // the metatype must be registered or slots silently never fire.
+    qRegisterMetaType<std::shared_ptr<cappedweather::DecodedChunk>>();
+    processingPool_.setMaxThreadCount(std::clamp(QThread::idealThreadCount(), 2, 8));
+    attachChunkDiskCache(network_, QStringLiteral("nexrad"));
     connect(&network_, &QNetworkAccessManager::finished, this, [this](QNetworkReply* reply) {
         if (catalogRequests_.contains(reply)) {
             catalogFinished(reply);
@@ -115,7 +122,9 @@ NexradSource::NexradSource(QObject* parent)
 }
 
 void NexradSource::requestCatalog() {
-    auto* reply = network_.get(makeRequest(QUrl(QString::fromUtf8(kRadarCatalogUrl))));
+    auto* reply = network_.get(makeRequest(QUrl(QString::fromUtf8(kRadarCatalogUrl)), {},
+                                           QStringLiteral(" operational radar viewer"),
+                                           CacheMode::AlwaysNetwork));
     catalogRequests_.insert(reply, true);
 }
 
@@ -189,7 +198,8 @@ void NexradSource::cancel(const QString& radarId) {
 void NexradSource::startRootListing(const QString& radarId, const QString& startAfter,
                                     QStringList volumePrefixes, const int requestedCount) {
     auto* reply = network_.get(
-        makeRequest(listingUrl(utcPrefix(radarId), QStringLiteral("/"), startAfter)));
+        makeRequest(listingUrl(utcPrefix(radarId), QStringLiteral("/"), startAfter), {},
+                    QStringLiteral(" operational radar viewer"), CacheMode::AlwaysNetwork));
     rootListingRequests_.insert(
         reply, ListingContext{radarId, startAfter, std::move(volumePrefixes), requestedCount});
     emit statusChanged(radarId, QStringLiteral("checking for new volume"));
@@ -251,8 +261,9 @@ void NexradSource::startVolumeListing(const QString& radarId, const QStringList&
 }
 
 void NexradSource::requestVolumePage(VolumeListingContext context) {
-    auto* reply =
-        network_.get(makeRequest(listingUrl(context.volumePrefix, {}, context.startAfter)));
+    auto* reply = network_.get(
+        makeRequest(listingUrl(context.volumePrefix, {}, context.startAfter), {},
+                    QStringLiteral(" operational radar viewer"), CacheMode::AlwaysNetwork));
     volumeListingRequests_.insert(reply, std::move(context));
     emit statusChanged(volumeListingRequests_.value(reply).radarId, QStringLiteral("checking volume chunks"));
 }
@@ -353,7 +364,11 @@ void NexradSource::requestObject(ObjectContext context) {
         queuedObjects_.enqueue(std::move(context));
         return;
     }
-    auto* reply = network_.get(makeRequest(objectUrl(context.object.key)));
+    // Chunk objects are immutable: S3 keys never change meaning, so a
+    // repeat visit (or app restart) serves from disk instead of bytes.
+    auto* reply = network_.get(makeRequest(objectUrl(context.object.key), {},
+                                           QStringLiteral(" operational radar viewer"),
+                                           CacheMode::PreferCache));
     objectRequests_.insert(reply, std::move(context));
     ++activeObjectRequests_;
 }
@@ -425,7 +440,11 @@ void NexradSource::completeObject(ObjectContext context, const QDateTime receive
     const auto decodedSuccessfully = decoded.has_value() && !decoded->rays.empty();
     if (decodedSuccessfully) {
         ++active->decodedChunks;
-        emit chunkDecoded(radarId, context.volumeId, context.object.key, std::move(*decoded), receivedAt);
+        // Shared ownership across the thread hop: queued delivery bumps a
+        // refcount instead of deep-copying every ray vector per chunk.
+        auto shared = std::make_shared<DecodedChunk>(std::move(*decoded));
+        emit chunkDecoded(radarId, context.volumeId, context.object.key, std::move(shared),
+                          receivedAt);
     } else if (failure.isEmpty()) {
         failure = QStringLiteral("Level II chunk contained no decodable radial messages");
     }

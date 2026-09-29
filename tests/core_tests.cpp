@@ -135,6 +135,28 @@ void testDerivedProductsRequireVolumeDepth() {
     assert(!chunk.rays.front().has(ProductKind::VerticallyIntegratedLiquid));
 }
 
+void testDerivedSupportGate() {
+    // Empty and single-tilt volumes must skip the background derive copy.
+    {
+        DecodedChunk empty;
+        assert(!chunkSupportsDerivedProducts(empty));
+        DecodedChunk single;
+        single.rays.push_back(syntheticDerivedRay(45.0F, 1, 0.5F, 40.0));
+        assert(!chunkSupportsDerivedProducts(single));
+    }
+    // Two tilts qualify, even when other rays carry no reflectivity.
+    {
+        DecodedChunk chunk;
+        chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+        DecodedRay bare;
+        bare.elevationNumber = 2;
+        chunk.rays.push_back(bare);
+        assert(!chunkSupportsDerivedProducts(chunk));
+        chunk.rays.back() = syntheticDerivedRay(90.0F, 2, 5.0F, 10.0);
+        assert(chunkSupportsDerivedProducts(chunk));
+    }
+}
+
 void testDerivedProductsSupportNegativeFirstGate() {
     DecodedChunk chunk;
     chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
@@ -699,6 +721,7 @@ int main() {
     testDerivedProducts();
     testDerivedEchoTopLowerBoundWithMissingUpperData();
     testDerivedProductsRequireVolumeDepth();
+    testDerivedSupportGate();
     testDerivedProductsSupportNegativeFirstGate();
     testCatalog();
     testOperaCatalog();
