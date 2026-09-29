@@ -29,6 +29,19 @@ CrossSectionWidget::CrossSectionWidget(std::shared_ptr<const DecodedChunk> chunk
     buildCells();
 }
 
+void CrossSectionWidget::setData(std::shared_ptr<const DecodedChunk> chunk, ProductKind product,
+                                 RadarMapCanvas::PaletteKind palette,
+                                 QVector<RadarMapCanvas::PaletteStop> customPalette,
+                                 VelocityProcessingOptions velocityOptions) {
+    chunk_ = std::move(chunk);
+    product_ = product;
+    palette_ = palette;
+    customPalette_ = std::move(customPalette);
+    velocityOptions_ = velocityOptions;
+    buildCells();
+    update();
+}
+
 bool CrossSectionWidget::exportCsv(const QString& path) const {
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return false;

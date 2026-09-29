@@ -51,11 +51,14 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPainter>
 #include <QPixmap>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QResizeEvent>
 #include <QPushButton>
 #include <QPointer>
@@ -165,25 +168,34 @@ QIcon productChipIcon(const ProductKind kind) {
 
 // One-line operator guidance shown on product chip hover.
 QString productChipTooltip(const ProductKind kind) {
+    // Chips show the standard operational abbreviation (REF, VEL, ZDR, ...),
+    // which is what every operator already reads on a NWS display and which
+    // fits a two-column grid. Spell the full name and unit out in the tooltip
+    // so nothing is lost.
+    const auto& descriptor = productDescriptor(kind);
+    const QString head = QStringLiteral("%1 (%2) — %3")
+                             .arg(QString::fromUtf8(descriptor.label.data()),
+                                  QString::fromUtf8(descriptor.unit.data()),
+                                  QString::fromUtf8(descriptor.shortName.data()));
     switch (kind) {
         case ProductKind::Reflectivity:
-            return QStringLiteral("Reflectivity (dBZ). Bright cores mean heavy rain, hail, or debris.");
+            return head + QStringLiteral("\nBright cores mean heavy rain, hail, or debris.");
         case ProductKind::Velocity:
-            return QStringLiteral("Motion toward or away from the radar (m/s). Tight red/green couplets mean rotation.");
+            return head + QStringLiteral("\nMotion toward or away from the radar. Tight red/green couplets mean rotation.");
         case ProductKind::SpectrumWidth:
-            return QStringLiteral("Velocity spread inside one gate (m/s). High values mark turbulence and debris.");
+            return head + QStringLiteral("\nVelocity spread inside one gate. High values mark turbulence and debris.");
         case ProductKind::DifferentialReflectivity:
-            return QStringLiteral("Horizontal vs vertical return size (dB). Near zero in hail and debris.");
+            return head + QStringLiteral("\nHorizontal vs vertical return size. Near zero in hail and debris.");
         case ProductKind::CorrelationCoefficient:
-            return QStringLiteral("Target uniformity (unitless). Below 0.9 in debris, melting hail, clutter.");
+            return head + QStringLiteral("\nTarget uniformity. Below 0.9 in debris, melting hail, clutter.");
         case ProductKind::DifferentialPhase:
-            return QStringLiteral("Phase shift along the beam (deg). Its gradient tracks heavy rain.");
+            return head + QStringLiteral("\nPhase shift along the beam. Its gradient tracks heavy rain.");
         case ProductKind::EchoTop:
-            return QStringLiteral("Derived: height of the 18 dBZ echo (kft). Above 35 kft means a strong updraft.");
+            return head + QStringLiteral("\nDerived: height of the 18 dBZ echo. Above 35 kft means a strong updraft.");
         case ProductKind::VerticallyIntegratedLiquid:
-            return QStringLiteral("Derived: column water (kg/m2). High values with hail colors are dangerous.");
+            return head + QStringLiteral("\nDerived: column water. High values with hail colors are dangerous.");
     }
-    return {};
+    return head;
 }
 
 } // namespace
@@ -211,6 +223,7 @@ MainWindow::MainWindow(QWidget* parent)
     rebuildStationPicker();
 
     for (auto* panel : maps_) {
+        panel->installEventFilter(this);
         connect(panel, &RadarMapCanvas::radarClicked, this, [this](const QString& radarId) {
             const auto row = model_->rowForRadar(radarId);
             if (row >= 0) radarSelected(model_->index(row, 0));
@@ -355,6 +368,10 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) {
             if (!panel->overlayOverrides().has_value()) panel->setLightningFusionVisible(visible);
         }
+        refreshLayerBadges();
+    });
+    connect(shearCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setShearVisible(visible);
         refreshLayerBadges();
     });
     connect(placefilesCheck_, &QCheckBox::toggled, this, [this](const bool visible) {
@@ -516,12 +533,31 @@ MainWindow::MainWindow(QWidget* parent)
         addShortcut(QKeySequence(Qt::Key_1 + product), [this, product] { productCombo_->setCurrentIndex(product); });
     }
     addShortcut(QKeySequence(QStringLiteral("?")), [this] {
-        ShortcutHelpDialog dialog(this);
-        dialog.exec();
+        auto* dialog = new ShortcutHelpDialog(this);
+        dialog->setModal(false);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->show();
     });
     addShortcut(QKeySequence(Qt::Key_F1), [this] {
-        ShortcutHelpDialog dialog(this);
-        dialog.exec();
+        auto* dialog = new ShortcutHelpDialog(this);
+        dialog->setModal(false);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->show();
+    });
+    addShortcut(QKeySequence(Qt::Key_Escape), [this] {
+        if (map_) {
+            if (!map_->infoCardRect().isEmpty()) map_->clearPinnedOverlay();
+            else {
+                map_->setMeasureMode(false);
+                map_->setCrossSectionMode(false);
+                if (measureButton_) measureButton_->setChecked(false);
+                if (crossSectionButton_) crossSectionButton_->setChecked(false);
+            }
+        }
+    });
+    addShortcut(QKeySequence(Qt::Key_F11), [this] {
+        if (maximizePanelButton_) maximizePanelButton_->toggle();
+        else togglePanelMaximized();
     });
 
     restoreSettings();
@@ -553,8 +589,15 @@ MainWindow::MainWindow(QWidget* parent)
     if (!restoreGeometry(settings.value(QStringLiteral("window/geometry")).toByteArray())) {
         if (const auto* screen = QGuiApplication::primaryScreen()) {
             const auto available = screen->availableGeometry();
-            const auto width = std::clamp(static_cast<int>(available.width() * 0.78), 900, 1180);
-            const auto height = std::clamp(static_cast<int>(available.height() * 0.82), 620, 760);
+            // Chase laptops are 1440p/4K now: use most of the screen instead of
+            // a postage stamp. Small screens still clamp to a usable minimum.
+            const bool large = available.width() >= 1400 || available.height() >= 850;
+            const auto width = large
+                ? std::clamp(static_cast<int>(available.width() * 0.90), 1100, 1800)
+                : std::clamp(static_cast<int>(available.width() * 0.82), 900, 1180);
+            const auto height = large
+                ? std::clamp(static_cast<int>(available.height() * 0.88), 700, 1050)
+                : std::clamp(static_cast<int>(available.height() * 0.84), 620, 780);
             resize(std::min(width, available.width()), std::min(height, available.height()));
         } else {
             resize(1024, 680);
@@ -598,7 +641,9 @@ void MainWindow::buildUi() {
     mapHost->setObjectName(QStringLiteral("mapHost"));
     mapGrid_ = new QGridLayout(mapHost);
     mapGrid_->setContentsMargins(0, 0, 0, 0);
-    mapGrid_->setSpacing(4);
+    // Themed gutter (see applyTheme). This used to hardcode 4 here, which
+    // silently overwrote the 6 px the Squall theme had just installed.
+    mapGrid_->setSpacing(theme_ == AppTheme::Prototype ? 6 : 4);
     for (int panel = 0; panel < 4; ++panel) {
         auto* canvas = new RadarMapCanvas(mapHost);
         canvas->setObjectName(panel == 0 ? QStringLiteral("radarMap")
@@ -618,19 +663,33 @@ void MainWindow::buildUi() {
     emptyStateHint_ = new QLabel(mapHost);
     emptyStateHint_->setObjectName(QStringLiteral("emptyStateHint"));
     emptyStateHint_->setText(QStringLiteral(
-        "Welcome to CappedWeather — pick a radar to begin. "
-        "Tip: Station list → LIVE → timeline → overlays."));
+        "Welcome to CappedWeather — live Level II in 3 steps:\n"
+        "1. Pick a radar (search ID, city, or ★ favorites)   2. Keep LIVE on   3. Turn on Warnings + Reports\n"
+        "Chasing? Settings → chase position → nearest radar. Press ? for shortcuts."));
     emptyStateHint_->setAlignment(Qt::AlignCenter);
     emptyStateHint_->setWordWrap(true);
-    emptyStateHint_->setStyleSheet(QStringLiteral(
-        "color: #d4d6d9; background: rgba(26,27,30,200); padding: 10px; border-radius: 6px;"));
+    emptyStateHint_->setAccessibleName(QStringLiteral("Getting started"));
+    // Styling lives in the theme sheet. A per-widget setStyleSheet outranks the
+    // application sheet, so the inline version pinned this card to Squall colors
+    // forever and the theme rule was dead.
     emptyStateHint_->raise();
     emptyStateHint_->show();
 
+    offlineBanner_ = new QLabel(mapHost);
+    offlineBanner_->setObjectName(QStringLiteral("offlineBanner"));
+    offlineBanner_->setText(QStringLiteral("OFFLINE — showing cached volumes + basemap"));
+    offlineBanner_->setAlignment(Qt::AlignCenter);
+    offlineBanner_->setAccessibleName(QStringLiteral("Offline status"));
+    offlineBanner_->hide();
+
     controlDock_ = new QDockWidget(QStringLiteral("RADAR"), this);
     controlDock_->setObjectName(QStringLiteral("controlDock"));
-    controlDock_->setFeatures(QDockWidget::DockWidgetMovable);
+    controlDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable |
+                              QDockWidget::DockWidgetFloatable);
     controlDock_->setMinimumWidth(300);
+    controlDock_->setAccessibleName(QStringLiteral("Radar controls"));
+    controlDock_->setAccessibleDescription(
+        QStringLiteral("Station, product, layers, view and tools. Close it to maximize map."));
     auto* controlScroll = new QScrollArea(controlDock_);
     controlScroll->setWidgetResizable(true);
     controlScroll->setFrameShape(QFrame::NoFrame);
@@ -668,7 +727,27 @@ void MainWindow::buildUi() {
     const auto makeBadge = [controlBody](const QString& name) {
         auto* badge = new QLabel(QStringLiteral("–"), controlBody);
         badge->setObjectName(name);
+        // The stylesheets target this property, not an object name: the badges
+        // are named warningsBadge/reportsBadge/..., so a `QLabel#layerBadge`
+        // rule could never match and they rendered as full-brightness body
+        // text - louder than the checkbox label they belong to.
+        badge->setProperty("layerBadge", true);
+        badge->setAlignment(Qt::AlignCenter);
         return badge;
+    };
+    // A QComboBox sizes itself to its *longest item*, so a label like
+    // "Severe (warnings only, default)" or "Native operational palette" sets a
+    // hard minimum for the whole dock layout. The scroll area hides its
+    // horizontal scrollbar and cannot shrink below that minimum, so everything
+    // to the right was silently clipped. Pin these to a short contents length
+    // and let the row's expanding policy hand them the leftover width; the
+    // popup still opens at full item width.
+    const auto makeShrinkableCombo = [](QComboBox* combo, const int characters) {
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(characters);
+        combo->setMinimumWidth(0);
+        combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        return combo;
     };
 
     // Pinned station status card: selected station + data health stay visible
@@ -710,14 +789,22 @@ void MainWindow::buildUi() {
     stationCombo_->setObjectName(QStringLiteral("stationCombo"));
     stationCombo_->setEditable(true);
     stationCombo_->setInsertPolicy(QComboBox::NoInsert);
-    stationCombo_->setMinimumContentsLength(24);
-    stationCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    // A 24-character minimum plus AdjustToMinimumContentsLengthWithIcon forced
+    // this combo to ~24 chars wide, which dragged the whole dock body past the
+    // dock's own width. The scroll area hides its horizontal scrollbar, so
+    // every row to the right of it silently got clipped: "Clear" lost its last
+    // letter, the warning filter lost its right edge, and the opacity slider
+    // handles were sliced in half. Let the expanding size policy fill the row
+    // and keep only a small floor so the field never collapses to nothing.
+    stationCombo_->setMinimumContentsLength(6);
+    stationCombo_->setMinimumWidth(0);
     stationCombo_->lineEdit()->setPlaceholderText(QStringLiteral("Find radar, city, or state…"));
     stationCombo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     stationRow->addWidget(stationCombo_, 1);
     favoriteButton_ = new QToolButton(controlBody);
     favoriteButton_->setObjectName(QStringLiteral("favoriteRadarButton"));
     favoriteButton_->setText(QStringLiteral("☆"));
+    favoriteButton_->setMinimumWidth(0);
     favoriteButton_->setCheckable(true);
     favoriteButton_->setToolTip(QStringLiteral("Favorite selected radar"));
     stationRow->addWidget(favoriteButton_);
@@ -732,6 +819,13 @@ void MainWindow::buildUi() {
         productCombo_->addItem(QString::fromUtf8(product.label.data()), static_cast<int>(product.kind));
     }
     productCombo_->hide();
+    // Spells out the selected product in full. The chips carry the standard
+    // 3-5 letter operational abbreviations, which is what fits two columns in
+    // a 320 px dock; without this line the user had no readable full name
+    // anywhere in the panel.
+    activeProductLabel_ = new QLabel(controlBody);
+    activeProductLabel_->setObjectName(QStringLiteral("activeProductLabel"));
+    productGroup->addWidget(activeProductLabel_);
     auto* chipGrid = new QGridLayout();
     chipGrid->setSpacing(5);
     chipGrid->setObjectName(QStringLiteral("productChipGrid"));
@@ -741,7 +835,8 @@ void MainWindow::buildUi() {
         const auto kind = product.kind;
         auto* chip = new QToolButton(controlBody);
         chip->setObjectName(QStringLiteral("productChip"));
-        chip->setText(QString::fromUtf8(product.label.data()));
+        chip->setText(QString::fromUtf8(product.shortName.data()));
+        chip->setAccessibleName(QString::fromUtf8(product.label.data()));
         chip->setIcon(productChipIcon(kind));
         chip->setIconSize(QSize(14, 14));
         chip->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -824,7 +919,7 @@ void MainWindow::buildUi() {
     auto* layersGroup = makeGroup(QStringLiteral("Layers"), QStringLiteral("layers"));
     auto* scopeRow = new QHBoxLayout();
     auto* scopeLabel = new QLabel(QStringLiteral("Show layers on"), controlBody);
-    scopeCombo_ = new QComboBox(controlBody);
+    scopeCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 9);
     scopeCombo_->setObjectName(QStringLiteral("scopeCombo"));
     scopeCombo_->addItems({QStringLiteral("All panels"), QStringLiteral("Active panel only")});
     scopeCombo_->setToolTip(QStringLiteral("Whether layer toggles below drive every panel or just the active one"));
@@ -873,27 +968,41 @@ void MainWindow::buildUi() {
                  QStringLiteral("Jumps matched to reflectivity objects"), fusionBadge_,
                  QStringLiteral("fusionBadge"), true,
                  QStringLiteral("Associate GLM jumps with reflectivity objects and azimuthal shear"));
+    makeLayerRow(shearCheck_, QStringLiteral("Rotation / shear"),
+                 QStringLiteral("shearCheck"),
+                 QStringLiteral("Azimuthal-shear objects, lightning not required"), shearBadge_,
+                 QStringLiteral("shearBadge"), true,
+                 QStringLiteral("Thresholded rotation couplets from Level II velocity (pink = rotating)"));
     makeLayerRow(placefilesCheck_, QStringLiteral("GR placefiles"), QStringLiteral("placefilesCheck"),
                  QStringLiteral("Chaser and spotter feeds"), placefilesBadge_,
                  QStringLiteral("placefilesBadge"), true,
                  QStringLiteral("Show loaded GR-compatible placefile markers and boundaries"));
     auto* placefileRow = new QHBoxLayout();
     placefileRow->setSpacing(4);
-    addPlacefileButton_ = new QToolButton(controlBody);
-    addPlacefileButton_->setObjectName(QStringLiteral("addPlacefileButton"));
-    addPlacefileButton_->setText(QStringLiteral("File…"));
-    addPlacefileButton_->setToolTip(QStringLiteral("Open a local GR placefile"));
+    // Share the row evenly and allow shrinking. These three default to their
+    // sizeHint, so a narrow dock clipped the last one.
+    const auto makeRowButton = [controlBody](const QString& text, const QString& object,
+                                             const QString& tip) {
+        auto* button = new QToolButton(controlBody);
+        button->setObjectName(object);
+        button->setText(text);
+        button->setToolTip(tip);
+        button->setMinimumWidth(0);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        return button;
+    };
+    addPlacefileButton_ = makeRowButton(QStringLiteral("File…"),
+                                        QStringLiteral("addPlacefileButton"),
+                                        QStringLiteral("Open a local GR placefile"));
     placefileRow->addWidget(addPlacefileButton_);
-    addPlacefileUrlButton_ = new QToolButton(controlBody);
-    addPlacefileUrlButton_->setObjectName(QStringLiteral("addPlacefileUrlButton"));
-    addPlacefileUrlButton_->setText(QStringLiteral("URL…"));
-    addPlacefileUrlButton_->setToolTip(QStringLiteral("Fetch a GR placefile URL with automatic refresh"));
+    addPlacefileUrlButton_ = makeRowButton(QStringLiteral("URL…"),
+                                           QStringLiteral("addPlacefileUrlButton"),
+                                           QStringLiteral("Fetch a GR placefile URL with automatic refresh"));
     placefileRow->addWidget(addPlacefileUrlButton_);
-    clearPlacefilesButton_ = new QToolButton(controlBody);
-    clearPlacefilesButton_->setObjectName(QStringLiteral("clearPlacefilesButton"));
-    clearPlacefilesButton_->setText(QStringLiteral("Clear"));
+    clearPlacefilesButton_ = makeRowButton(QStringLiteral("Clear"),
+                                          QStringLiteral("clearPlacefilesButton"),
+                                          QStringLiteral("Remove all loaded placefiles"));
     clearPlacefilesButton_->setEnabled(false);
-    clearPlacefilesButton_->setToolTip(QStringLiteral("Remove all loaded placefiles"));
     placefileRow->addWidget(clearPlacefilesButton_);
     layersGroup->addLayout(placefileRow);
 
@@ -909,6 +1018,11 @@ void MainWindow::buildUi() {
     proximityFilterRadius_->setSingleStep(10.0);
     proximityFilterRadius_->setValue(200.0);
     proximityFilterRadius_->setEnabled(false);
+    // Spin boxes size to their widest representable value ("1500.0 km"), which
+    // is wide enough to push the label off a narrow dock row. An explicit
+    // minimum width of 0 lets the row layout compress them instead.
+    proximityFilterRadius_->setMinimumWidth(0);
+    proximityFilterRadius_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     proximityRow->addWidget(proximityLabel);
     proximityRow->addWidget(proximityFilterRadius_, 1);
     // Added to the layout later, inside the notify block below.
@@ -985,7 +1099,7 @@ void MainWindow::buildUi() {
     glmStatusNote_->setWordWrap(true);
     glmStatusNote_->setVisible(false);
     controlLayout->addWidget(glmStatusNote_);
-    warningFilterCombo_ = new QComboBox(controlBody);
+    warningFilterCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 11);
     warningFilterCombo_->addItems({QStringLiteral("All warnings"), QStringLiteral("Tornado"),
                                    QStringLiteral("Severe Thunderstorm"), QStringLiteral("Flash Flood"),
                                    QStringLiteral("Extreme")});
@@ -1029,9 +1143,34 @@ void MainWindow::buildUi() {
     connect(radarOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
         for (auto* panel : maps_) panel->setRadarOpacity(opacity);
     });
+    auto* warningOpacityRow = new QHBoxLayout();
+    warningOpacityRow->setSpacing(8);
+    auto* warningOpacityLabel = new QLabel(QStringLiteral("Warning opacity"), controlBody);
+    warningOpacityLabel->setObjectName(QStringLiteral("section"));
+    warningOpacityRow->addWidget(warningOpacityLabel);
+    warningOpacitySlider_ = new QSlider(Qt::Horizontal, controlBody);
+    warningOpacitySlider_->setObjectName(QStringLiteral("warningOpacitySlider"));
+    warningOpacitySlider_->setRange(20, 100);
+    warningOpacitySlider_->setValue(90);
+    warningOpacitySlider_->setToolTip(
+        QStringLiteral("Warning polygon opacity. Lower it when polygons hide the echo."));
+    warningOpacityRow->addWidget(warningOpacitySlider_, 1);
+    layersGroup->addLayout(warningOpacityRow);
+    connect(warningOpacitySlider_, &QSlider::valueChanged, this, [this](int opacity) {
+        for (auto* panel : maps_) panel->setWarningOpacity(opacity);
+    });
+    warningsOnTopCheck_ = new QCheckBox(QStringLiteral("Warnings above echo"), controlBody);
+    warningsOnTopCheck_->setObjectName(QStringLiteral("warningsOnTopCheck"));
+    warningsOnTopCheck_->setChecked(true);
+    warningsOnTopCheck_->setToolTip(
+        QStringLiteral("When off, radar echo paints over warning polygons (useful for debris-ball inspection)."));
+    layersGroup->addWidget(warningsOnTopCheck_);
+    connect(warningsOnTopCheck_, &QCheckBox::toggled, this, [this](bool onTop) {
+        for (auto* panel : maps_) panel->setWarningsOnTop(onTop);
+    });
     auto* paletteRow = new QHBoxLayout();
     paletteRow->setSpacing(4);
-    paletteCombo_ = new QComboBox(controlBody);
+    paletteCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 13);
     paletteCombo_->addItems({QStringLiteral("Capped palette"), QStringLiteral("Native operational palette"),
                              QStringLiteral("Color-safe palette"), QStringLiteral("Custom palette")});
     paletteRow->addWidget(paletteCombo_, 1);
@@ -1039,8 +1178,11 @@ void MainWindow::buildUi() {
         for (auto* panel : maps_) panel->setPalette(static_cast<RadarMapCanvas::PaletteKind>(index));
     });
     auto* paletteButton = new QToolButton(controlBody);
-    paletteButton->setText(QStringLiteral("Palette..."));
+    paletteButton->setObjectName(QStringLiteral("paletteButton"));
+    paletteButton->setText(QStringLiteral("Palette…"));
     paletteButton->setToolTip(QStringLiteral("Import a value,color palette text file"));
+    paletteButton->setMinimumWidth(0);
+    paletteButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
     paletteRow->addWidget(paletteButton);
     layersGroup->addLayout(paletteRow);
@@ -1050,6 +1192,27 @@ void MainWindow::buildUi() {
     connect(belowThresholdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setBelowThresholdVisible(visible);
     });
+    trailCheck_ = new QCheckBox(QStringLiteral("Storm trails (max-REF track)"), controlBody);
+    trailCheck_->setObjectName(QStringLiteral("trailCheck"));
+    trailCheck_->setChecked(true);
+    trailCheck_->setToolTip(QStringLiteral("One honest point per volume: strongest reflectivity object, fading with age"));
+    layersGroup->addWidget(trailCheck_);
+    connect(trailCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setStormTrailVisible(visible);
+    });
+    smoothingCheck_ = new QCheckBox(QStringLiteral("Smooth echo (display only)"), controlBody);
+    smoothingCheck_->setObjectName(QStringLiteral("smoothingCheck"));
+    smoothingCheck_->setChecked(false);
+    smoothingCheck_->setToolTip(QStringLiteral("Display-only azimuth overlap to hide gate gaps. Gates stay honest when off."));
+    layersGroup->addWidget(smoothingCheck_);
+    connect(smoothingCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        for (auto* panel : maps_) panel->setDisplaySmoothing(enabled);
+    });
+    scanDiagnosticsLabel_ = new QLabel(QStringLiteral("Scan: —"), controlBody);
+    scanDiagnosticsLabel_->setObjectName(QStringLiteral("layerSub"));
+    scanDiagnosticsLabel_->setWordWrap(true);
+    scanDiagnosticsLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layersGroup->addWidget(scanDiagnosticsLabel_);
     controlLayout->addSpacing(10);
 
     // Alert tuning lives next to the layers it governs, not in Settings.
@@ -1060,7 +1223,7 @@ void MainWindow::buildUi() {
     layersGroup->addLayout(proximityRow);
     auto* severityRow = new QHBoxLayout();
     auto* severityLabel = new QLabel(QStringLiteral("Minimum severity"), controlBody);
-    severityCombo_ = new QComboBox(controlBody);
+    severityCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 11);
     severityCombo_->setObjectName(QStringLiteral("severityCombo"));
     severityCombo_->addItem(QStringLiteral("Minor (advisories + above)"), 0);
     severityCombo_->addItem(QStringLiteral("Moderate (watches + above)"), 1);
@@ -1079,6 +1242,8 @@ void MainWindow::buildUi() {
     ageSpin_->setSuffix(QStringLiteral(" min"));
     ageSpin_->setSingleStep(5);
     ageSpin_->setSpecialValueText(QStringLiteral("any age"));
+    ageSpin_->setMinimumWidth(0);
+    ageSpin_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     ageRow->addWidget(ageLabel);
     ageRow->addWidget(ageSpin_, 1);
     layersGroup->addLayout(ageRow);
@@ -1095,7 +1260,7 @@ void MainWindow::buildUi() {
     connect(soundCheck_, &QCheckBox::toggled, this, [this] { pushAlertDockToCenter(); });
     connect(trayCheck_, &QCheckBox::toggled, this, [this] { pushAlertDockToCenter(); });
 
-    velocityModeCombo_ = new QComboBox(controlBody);
+    velocityModeCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 13);
     velocityModeCombo_->setObjectName(QStringLiteral("velocityModeCombo"));
     velocityModeCombo_->addItems({QStringLiteral("Native velocity"), QStringLiteral("Dealiased velocity"),
                                   QStringLiteral("Storm-relative velocity")});
@@ -1136,8 +1301,7 @@ void MainWindow::buildUi() {
             [applyVelocitySettings](double) { applyVelocitySettings(); });
 
     auto* viewGroup = makeGroup(QStringLiteral("View"), QStringLiteral("view"));
-    panelLayoutCombo_ = new QComboBox(controlBody);
-    viewGroup->addWidget(panelLayoutCombo_);
+    panelLayoutCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 5);
     panelLayoutCombo_->setObjectName(QStringLiteral("panelLayoutCombo"));
     panelLayoutCombo_->addItems({QStringLiteral("1x1"), QStringLiteral("1x2"),
                                  QStringLiteral("2x1"), QStringLiteral("2x2")});
@@ -1146,13 +1310,14 @@ void MainWindow::buildUi() {
     connect(panelLayoutCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::setPanelLayout);
     auto* presetRow = new QHBoxLayout();
-    presetsCombo_ = new QComboBox(controlBody);
+    presetsCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 13);
     presetsCombo_->setObjectName(QStringLiteral("presetsCombo"));
     presetsCombo_->setToolTip(QStringLiteral("Named panel layout preset (built-in + user-saved)"));
     savePresetButton_ = new QToolButton(controlBody);
     savePresetButton_->setObjectName(QStringLiteral("savePresetButton"));
     savePresetButton_->setText(QStringLiteral("Save…"));
     savePresetButton_->setToolTip(QStringLiteral("Capture the current layout + per-panel products as a new preset"));
+    savePresetButton_->setMinimumWidth(0);
     presetRow->addWidget(presetsCombo_, 1);
     presetRow->addWidget(savePresetButton_);
     viewGroup->addLayout(presetRow);
@@ -1166,10 +1331,27 @@ void MainWindow::buildUi() {
     connect(savePresetButton_, &QToolButton::clicked, this, &MainWindow::saveCurrentAsPreset);
     rebuildPresetsCombo();
     auto* panelHint = new QLabel(
-        QStringLiteral("Click a panel to work on it. Product, tilt, and tools follow."), controlBody);
+        QStringLiteral("Click a panel to work on it. Product, tilt, and tools follow. "
+                       "Double-click a panel to fill the window."), controlBody);
     panelHint->setObjectName(QStringLiteral("groupCaption"));
     panelHint->setWordWrap(true);
     viewGroup->addWidget(panelHint);
+    auto* viewButtonsRow = new QHBoxLayout();
+    maximizePanelButton_ = new QToolButton(controlBody);
+    maximizePanelButton_->setObjectName(QStringLiteral("maximizePanelButton"));
+    maximizePanelButton_->setText(QStringLiteral("Maximize panel"));
+    maximizePanelButton_->setCheckable(true);
+    maximizePanelButton_->setToolTip(QStringLiteral("Fill the window with the active panel (double-click also works)"));
+    viewButtonsRow->addWidget(maximizePanelButton_, 1);
+    dataSaverButton_ = new QToolButton(controlBody);
+    dataSaverButton_->setObjectName(QStringLiteral("dataSaverButton"));
+    dataSaverButton_->setText(QStringLiteral("Data-saver"));
+    dataSaverButton_->setToolTip(QStringLiteral("One-click chase preset: 2 parallel chunks, 4-frame history, "
+                                                "2-minute overlay refresh. For flaky cellular."));
+    viewButtonsRow->addWidget(dataSaverButton_, 1);
+    viewGroup->addLayout(viewButtonsRow);
+    connect(maximizePanelButton_, &QToolButton::toggled, this, [this](bool) { togglePanelMaximized(); });
+    connect(dataSaverButton_, &QToolButton::clicked, this, &MainWindow::applyDataSaverPreset);
 
     auto* navigationGrid = new QGridLayout();
     navigationGrid->setSpacing(4);
@@ -1211,14 +1393,16 @@ void MainWindow::buildUi() {
         ++toolsPosition;
         return button;
     };
-    measureButton_ = addToolButton(QStringLiteral("Measure"), QStringLiteral("Measure distance and bearing"));
+    measureButton_ = addToolButton(QStringLiteral("Measure"),
+                                      QStringLiteral("Measure distance and bearing (Esc cancels)"));
     measureButton_->setCheckable(true);
+    measureButton_->setAccessibleName(QStringLiteral("Measure distance"));
     connect(measureButton_, &QToolButton::toggled, this, [this](bool enabled) {
         if (enabled && crossSectionButton_) crossSectionButton_->setChecked(false);
         map_->setMeasureMode(enabled);
     });
     crossSectionButton_ = addToolButton(QStringLiteral("Cross-section"),
-                                       QStringLiteral("Draw a vertical cross-section through all tilts"));
+                                       QStringLiteral("Draw a vertical cross-section — stays open beside live radar (Esc cancels)"));
     crossSectionButton_->setObjectName(QStringLiteral("crossSectionButton"));
     crossSectionButton_->setCheckable(true);
     connect(crossSectionButton_, &QToolButton::toggled, this, [this](bool enabled) {
@@ -1236,7 +1420,11 @@ void MainWindow::buildUi() {
 
     playbackDock_ = new QDockWidget(QStringLiteral("PLAYBACK"), this);
     playbackDock_->setObjectName(QStringLiteral("playbackDock"));
-    playbackDock_->setFeatures(QDockWidget::DockWidgetMovable);
+    playbackDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable |
+                               QDockWidget::DockWidgetFloatable);
+    playbackDock_->setAccessibleName(QStringLiteral("Playback and archive"));
+    playbackDock_->setAccessibleDescription(
+        QStringLiteral("Timeline transport, export, and archive loading."));
     auto* playbackBody = new QWidget(playbackDock_);
     playbackBody->setObjectName(QStringLiteral("dockBody"));
     auto* playbackLayout = new QVBoxLayout(playbackBody);
@@ -1248,15 +1436,18 @@ void MainWindow::buildUi() {
     previousButton_ = new QToolButton(playbackBody);
     previousButton_->setObjectName(QStringLiteral("previousFrameButton"));
     previousButton_->setText(QStringLiteral("Previous"));
+    previousButton_->setToolTip(QStringLiteral("Previous frame (Left arrow)"));
     transportRow->addWidget(previousButton_);
     playButton_ = new QToolButton(playbackBody);
     playButton_->setObjectName(QStringLiteral("playButton"));
     playButton_->setText(QStringLiteral("Play"));
+    playButton_->setToolTip(QStringLiteral("Play / pause timeline loop (Space)"));
     playButton_->setCheckable(true);
     transportRow->addWidget(playButton_);
     nextButton_ = new QToolButton(playbackBody);
     nextButton_->setObjectName(QStringLiteral("nextFrameButton"));
     nextButton_->setText(QStringLiteral("Next"));
+    nextButton_->setToolTip(QStringLiteral("Next frame (Right arrow)"));
     transportRow->addWidget(nextButton_);
     liveButton_ = new QToolButton(playbackBody);
     liveButton_->setObjectName(QStringLiteral("liveButton"));
@@ -1309,7 +1500,7 @@ void MainWindow::buildUi() {
     auto* timelineButton = new QToolButton(playbackBody);
     timelineButton->setObjectName(QStringLiteral("timelineButton"));
     timelineButton->setText(QStringLiteral("Timeline GIF"));
-    timelineButton->setToolTip(QStringLiteral("Export loaded volume frames as an animated GIF"));
+    timelineButton->setToolTip(QStringLiteral("Export loaded frames as GIF (cancellable, with progress)"));
     connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
     detailsRow->addWidget(timelineButton);
     playbackLayout->addLayout(detailsRow);
@@ -1344,7 +1535,9 @@ void MainWindow::buildUi() {
     overlayStatusLabel_->hide();
     playbackDock_->setWidget(playbackBody);
     addDockWidget(Qt::BottomDockWidgetArea, playbackDock_);
-    resizeDocks({controlDock_}, {272}, Qt::Horizontal);
+    // No second resizeDocks here: an earlier 272 px call silently undid the
+    // 324 px set above (and the comment explaining why), clipping the
+    // two-column chip and layer rows that need the room.
 
     auto* status = statusBar();
     unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"));
@@ -1367,7 +1560,11 @@ void MainWindow::buildUi() {
     cancelButton_->setText(QStringLiteral("Cancel"));
     cancelButton_->hide();
     status->addPermanentWidget(cancelButton_);
+    // The status bar narrows and widens as the permanent widgets come and go,
+    // so the elision has to be recomputed, not computed once at build time.
+    status->installEventFilter(this);
 
+    setupMenus();
     updateUnifiedStatus();
     updatePlaybackControls();
 }
@@ -1428,24 +1625,38 @@ void MainWindow::updateStationSummary() {
     favoriteButton_->setText(favorite ? QStringLiteral("★") : QStringLiteral("☆"));
 }
 
+void MainWindow::applyUnifiedStatusElision() {
+    if (!unifiedStatusLabel_ || unifiedStatusFullText_.isEmpty()) return;
+    // QLabel hard-clips at the widget edge with no ellipsis, so the GLM tail
+    // was routinely cut mid-word beside the permanent widgets. Elide to the
+    // real available width, recomputed whenever the status bar resizes (window
+    // resize, or the progress/retry/cancel widgets appearing).
+    const auto available = std::max(120, unifiedStatusLabel_->width());
+    QFont statusFont = unifiedStatusLabel_->font();
+    statusFont.setPointSizeF(std::max(7.0, statusFont.pointSizeF() - 1.0));
+    unifiedStatusLabel_->setText(
+        QFontMetrics(statusFont).elidedText(unifiedStatusFullText_, Qt::ElideRight, available));
+}
+
 void MainWindow::updateUnifiedStatus() {
     if (!unifiedStatusLabel_) return;
-    const auto status = QStringLiteral("Radar: %1    |    NWS/SPC: %2    |    GLM: %3")
-                            .arg(radarStatus_, overlayStatus_, lightningStatus_);
-    unifiedStatusLabel_->setText(status);
-    unifiedStatusLabel_->setToolTip(status);
+    unifiedStatusFullText_ =
+        QStringLiteral("Radar: %1    |    NWS/SPC: %2    |    GLM: %3")
+            .arg(radarStatus_, overlayStatus_, lightningStatus_);
+    unifiedStatusLabel_->setToolTip(unifiedStatusFullText_);
+    applyUnifiedStatusElision();
     if (glmStatusNote_) {
         if (!cappedweather::glmL2ReaderAvailable()) {
             glmStatusNote_->setText(QStringLiteral("GLM disabled (netCDF-C unavailable)"));
-            glmStatusNote_->setStyleSheet(QStringLiteral("color: #ff8a80;"));
+            glmStatusNote_->setProperty("notice", true);
             glmStatusNote_->setVisible(true);
         } else if (lightningStatus_.startsWith(QStringLiteral("GLM disabled"))) {
             glmStatusNote_->setText(lightningStatus_);
-            glmStatusNote_->setStyleSheet(QStringLiteral("color: #ff8a80;"));
+            glmStatusNote_->setProperty("notice", true);
             glmStatusNote_->setVisible(true);
         } else {
             glmStatusNote_->setVisible(false);
-            glmStatusNote_->setStyleSheet(QString());
+            glmStatusNote_->setProperty("notice", false);
         }
     }
 }
@@ -1479,6 +1690,19 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         session && session->history.size() < 2) {
         ensureHistoryLoaded(false);
     }
+    if (watched == statusBar() && event->type() == QEvent::Resize) {
+        applyUnifiedStatusElision();
+    }
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        for (auto* panel : maps_) {
+            if (watched == panel) {
+                activateMap(panel);
+                if (maximizePanelButton_) maximizePanelButton_->toggle();
+                else togglePanelMaximized();
+                return true;
+            }
+        }
+    }
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -1487,12 +1711,24 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     if (emptyStateHint_ && emptyStateHint_->isVisible()) {
         const auto* parent = emptyStateHint_->parentWidget();
         if (parent) {
-            const auto hintWidth = std::min(520, parent->width() - 40);
+            const auto hintWidth = std::min(560, parent->width() - 40);
+            emptyStateHint_->adjustSize();
+            const auto hintHeight = std::max(64, emptyStateHint_->sizeHint().height());
             emptyStateHint_->setGeometry(
                 (parent->width() - hintWidth) / 2,
-                (parent->height() - emptyStateHint_->sizeHint().height()) / 2,
+                (parent->height() - hintHeight) / 2,
                 hintWidth,
-                emptyStateHint_->sizeHint().height());
+                hintHeight);
+        }
+    }
+    if (offlineBanner_ && offlineBanner_->isVisible()) {
+        const auto* parent = offlineBanner_->parentWidget();
+        if (parent) {
+            const auto bannerWidth = std::min(460, parent->width() - 40);
+            offlineBanner_->setGeometry(
+                (parent->width() - bannerWidth) / 2, 10,
+                bannerWidth, offlineBanner_->sizeHint().height());
+            offlineBanner_->raise();
         }
     }
 }
@@ -1516,6 +1752,8 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     const auto existed = radarSessions_.contains(radarId);
     const auto session = sessionFor(radarId);
     lastVolumeTime_ = {};
+    consecutiveFailures_ = 0;
+    updateOfflineBanner();
     setRadarHealth(RadarHealthState::Stale, QStringLiteral("Loading %1...").arg(radarId));
     recentRadarIds_.removeAll(radarId);
     recentRadarIds_.prepend(radarId);
@@ -1612,6 +1850,8 @@ void MainWindow::sourceFailed(const QString& radarId, const QString& message) {
         retryButton_->show();
         setRadarHealth(RadarHealthState::Offline,
                        QStringLiteral("Last fetch failed: %1").arg(message));
+        ++consecutiveFailures_;
+        updateOfflineBanner();
     }
 }
 
@@ -1865,6 +2105,8 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
     if (radarId == selectedRadarId_) {
         if (!lastVolumeTime_.isValid() || receivedAt > lastVolumeTime_) lastVolumeTime_ = receivedAt;
         recomputeRadarHealth();
+        consecutiveFailures_ = 0;
+        updateOfflineBanner();
     }
 }
 
@@ -2036,6 +2278,7 @@ void MainWindow::showFrame(const int index) {
     updatePlaybackControls();
     refreshLayerBadges();
     updatePanelAttribution();
+    refreshCrossSection();
 }
 
 void MainWindow::updateProductAvailability() {
@@ -2097,9 +2340,9 @@ void MainWindow::stopAnimation() {
 void MainWindow::restoreSettings() {
     QSettings settings;
     maximumHistoryFrames_ = std::clamp(settings.value(QStringLiteral("timeline/maximumFrames"), 12).toInt(),
-                                       2, 24);
+                                       2, 32);
     historyVolumeCount_ = std::clamp(settings.value(QStringLiteral("timeline/historyVolumes"), 8).toInt(),
-                                    2, 12);
+                                    2, 16);
     chaseMode_ = settings.value(QStringLiteral("chase/enabled"), false).toBool();
     chaseLatitude_ = std::clamp(settings.value(QStringLiteral("chase/latitude"), 35.0).toDouble(), -90.0, 90.0);
     chaseLongitude_ = std::clamp(settings.value(QStringLiteral("chase/longitude"), -97.0).toDouble(), -180.0, 180.0);
@@ -2179,6 +2422,14 @@ void MainWindow::restoreSettings() {
                                               0, paletteCombo_->count() - 1));
     radarOpacitySlider_->setValue(std::clamp(settings.value(QStringLiteral("view/radarOpacity"), 80).toInt(),
                                              radarOpacitySlider_->minimum(), radarOpacitySlider_->maximum()));
+    warningOpacitySlider_->setValue(std::clamp(settings.value(QStringLiteral("view/warningOpacity"), 90).toInt(),
+                                               warningOpacitySlider_->minimum(),
+                                               warningOpacitySlider_->maximum()));
+    warningsOnTopCheck_->setChecked(settings.value(QStringLiteral("view/warningsOnTop"), true).toBool());
+    for (auto* panel : maps_) {
+        panel->setWarningOpacity(warningOpacitySlider_->value());
+        panel->setWarningsOnTop(warningsOnTopCheck_->isChecked());
+    }
     warningFilterCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("overlays/warningFilter"), 0).toInt(),
                                                     0, warningFilterCombo_->count() - 1));
     warningsCheck_->setChecked(settings.value(QStringLiteral("overlays/warnings"), true).toBool());
@@ -2187,6 +2438,14 @@ void MainWindow::restoreSettings() {
     hailCheck_->setChecked(settings.value(QStringLiteral("overlays/hail"), true).toBool());
     windCheck_->setChecked(settings.value(QStringLiteral("overlays/wind"), true).toBool());
     belowThresholdCheck_->setChecked(settings.value(QStringLiteral("view/belowThreshold"), false).toBool());
+    trailCheck_->setChecked(settings.value(QStringLiteral("overlays/trail"), true).toBool());
+    smoothingCheck_->setChecked(settings.value(QStringLiteral("view/smoothing"), false).toBool());
+    shearCheck_->setChecked(settings.value(QStringLiteral("overlays/shear"), true).toBool());
+    for (auto* panel : maps_) {
+        panel->setStormTrailVisible(trailCheck_->isChecked());
+        panel->setDisplaySmoothing(smoothingCheck_->isChecked());
+        panel->setShearVisible(shearCheck_->isChecked());
+    }
     if (lightningCheck_->isEnabled())
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
     if (lightningFusionCheck_->isEnabled())
@@ -2223,7 +2482,12 @@ void MainWindow::saveSettings() const {
         customStops.push_back(QStringLiteral("%1,%2").arg(stop.value, 0, 'g', 12).arg(stop.color.name(QColor::HexArgb)));
     settings.setValue(QStringLiteral("view/customPalette"), customStops);
     settings.setValue(QStringLiteral("view/radarOpacity"), radarOpacitySlider_->value());
+    settings.setValue(QStringLiteral("view/warningOpacity"), warningOpacitySlider_->value());
+    settings.setValue(QStringLiteral("view/warningsOnTop"), warningsOnTopCheck_->isChecked());
     settings.setValue(QStringLiteral("view/belowThreshold"), belowThresholdCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/trail"), trailCheck_->isChecked());
+    settings.setValue(QStringLiteral("view/smoothing"), smoothingCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/shear"), shearCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/warnings"), warningsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/reports"), reportsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/tornado"), tornadoCheck_->isChecked());
@@ -2275,7 +2539,17 @@ void MainWindow::showSettingsDialog() {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("CappedWeather Settings"));
     auto* layout = new QVBoxLayout(&dialog);
+    // 23 form rows plus the alerts group box overflowed a short dialog and
+    // pushed OK/Cancel off-screen at any non-default text size. Put the body
+    // in a scroll area and cap the height so the button box always stays put.
+    auto* settingsScroll = new QScrollArea(&dialog);
+    settingsScroll->setWidgetResizable(true);
+    settingsScroll->setFrameShape(QFrame::NoFrame);
+    auto* settingsBody = new QWidget(settingsScroll);
+    auto* bodyLayout = new QVBoxLayout(settingsBody);
+    bodyLayout->setContentsMargins(0, 0, 8, 0);
     auto* form = new QFormLayout();
+    bodyLayout->addLayout(form);
     auto* themeCombo = new QComboBox(&dialog);
     themeCombo->addItem(appThemeName(AppTheme::Classic), static_cast<int>(AppTheme::Classic));
     themeCombo->addItem(appThemeName(AppTheme::Prototype), static_cast<int>(AppTheme::Prototype));
@@ -2297,11 +2571,13 @@ void MainWindow::showSettingsDialog() {
     chaseRow->addWidget(detectButton);
     chaseRow->addStretch(1);
     auto* frames = new QSpinBox(&dialog);
-    frames->setRange(2, 24);
+    frames->setRange(2, 32);
     frames->setValue(maximumHistoryFrames_);
+    frames->setToolTip(QStringLiteral("Volumes kept in memory for looping. Above ~24 uses significant RAM."));
     auto* volumes = new QSpinBox(&dialog);
-    volumes->setRange(2, 12);
+    volumes->setRange(2, 16);
     volumes->setValue(historyVolumeCount_);
+    volumes->setToolTip(QStringLiteral("How many past volumes to fetch for the timeline."));
     auto* contact = new QLineEdit(QSettings().value(QStringLiteral("network/contact")).toString(), &dialog);
     contact->setPlaceholderText(QStringLiteral("Email or project URL for public-service requests"));
     auto* synchronize = new QCheckBox(QStringLiteral("Link pan and zoom across radar panels"), &dialog);
@@ -2490,7 +2766,7 @@ void MainWindow::showSettingsDialog() {
     alertsLayout->addRow(QStringLiteral("Suppress repeats for"), alertsSuppression);
     alertsLayout->addRow(QStringLiteral("Custom sound (.wav)"), alertsSoundContainer);
     alertsLayout->addRow(alertsTestButton);
-    layout->addWidget(alertsGroup);
+    bodyLayout->addWidget(alertsGroup);
 
     connect(alertsBrowseButton, &QToolButton::clicked, &dialog, [&dialog, alertsSoundPath]() {
         const auto path = QFileDialog::getOpenFileName(&dialog, QStringLiteral("Choose alert sound"),
@@ -2508,12 +2784,16 @@ void MainWindow::showSettingsDialog() {
         "The geo filter uses the selected radar's location, or the chase point when chase mode is on."),
         &dialog);
     alertNote->setWordWrap(true);
-    layout->addWidget(alertNote);
+    bodyLayout->addWidget(alertNote);
+    bodyLayout->addStretch(1);
+    settingsScroll->setWidget(settingsBody);
+    layout->addWidget(settingsScroll, 1);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
+    dialog.resize(560, std::min(680, dialog.height() > 0 ? dialog.height() : 680));
     if (dialog.exec() != QDialog::Accepted) return;
 
     chaseMode_ = chaseCheck->isChecked();
@@ -2594,6 +2874,15 @@ void MainWindow::selectNearestChaseRadar() {
 
 void MainWindow::setPanelLayout(const int layoutIndex) {
     if (!mapGrid_ || maps_.size() < 4) return;
+    if (panelMaximized_) {
+        // A layout change exits temporary maximize; the preset combo owns truth.
+        panelMaximized_ = false;
+        if (maximizePanelButton_) {
+            const QSignalBlocker blocker(maximizePanelButton_);
+            maximizePanelButton_->setChecked(false);
+        }
+    }
+    layoutBeforeMaximize_ = layoutIndex;
     for (auto* panel : maps_) {
         mapGrid_->removeWidget(panel);
         panel->hide();
@@ -2625,8 +2914,136 @@ void MainWindow::setPanelLayout(const int layoutIndex) {
     if (panelLayoutCombo_) saveSettings();
 }
 
+void MainWindow::togglePanelMaximized() {
+    if (!mapGrid_ || maps_.isEmpty() || !map_) return;
+    const auto activeIndex = std::max(0, panelIndex(map_));
+    if (!panelMaximized_) {
+        maximizedPanelIndex_ = activeIndex;
+        if (panelLayoutCombo_) layoutBeforeMaximize_ = panelLayoutCombo_->currentIndex();
+        panelMaximized_ = true;
+        for (auto* panel : maps_) {
+            mapGrid_->removeWidget(panel);
+            panel->hide();
+        }
+        mapGrid_->addWidget(maps_.at(maximizedPanelIndex_), 0, 0, 2, 2);
+        maps_.at(maximizedPanelIndex_)->show();
+        mapGrid_->setRowStretch(0, 1);
+        mapGrid_->setRowStretch(1, 1);
+        mapGrid_->setColumnStretch(0, 1);
+        mapGrid_->setColumnStretch(1, 0);
+        statusBar()->showMessage(
+            QStringLiteral("Panel %1 maximized — toggle off to restore %2")
+                .arg(maximizedPanelIndex_ + 1)
+                .arg(panelLayoutCombo_ ? panelLayoutCombo_->currentText() : QStringLiteral("layout")),
+            4000);
+    } else {
+        panelMaximized_ = false;
+        if (maximizePanelButton_) {
+            const QSignalBlocker blocker(maximizePanelButton_);
+            maximizePanelButton_->setChecked(false);
+        }
+        // Restore via the normal layout path (which also re-saves settings).
+        const auto restore = layoutBeforeMaximize_;
+        if (panelLayoutCombo_) {
+            const QSignalBlocker blocker(panelLayoutCombo_);
+            panelLayoutCombo_->setCurrentIndex(restore);
+        }
+        // Manually re-apply since we blocked the combo signal.
+        panelMaximized_ = false; // setPanelLayout clears it again; keep consistent
+        // Temporarily pretend we are not maximized so setPanelLayout takes the normal path.
+        setPanelLayout(restore);
+        if (maximizePanelButton_) {
+            const QSignalBlocker blocker(maximizePanelButton_);
+            maximizePanelButton_->setChecked(false);
+        }
+        activateMap(maps_.at(maximizedPanelIndex_));
+    }
+}
+
+void MainWindow::updateOfflineBanner() {
+    if (!offlineBanner_) return;
+    const bool show = consecutiveFailures_ > 0;
+    offlineBanner_->setVisible(show);
+    if (show) {
+        const auto* parent = offlineBanner_->parentWidget();
+        if (parent) {
+            const auto bannerWidth = std::min(520, parent->width() - 40);
+            offlineBanner_->setGeometry(
+                (parent->width() - bannerWidth) / 2, 10,
+                bannerWidth, offlineBanner_->sizeHint().height() + 8);
+            offlineBanner_->raise();
+        }
+        if (emptyStateHint_) emptyStateHint_->hide();
+    }
+}
+
+void MainWindow::applyDataSaverPreset() {
+    QSettings settings;
+    settings.setValue(QStringLiteral("network/parallelChunks"), 2);
+    settings.setValue(QStringLiteral("timeline/historyVolumes"), 4);
+    settings.setValue(QStringLiteral("network/overlayRefreshSeconds"), 120);
+    historyVolumeCount_ = 4;
+    overlayRefreshTimer_->start(120 * 1000);
+    statusBar()->showMessage(
+        QStringLiteral("Data-saver on: 2 parallel chunks, 4-frame history, overlays every 2 min"), 6000);
+}
+
+void MainWindow::setupMenus() {
+    auto* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
+    auto* snapshotAction = fileMenu->addAction(QStringLiteral("Export snapshot…"));
+    snapshotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_S));
+    connect(snapshotAction, &QAction::triggered, this, &MainWindow::exportSnapshot);
+    auto* gifAction = fileMenu->addAction(QStringLiteral("Export timeline GIF…"));
+    connect(gifAction, &QAction::triggered, this, &MainWindow::exportTimelineAnimation);
+    fileMenu->addSeparator();
+    auto* settingsAction = fileMenu->addAction(QStringLiteral("Settings…"));
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettingsDialog);
+    auto* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
+    auto* controlAct = viewMenu->addAction(QStringLiteral("Radar controls dock"));
+    controlAct->setCheckable(true);
+    controlAct->setChecked(controlDock_ && controlDock_->isVisible());
+    connect(controlAct, &QAction::toggled, this, [this](bool visible) {
+        if (controlDock_) controlDock_->setVisible(visible);
+    });
+    connect(controlDock_, &QDockWidget::visibilityChanged, controlAct, &QAction::setChecked);
+    auto* playbackAct = viewMenu->addAction(QStringLiteral("Playback dock"));
+    playbackAct->setCheckable(true);
+    playbackAct->setChecked(playbackDock_ && playbackDock_->isVisible());
+    connect(playbackAct, &QAction::toggled, this, [this](bool visible) {
+        if (playbackDock_) playbackDock_->setVisible(visible);
+    });
+    connect(playbackDock_, &QDockWidget::visibilityChanged, playbackAct, &QAction::setChecked);
+    viewMenu->addSeparator();
+    auto* maxAct = viewMenu->addAction(QStringLiteral("Maximize active panel"));
+    maxAct->setShortcut(QKeySequence(Qt::Key_F11));
+    maxAct->setCheckable(true);
+    connect(maxAct, &QAction::toggled, this, [this](bool checked) {
+        if (maximizePanelButton_) maximizePanelButton_->setChecked(checked);
+        else togglePanelMaximized();
+    });
+    connect(this, &MainWindow::destroyed, maxAct, &QObject::deleteLater);
+    auto* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+    auto* shortcutsAction = helpMenu->addAction(QStringLiteral("Keyboard shortcuts…"));
+    shortcutsAction->setShortcuts({QKeySequence(Qt::Key_F1), QKeySequence(QStringLiteral("?"))});
+    connect(shortcutsAction, &QAction::triggered, this, [this] {
+        auto* dialog = new ShortcutHelpDialog(this);
+        dialog->setModal(false);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->show();
+    });
+}
+
 void MainWindow::activateMap(RadarMapCanvas* map) {
     if (!map || map_ == map && map->property("activePanel").toBool()) return;
+    // Preserve the outgoing tool state so switching panels doesn't silently
+    // cancel a measure / cross-section gesture. The tool transfers to the new
+    // active panel instead of vanishing.
+    const bool hadMeasure = map_ && measureButton_ && measureButton_->isChecked();
+    const bool hadCrossSection = map_ && crossSectionButton_ && crossSectionButton_->isChecked();
+    if (map_) {
+        map_->setMeasureMode(false);
+        map_->setCrossSectionMode(false);
+    }
     map_ = map;
     for (auto* panel : maps_) {
         panel->setActivePanel(panel == map_);
@@ -2636,6 +3053,8 @@ void MainWindow::activateMap(RadarMapCanvas* map) {
             panel->setCrossSectionMode(false);
         }
     }
+    if (hadMeasure) map_->setMeasureMode(true);
+    if (hadCrossSection && !isDerivedProduct(map_->product())) map_->setCrossSectionMode(true);
     {
         const QSignalBlocker blocker(productCombo_);
         const auto index = productCombo_->findData(static_cast<int>(map_->product()));
@@ -2654,8 +3073,8 @@ void MainWindow::activateMap(RadarMapCanvas* map) {
     }
     const QSignalBlocker measureBlocker(measureButton_);
     const QSignalBlocker crossSectionBlocker(crossSectionButton_);
-    measureButton_->setChecked(false);
-    crossSectionButton_->setChecked(false);
+    measureButton_->setChecked(hadMeasure);
+    crossSectionButton_->setChecked(hadCrossSection && !isDerivedProduct(map_->product()));
     updateCrossSectionAvailability();
     selectedRadarId_ = map_->radarId();
     rebuildStationPicker();
@@ -2713,6 +3132,14 @@ void MainWindow::syncProductChips() {
         productChips_.at(i)->setChecked(i == current);
         const auto* item = itemModel ? itemModel->item(i) : nullptr;
         productChips_.at(i)->setEnabled(!item || item->isEnabled());
+    }
+    if (activeProductLabel_ && current >= 0 && current < productCombo_->count()) {
+        const auto& descriptor = productDescriptors()[static_cast<std::size_t>(current)];
+        activeProductLabel_->setText(
+            QStringLiteral("%1  ·  %2 %3")
+                .arg(QString::fromUtf8(descriptor.label.data()),
+                     QString::fromUtf8(descriptor.shortName.data()),
+                     QString::fromUtf8(descriptor.unit.data())));
     }
 }
 
@@ -2775,6 +3202,16 @@ void MainWindow::refreshLayerBadges() {
         const bool on = lightningFusionCheck_ && lightningFusionCheck_->isChecked() &&
                         lightningFusionCheck_->isEnabled();
         fusionBadge_->setText(on ? QStringLiteral("on") : QStringLiteral("off"));
+    }
+    if (shearBadge_) {
+        const auto n = map_->radarFeatureCount();
+        shearBadge_->setText(!shearCheck_ || !shearCheck_->isChecked() ? QStringLiteral("off")
+                            : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
+    if (scanDiagnosticsLabel_ && map_) {
+        const auto text = map_->scanDiagnosticsText();
+        scanDiagnosticsLabel_->setText(text.isEmpty() ? QStringLiteral("Scan: —")
+                                                      : QStringLiteral("Scan: %1").arg(text));
     }
 }
 
@@ -2850,30 +3287,73 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
     if (row < 0) return;
     const auto& site = model_->siteAt(row);
     if (!site.latitude || !site.longitude) return;
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("%1 Cross-section").arg(selectedRadarId_));
-    dialog.resize(980, 620);
-    auto* layout = new QVBoxLayout(&dialog);
+    crossSectionStart_ = start;
+    crossSectionEnd_ = end;
+    crossSectionRadarId_ = selectedRadarId_;
+    const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
+    if (crossSectionDialog_ && crossSectionWidget_) {
+        crossSectionDialog_->setWindowTitle(QStringLiteral("%1 Cross-section — live").arg(selectedRadarId_));
+        crossSectionWidget_->setData(frame.chunk, map_->product(), map_->palette(),
+                                     map_->customPalette(), map_->velocityProcessing());
+        crossSectionDialog_->show();
+        crossSectionDialog_->raise();
+        crossSectionDialog_->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setWindowTitle(QStringLiteral("%1 Cross-section — live").arg(selectedRadarId_));
+    dialog->resize(980, 620);
+    dialog->setModal(false);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    auto* layout = new QVBoxLayout(dialog);
     layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(8);
-    const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
+    auto* note = new QLabel(
+        QStringLiteral("Live: follows the timeline as new volumes arrive. Keep chasing — this window never blocks radar."),
+        dialog);
+    note->setWordWrap(true);
+    note->setObjectName(QStringLiteral("groupCaption"));
+    layout->addWidget(note);
     auto* crossSection = new CrossSectionWidget(
         frame.chunk, {*site.latitude, *site.longitude}, site.antennaElevationMeters,
         start, end, map_->product(), map_->palette(), map_->customPalette(),
-        map_->velocityProcessing(), &dialog);
-    layout->addWidget(crossSection);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        map_->velocityProcessing(), dialog);
+    layout->addWidget(crossSection, 1);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
     auto* exportButton = buttons->addButton(QStringLiteral("Export CSV"), QDialogButtonBox::ActionRole);
-    connect(exportButton, &QPushButton::clicked, &dialog, [this, crossSection] {
+    connect(exportButton, &QPushButton::clicked, this, [this] {
+        if (!crossSectionWidget_) return;
+        const auto suggested = QStringLiteral("%1-cross-section-%2.csv")
+                                   .arg(crossSectionRadarId_,
+                                        QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss")));
         const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Export cross-section"),
-                                                       QStringLiteral("cross-section.csv"),
-                                                       QStringLiteral("CSV files (*.csv)"));
-        if (!path.isEmpty() && !crossSection->exportCsv(path))
+                                                       suggested, QStringLiteral("CSV files (*.csv)"));
+        if (!path.isEmpty() && !crossSectionWidget_->exportCsv(path))
             QMessageBox::warning(this, QStringLiteral("Export failed"), QStringLiteral("Could not write %1").arg(path));
     });
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
     layout->addWidget(buttons);
-    dialog.exec();
+    crossSectionDialog_ = dialog;
+    crossSectionWidget_ = crossSection;
+    connect(dialog, &QObject::destroyed, this, [this] { crossSectionWidget_ = nullptr; });
+    dialog->show();
+}
+
+void MainWindow::refreshCrossSection() {
+    if (!crossSectionDialog_ || !crossSectionWidget_) return;
+    if (crossSectionRadarId_ != selectedRadarId_) return;
+    const auto session = activeSession();
+    if (!session || session->frameIndex < 0 ||
+        session->frameIndex >= static_cast<int>(session->history.size())) return;
+    const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
+    // Only live-update when the transect product is still valid.
+    if (isDerivedProduct(map_->product())) return;
+    crossSectionWidget_->setData(frame.chunk, map_->product(), map_->palette(),
+                                 map_->customPalette(), map_->velocityProcessing());
+    crossSectionDialog_->setWindowTitle(
+        QStringLiteral("%1 Cross-section — %2 (live)")
+            .arg(crossSectionRadarId_,
+                 frame.dataTime.toLocalTime().toString(QStringLiteral("HH:mm:ss"))));
 }
 
 void MainWindow::importCustomPalette() {
@@ -2935,13 +3415,26 @@ void MainWindow::exportTimelineAnimation() {
                                                    defaultName, QStringLiteral("Animated GIF (*.gif)"));
     if (path.isEmpty()) return;
     const auto previousIndex = session->frameIndex;
+    const auto total = static_cast<int>(session->history.size());
+    QProgressDialog progress(QStringLiteral("Rendering %1 frames…").arg(total), QStringLiteral("Cancel"),
+                             0, total, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(250);
+    progress.setValue(0);
     QVector<QImage> frames;
-    frames.reserve(static_cast<qsizetype>(session->history.size()));
-    for (int index = 0; index < static_cast<int>(session->history.size()); ++index) {
+    frames.reserve(static_cast<qsizetype>(total));
+    for (int index = 0; index < total; ++index) {
+        if (progress.wasCanceled()) {
+            showFrame(previousIndex);
+            statusBar()->showMessage(QStringLiteral("Timeline export cancelled"), 4000);
+            return;
+        }
         showFrame(index);
+        progress.setValue(index + 1);
         QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         frames.push_back(map_->grab().toImage());
     }
+    progress.setValue(total);
     showFrame(previousIndex);
     QString error;
     const auto delay = std::max(5, speedCombo_->currentData().toInt() / 10);
@@ -3005,7 +3498,7 @@ void MainWindow::prepareArchiveCase(const int requestedFrames) {
     liveButton_->setChecked(false);
     cancelFor(selectedRadarId_);
     archiveSource_->cancel();
-    maximumHistoryFrames_ = std::max(maximumHistoryFrames_, std::clamp(requestedFrames, 2, 24));
+    maximumHistoryFrames_ = std::max(maximumHistoryFrames_, std::clamp(requestedFrames, 2, 32));
     if (const auto session = activeSession()) {
         session->pendingVolumeId.clear();
         session->pendingVolume = {};
@@ -3036,7 +3529,7 @@ void MainWindow::openArchiveFiles() {
         QStringLiteral("NEXRAD Level II (*_V03 *_V04 *_V05 *_V06 *_V07 *_V08);;All files (*.*)"));
     if (paths.isEmpty()) return;
     std::sort(paths.begin(), paths.end());
-    if (paths.size() > 24) paths = paths.sliced(paths.size() - 24);
+    if (paths.size() > 32) paths = paths.sliced(paths.size() - 32);
     prepareArchiveCase(paths.size());
     archiveSource_->loadFiles(selectedRadarId_, paths);
 }
@@ -3059,7 +3552,7 @@ void MainWindow::openArchiveFolder() {
                                  QStringLiteral("The selected folder contains no files."));
         return;
     }
-    if (paths.size() > 24) paths = paths.sliced(paths.size() - 24);
+    if (paths.size() > 32) paths = paths.sliced(paths.size() - 32);
     prepareArchiveCase(paths.size());
     archiveSource_->loadFiles(selectedRadarId_, paths);
 }
@@ -3086,10 +3579,10 @@ void MainWindow::openAwsArchive() {
     end->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm 'UTC'"));
     end->setCalendarPopup(true);
     auto* maximum = new QSpinBox(&dialog);
-    maximum->setRange(1, 24);
+    maximum->setRange(1, 32);
     maximum->setValue(24);
     maximum->setToolTip(QStringLiteral(
-        "Matching volumes are evenly sampled into the 24-frame in-memory case timeline"));
+        "Matching volumes are evenly sampled into the in-memory case timeline (up to 32 frames)"));
     form->addRow(QStringLiteral("Start"), start);
     form->addRow(QStringLiteral("End"), end);
     form->addRow(QStringLiteral("Maximum volumes"), maximum);
@@ -3125,10 +3618,14 @@ void MainWindow::setRadarHealth(RadarHealthState state, const QString& tooltip) 
         case RadarHealthState::Online:  color = QStringLiteral("#6fbf5a"); text = QStringLiteral("Online");  break;
         case RadarHealthState::Stale:   color = QStringLiteral("#e0c14a"); text = QStringLiteral("Stale");   break;
         case RadarHealthState::Offline: color = QStringLiteral("#d96d6d"); text = QStringLiteral("Offline"); break;
-        case RadarHealthState::Unknown: default: color = QStringLiteral("#7a7d85"); text = QStringLiteral("Unknown"); break;
+        case RadarHealthState::Unknown: default: color = QStringLiteral("#7d838c"); text = QStringLiteral("Unknown"); break;
     }
+    // Border tracks the active theme; a hardcoded Classic grey ring was left
+    // behind on the Squall theme after a live switch.
+    const auto ring = theme_ == AppTheme::Prototype ? QStringLiteral("#39424f")
+                                                    : QStringLiteral("#3f444d");
     healthDot_->setStyleSheet(QStringLiteral(
-        "background-color: %1; border: 1px solid #2b2d33; border-radius: 6px;").arg(color));
+        "background-color: %1; border: 1px solid %2; border-radius: 6px;").arg(color, ring));
     healthLabel_->setText(text);
     if (!tooltip.isEmpty()) {
         healthDot_->setToolTip(tooltip);

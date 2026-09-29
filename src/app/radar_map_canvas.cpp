@@ -7,11 +7,13 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QNetworkDiskCache>
+#include <QAccessible>
 #include <QAction>
 #include <QApplication>
 #include <QCache>
 #include <QClipboard>
 #include <QContextMenuEvent>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QPointer>
 #include <QLineF>
@@ -19,6 +21,7 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QWheelEvent>
 #include <QTimer>
 #include <QThreadPool>
@@ -478,11 +481,21 @@ RadarMapCanvas::RadarMapCanvas(QWidget* parent)
     setObjectName(QStringLiteral("radarMap"));
     setMinimumSize(300, 220);
     setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Radar map panel"));
+    setAccessibleDescription(
+        QStringLiteral("Live Level II radar. Arrow keys step frames, plus and minus zoom, "
+                       "Escape closes cards and cancels tools."));
     loadingTimer_ = new QTimer(this);
     loadingTimer_->setInterval(80);
     connect(loadingTimer_, &QTimer::timeout, this, [this] {
         loadingAngle_ = (loadingAngle_ + 18) % 360;
-        update(QRect(width() - 300, 58, 294, 52));
+        // Repaint only the chip. The old 300 px-wide rect sat on top of the
+        // legend's report and analysis rows, so the spinner forced a full
+        // legend repaint 12.5x a second for the whole download.
+        const auto chipWidth = std::min(282.0, std::max(120.0, width() - 24.0));
+        const double chipX = std::max(12.0, width() - chipWidth - 12.0);
+        update(QRectF(chipX - 2.0, 62.0, chipWidth + 4.0, 44.0).toAlignedRect());
     });
     probeTimer_ = new QTimer(this);
     probeTimer_->setSingleShot(true);
@@ -533,6 +546,7 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         chunk_.reset();
         invalidateOverlay();
         invalidateLightningFusion();
+        stormTrail_.clear();
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -575,6 +589,7 @@ void RadarMapCanvas::setDecodedChunk(DecodedChunk chunk, const QDateTime& dataTi
 void RadarMapCanvas::setDecodedChunk(std::shared_ptr<const DecodedChunk> chunk, const QDateTime& dataTime) {
     chunk_ = std::move(chunk);
     dataTime_ = dataTime;
+    invalidateStatusText();
     invalidateOverlay();
     invalidateLightningFusion();
     refreshVelocityProcessing();
@@ -631,6 +646,32 @@ void RadarMapCanvas::setLightningFusionVisible(const bool visible) {
     update();
 }
 
+void RadarMapCanvas::setShearVisible(const bool visible) {
+    if (shearVisible_ == visible) return;
+    shearVisible_ = visible;
+    update();
+}
+
+void RadarMapCanvas::setStormTrailVisible(const bool visible) {
+    if (stormTrailVisible_ == visible) return;
+    stormTrailVisible_ = visible;
+    update();
+}
+
+void RadarMapCanvas::setDisplaySmoothing(const bool enabled) {
+    if (displaySmoothing_ == enabled) return;
+    displaySmoothing_ = enabled;
+    invalidateOverlay();
+    update();
+}
+
+QString RadarMapCanvas::scanDiagnosticsText() const {
+    if (qualityText_.isEmpty() && scanQualityText_.isEmpty()) return {};
+    if (qualityText_.isEmpty()) return scanQualityText_;
+    if (scanQualityText_.isEmpty()) return qualityText_;
+    return qualityText_ + QStringLiteral(" | ") + scanQualityText_;
+}
+
 int RadarMapCanvas::lightningCellCount() const {
     return static_cast<int>(lightningCells_.size());
 }
@@ -678,6 +719,28 @@ void RadarMapCanvas::rebuildLightningFusion() {
                 guard->lightningAssociations_ = std::move(associations);
                 guard->lightningFusionComputedGeneration_ = generation;
                 guard->refreshPinnedLightningInfo();
+                // Storm trail: keep the strongest feature per volume so the
+                // meso track survives timeline scrubbing. Bounded, no fake
+                // interpolation — one honest point per decoded volume.
+                if (!guard->radarFeatures_.empty()) {
+                    const auto* best = &guard->radarFeatures_.front();
+                    for (const auto& f : guard->radarFeatures_) {
+                        if (f.maximumReflectivityDbz > best->maximumReflectivityDbz) best = &f;
+                    }
+                    TrailPoint point;
+                    point.latitudeDeg = best->latitudeDeg;
+                    point.longitudeDeg = best->longitudeDeg;
+                    point.maxDbz = best->maximumReflectivityDbz;
+                    point.time = guard->dataTime_;
+                    point.rotating = best->rotating;
+                    if (guard->stormTrail_.empty() ||
+                        !guard->stormTrail_.back().time.isValid() ||
+                        guard->stormTrail_.back().time != point.time) {
+                        guard->stormTrail_.push_back(point);
+                        while (guard->stormTrail_.size() > kStormTrailLimit)
+                            guard->stormTrail_.erase(guard->stormTrail_.begin());
+                    }
+                }
             }
             guard->update();
         }, Qt::QueuedConnection);
@@ -759,6 +822,36 @@ void RadarMapCanvas::setCustomPalette(QVector<PaletteStop> stops) {
 void RadarMapCanvas::setRadarOpacity(const int percent) {
     radarOpacity_ = std::clamp(percent, 10, 100);
     invalidateOverlay();
+    update();
+}
+
+void RadarMapCanvas::setWarningOpacity(const int percent) {
+    warningOpacity_ = std::clamp(percent, 10, 100);
+    ++weatherGeneration_;
+    weatherOverlayImage_ = {};
+    weatherOverlayZoom_ = -1;
+    update();
+}
+
+void RadarMapCanvas::setWarningsOnTop(const bool onTop) {
+    if (warningsOnTop_ == onTop) return;
+    warningsOnTop_ = onTop;
+    update();
+}
+
+void RadarMapCanvas::clearPinnedOverlay() {
+    if (pinnedInfo_.isEmpty()) return;
+    pinnedInfo_.clear();
+    pinnedInfoKind_ = PinnedInfoKind::None;
+    pinnedLightningCell_.reset();
+    pinnedInfoCardRect_ = {};
+    pinnedInfoBodyRect_ = {};
+    pinnedInfoContentHeight_ = 0;
+    pinnedInfoScrollOffset_ = 0.0;
+    pinnedInfoScrollTarget_ = 0.0;
+    pinnedInfoScrollTimer_->stop();
+    pinnedInfoLocked_ = false;
+    probeText_.clear();
     update();
 }
 
@@ -853,11 +946,13 @@ void RadarMapCanvas::setVolumeQuality(const int decodedChunks, const int totalCh
     if (rejectedMessages > 0 || rejectedBlocks > 0)
         qualityText_ += QStringLiteral(" | parser rejected %1 message(s), %2 block(s)")
                             .arg(rejectedMessages).arg(rejectedBlocks);
+    invalidateStatusText();
     update();
 }
 
 void RadarMapCanvas::refreshScanDiagnostics() {
     scanQualityText_.clear();
+    invalidateStatusText();
     if (!chunk_) return;
     const auto diagnostics = analyzeScan(*chunk_, product_, elevationFilter_);
     if (diagnostics.rayCount == 0) return;
@@ -980,13 +1075,76 @@ bool RadarMapCanvas::infoCardScrollable() const {
            pinnedInfoContentHeight_ > static_cast<int>(std::floor(pinnedInfoBodyRect_.height()));
 }
 
+QString RadarMapCanvas::elidedStatusText() const {
+    // The composed string used to be rebuilt from a four-level nested .arg()
+    // chain plus a QDateTime format on every single paint, i.e. on every pan
+    // pixel and every 16 ms probe tick. Cache it; only the visible slice still
+    // depends on the panel width.
+    if (!statusTextCacheValid_) {
+        const auto dataDate = dataTime_.isValid()
+                                  ? dataTime_.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t"))
+                                  : QStringLiteral("time unavailable");
+        const auto rayCount = chunk_ ? chunk_->rays.size() : 0;
+        statusTextCache_ = QStringLiteral("%1 real rays  |  NOAA data: %2").arg(rayCount).arg(dataDate);
+        if (!qualityText_.isEmpty() || !scanQualityText_.isEmpty()) {
+            statusTextCache_ += QStringLiteral("  |  ");
+            if (!qualityText_.isEmpty()) statusTextCache_ += qualityText_;
+            if (!qualityText_.isEmpty() && !scanQualityText_.isEmpty()) statusTextCache_ += QStringLiteral(" | ");
+            statusTextCache_ += scanQualityText_;
+        }
+        statusTextCacheValid_ = true;
+    }
+    return statusTextCache_;
+}
+
+void RadarMapCanvas::invalidateStatusText() {
+    statusTextCacheValid_ = false;
+}
+
+void RadarMapCanvas::paintLoadingChip(QPainter& painter) {
+    if (!loading_) return;
+    const auto chipWidth = std::min(282.0, std::max(120.0, width() - 24.0));
+    const QRectF chip(std::max(12.0, width() - chipWidth - 12.0), 64.0, chipWidth, 40.0);
+    painter.save();
+    painter.setPen(QPen(QColor(128, 211, 255, 170), 1));
+    painter.setBrush(QColor(5, 12, 16, 232));
+    painter.drawRoundedRect(chip, 5, 5);
+    const QPointF center(chip.left() + 21.0, chip.center().y());
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(128, 211, 255), 3, Qt::SolidLine, Qt::RoundCap));
+    // QPainter::drawArc measures counter-clockwise from 3 o'clock, so negate the
+    // accumulator to make the spinner actually turn clockwise.
+    painter.drawArc(QRectF(center.x() - 10, center.y() - 10, 20, 20),
+                    -loadingAngle_ * 16, 250 * 16);
+    painter.setPen(QColor(235, 243, 247));
+    painter.setFont(hudFont(8, QFont::DemiBold));
+    const auto text = loadingMessage_.isEmpty() ? QStringLiteral("Loading radar data")
+                                               : loadingMessage_;
+    painter.drawText(chip.adjusted(42, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                     painter.fontMetrics().elidedText(text, Qt::ElideRight,
+                                                      static_cast<int>(chipWidth) - 52));
+    painter.restore();
+}
+
 void RadarMapCanvas::inspectAt(const QPointF& point) {
     const auto hit = overlayAt(point);
     if (!hit.text.isEmpty()) {
         setPinnedOverlay(hit, point);
-    } else {
-        updateProbe(point);
+        return;
     }
+    // Nothing under the cursor: freeze the sampled value into a card. Writing
+    // the transient probe text instead meant the very next mouse move erased
+    // it, so "Inspect at cursor" looked like a no-op.
+    updateProbe(point);
+    if (probeText_.isEmpty()) return;
+    const auto rows = probeText_.split(QLatin1Char('|'));
+    QStringList parts;
+    parts << QStringLiteral("Cursor readout");
+    for (const auto& row : rows) {
+        const auto trimmed = row.trimmed();
+        if (!trimmed.isEmpty()) parts << trimmed;
+    }
+    setPinnedOverlay(OverlayHit(parts.join(QLatin1Char('\n')), PinnedInfoKind::Probe), point);
 }
 
 QPoint RadarMapCanvas::lightningCellScreenPoint(const int index) const {
@@ -1130,6 +1288,21 @@ bool RadarMapCanvas::weatherOverlayCacheCoversView() const {
 void RadarMapCanvas::rebuildWeatherOverlay() {
     if (weatherOverlayBuildPending_ || width() <= 0 || height() <= 0 || weatherOverlayCacheCoversView())
         return;
+    // Nothing to rasterize. Bail before the by-value captures below, which copy
+    // the full warning polygons and report vectors on the GUI thread - during a
+    // drag-pan that is once per mouse-move frame, and it happened even with
+    // both layers switched off.
+    const auto warningsVisible = warningsVisible_;
+    const auto stormReportsVisible = stormReportsVisible_;
+    if ((!warningsVisible || warnings_.isEmpty()) &&
+        (!stormReportsVisible || stormReports_.isEmpty())) {
+        weatherOverlayImage_ = {};
+        weatherOverlayImageGeneration_ = weatherGeneration_;
+        weatherOverlayZoom_ = zoom_;
+        weatherOverlayImageLogicalSize_ = QSize(width(), height());
+        update();
+        return;
+    }
 
     weatherOverlayBuildPending_ = true;
     const auto generation = weatherGeneration_;
@@ -1140,9 +1313,8 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
     const auto warnings = warnings_;
     const auto reports = stormReports_;
     const auto warningFilter = warningFilter_;
-    const auto warningsVisible = warningsVisible_;
-    const auto stormReportsVisible = stormReportsVisible_;
     const auto reportKindsVisible = stormReportKindsVisible_;
+    const auto warningOpacity = warningOpacity_;
     const auto geometryIsCurrent = warningPathsZoom_ == targetZoom &&
                                    warningPathsGeneration_ == generation &&
                                    stormReportWorldPoints_.size() == reports.size();
@@ -1153,7 +1325,7 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
     QThreadPool::globalInstance()->start([
         guard, generation, targetZoom, centerCoordinate, viewportSize, devicePixelRatio,
         warnings, reports, warningFilter, warningsVisible, stormReportsVisible, reportKindsVisible,
-        geometryIsCurrent, cachedPaths, cachedReportWorldPoints
+        warningOpacity, geometryIsCurrent, cachedPaths, cachedReportWorldPoints
     ] {
         constexpr int kOverlayMargin = 384;
         const auto worldPointAt = [targetZoom](const double latitude, const double longitude) {
@@ -1241,9 +1413,19 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
         }
 
         std::array<QPainterPath, 3> reportGroups;
-        for (qsizetype reportIndex = 0; reportIndex < reports.size(); ++reportIndex) {
+        // Outbreak declutter: at zoom <= 6, hail/wind reports collapse to one
+        // marker per ~14 px grid cell so a 200-report outbreak doesn't overpaint
+        // into a solid blob. Tornadoes are never thinned; hail outranks wind.
+        QSet<qint64> occupiedReportCells;
+        const bool declutterReports = targetZoom <= 6;
+        // Tornadoes first so they win their grid cell.
+        for (int pass = 0; pass < 3; ++pass) {
+            for (qsizetype reportIndex = 0; reportIndex < reports.size(); ++reportIndex) {
             const auto& report = reports.at(reportIndex);
             const auto kindIndex = static_cast<std::size_t>(report.kind);
+            const int kindRank = report.kind == StormReportKind::Tornado ? 0
+                               : report.kind == StormReportKind::Hail ? 1 : 2;
+            if (kindRank != pass) continue;
             if (!stormReportsVisible || kindIndex >= reportKindsVisible.size() ||
                 !reportKindsVisible.at(kindIndex)) continue;
             if (reportIndex >= reportWorldPoints.size()) continue;
@@ -1251,6 +1433,13 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
             for (const auto xOffset : {0.0, -world, world}) {
                 const auto point = basePoint + QPointF(xOffset, 0.0);
                 if (!visibleWorldBounds.adjusted(-8.0, -8.0, 8.0, 8.0).contains(point)) continue;
+                if (declutterReports && kindRank > 0) {
+                    const auto cellX = static_cast<qint64>(std::floor(point.x() / 14.0));
+                    const auto cellY = static_cast<qint64>(std::floor(point.y() / 14.0));
+                    const auto cellKey = (cellX << 32) | (cellY & 0xffffffff);
+                    if (occupiedReportCells.contains(cellKey)) continue;
+                    occupiedReportCells.insert(cellKey);
+                }
                 auto& group = reportGroups.at(kindIndex);
                 if (report.kind == StormReportKind::Tornado) {
                     group.addPolygon(QPolygonF{{point.x(), point.y() - 6.0},
@@ -1261,6 +1450,7 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
                 } else {
                     group.addRect(QRectF(point.x() - 4.5, point.y() - 4.5, 9.0, 9.0));
                 }
+            }
             }
         }
 
@@ -1276,12 +1466,14 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
         overlayPainter.translate(overlayLogicalSize.width() / 2.0 - overlayCenterWorld.x(),
                                  overlayLogicalSize.height() / 2.0 - overlayCenterWorld.y());
         if (warningsVisible) {
+            const auto alphaScale = std::clamp(warningOpacity, 10, 100) / 100.0;
             for (const auto rgba : warningGroupOrder) {
                 const auto group = warningGroups.constFind(rgba);
                 if (group == warningGroups.cend()) continue;
-                const auto color = QColor::fromRgba(rgba);
+                auto color = QColor::fromRgba(rgba);
+                color.setAlpha(std::clamp(static_cast<int>(std::round(color.alpha() * alphaScale)), 0, 255));
                 auto fill = color;
-                fill.setAlpha(35);
+                fill.setAlpha(std::clamp(static_cast<int>(std::round(90.0 * alphaScale)), 8, 110));
                 overlayPainter.setPen(QPen(color, 2.0));
                 overlayPainter.setBrush(fill);
                 overlayPainter.drawPath(*group);
@@ -1342,6 +1534,7 @@ void RadarMapCanvas::rebuildOverlay() {
     const auto palette = palette_;
     const auto customPalette = customPalette_;
     const auto opacity = radarOpacity_;
+    const auto smoothDisplay = displaySmoothing_;
     const auto chunk = chunk_;
     const auto processedVelocity = processedVelocity_;
     const auto viewportSize = size();
@@ -1350,7 +1543,7 @@ void RadarMapCanvas::rebuildOverlay() {
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start([
         guard, generation, targetZoom, baseLatitude, baseLongitude, product, elevation,
-        belowThresholdVisible, palette, customPalette, opacity, chunk, processedVelocity,
+        belowThresholdVisible, palette, customPalette, opacity, smoothDisplay, chunk, processedVelocity,
         viewportSize, devicePixelRatio, centerCoordinate
     ] {
         constexpr int kOverlayMargin = 256;
@@ -1410,8 +1603,10 @@ void RadarMapCanvas::rebuildOverlay() {
                     return destinationPoint({baseLatitude, baseLongitude}, azimuth,
                                             beam.surfaceDistanceMeters);
                 };
-                const auto lowerAzimuth = static_cast<double>(ray.azimuthDegrees) - halfAzimuth;
-                const auto upperAzimuth = static_cast<double>(ray.azimuthDegrees) + halfAzimuth;
+                const auto lowerAzimuth = static_cast<double>(ray.azimuthDegrees) - halfAzimuth *
+                    (smoothDisplay ? 1.35 : 1.0);
+                const auto upperAzimuth = static_cast<double>(ray.azimuthDegrees) + halfAzimuth *
+                    (smoothDisplay ? 1.35 : 1.0);
                 const std::array coordinates{
                     coordinateAt(lowerRange, lowerAzimuth), coordinateAt(upperRange, lowerAzimuth),
                     coordinateAt(upperRange, upperAzimuth), coordinateAt(lowerRange, upperAzimuth),
@@ -1495,20 +1690,35 @@ void RadarMapCanvas::paintRadarOverlay(QPainter& painter) {
     const auto center = screenPoint(*site->latitude, *site->longitude);
     const auto maximumRangeMeters = maximumRangeMeters_;
     painter.setFont(hudFont(7));
-    std::vector<double> ringRanges{25000.0, 50000.0, 100000.0, maximumRangeMeters};
+    // Fixed ring set: the operational distance rings plus the radar's own
+    // maximum range. Built as a small array instead of a heap-allocated vector
+    // that was sorted and de-duplicated on every single paint.
+    std::array<double, 4> ringRanges{25000.0, 50000.0, 100000.0, maximumRangeMeters};
     std::sort(ringRanges.begin(), ringRanges.end());
-    ringRanges.erase(std::unique(ringRanges.begin(), ringRanges.end(), [](double left, double right) {
-        return std::abs(left - right) < 1000.0;
-    }), ringRanges.end());
+    double previousRing = -1.0;
     for (const auto rangeMeters : ringRanges) {
         if (rangeMeters > maximumRangeMeters + 1000.0) continue;
+        // Skip near-duplicate rings (e.g. a 230 km radar whose max is 235 km).
+        if (previousRing >= 0.0 && rangeMeters - previousRing < 1000.0) continue;
+        previousRing = rangeMeters;
         const auto edgeCoordinate = destinationPoint({*site->latitude, *site->longitude}, 90.0, rangeMeters);
         const auto edge = screenPoint(edgeCoordinate.latitude, edgeCoordinate.longitude);
         const auto radius = std::abs(edge.x() - center.x());
         if (radius < 12.0 || radius > std::max(width(), height()) * 1.5) continue;
         painter.drawEllipse(center, radius, radius);
-        painter.drawText(QRectF(edge.x() - 36.0, edge.y() - 15.0, 72.0, 13.0), Qt::AlignCenter,
-                         QStringLiteral("%1 km").arg(rangeMeters / 1000.0, 0, 'f', 0));
+        // Range labels sit directly on the echo, so a 55-65 dBZ orange core
+        // swallowed them completely. Draw a dark halo first, then the glyph.
+        const auto label = QStringLiteral("%1 km").arg(rangeMeters / 1000.0, 0, 'f', 0);
+        const auto labelWidth = painter.fontMetrics().horizontalAdvance(label) + 6.0;
+        const QRectF labelRect(edge.x() - labelWidth / 2.0, edge.y() - 7.0, labelWidth, 13.0);
+        if (!QRectF(rect()).intersects(labelRect)) continue;
+        painter.setPen(QPen(QColor(0, 0, 0, 200), 2.5));
+        for (const QPointF& offset : {QPointF(1.0, 0.0), QPointF(-1.0, 0.0), QPointF(0.0, 1.0),
+                                      QPointF(0.0, -1.0)}) {
+            painter.drawText(labelRect.translated(offset), Qt::AlignCenter, label);
+        }
+        painter.setPen(QPen(QColor(255, 255, 255, 175), 1));
+        painter.drawText(labelRect, Qt::AlignCenter, label);
     }
 
     painter.restore();
@@ -1647,9 +1857,15 @@ void RadarMapCanvas::paintPlacefiles(QPainter& painter) {
 }
 
 void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
-    if (!lightningVisible_) return;
+    // Fusion features are needed for the independent shear overlay too, so
+    // always refresh even when lightning cells are hidden.
     if (lightningFusionComputedGeneration_ != lightningFusionGeneration_)
         rebuildLightningFusion();
+
+    paintStormTrail(painter);
+    paintShearOverlay(painter);
+
+    if (!lightningVisible_) return;
 
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -1701,11 +1917,15 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
             const auto featurePoint = screenPoint(feature.latitudeDeg, feature.longitudeDeg);
             if (!rect().adjusted(-100, -100, 100, 100).contains(featurePoint.toPoint()) &&
                 !rect().adjusted(-100, -100, 100, 100).contains(cellPoint.toPoint())) continue;
+            // Association spokes stay tied to the fusion toggle; the storm
+            // object itself is painted by paintShearOverlay so it survives
+            // with lightning hidden.
             const QColor fusionColor = feature.rotating ? QColor(255, 78, 210) : QColor(170, 190, 205);
             painter.setPen(QPen(fusionColor, feature.rotating ? 2.0 : 1.0, Qt::DashLine));
             painter.drawLine(cellPoint, featurePoint);
             if (paintedFeatures.contains(static_cast<int>(association.radarFeatureIndex))) continue;
             paintedFeatures.insert(static_cast<int>(association.radarFeatureIndex));
+            if (!shearVisible_) continue;
             painter.setBrush(QColor(fusionColor.red(), fusionColor.green(), fusionColor.blue(), 55));
             painter.setPen(QPen(fusionColor, feature.rotating ? 2.5 : 1.5));
             painter.drawEllipse(featurePoint, feature.rotating ? 9.0 : 6.0,
@@ -1725,8 +1945,91 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintShearOverlay(QPainter& painter) {
+    if (!shearVisible_ || radarFeatures_.empty()) return;
+    // First-class rotation display independent of lightning: thresholded
+    // azimuthal-shear objects from extractRadarStormFeatures. Rotating
+    // couplets are pink + labeled; non-rotating objects are small gray dots
+    // unless they are fused to a jump (handled above).
+    QSet<int> fused;
+    if (lightningFusionVisible_ && lightningVisible_) {
+        for (const auto& a : lightningAssociations_) {
+            if (a.radarFeatureIndex < radarFeatures_.size())
+                fused.insert(static_cast<int>(a.radarFeatureIndex));
+        }
+    }
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (std::size_t i = 0; i < radarFeatures_.size(); ++i) {
+        const auto& feature = radarFeatures_[i];
+        if (fused.contains(static_cast<int>(i))) continue; // already drawn with spoke
+        const auto point = screenPoint(feature.latitudeDeg, feature.longitudeDeg);
+        if (!rect().adjusted(-40, -40, 40, 40).contains(point.toPoint())) continue;
+        if (feature.rotating) {
+            const QColor c(255, 78, 210);
+            painter.setBrush(QColor(c.red(), c.green(), c.blue(), 60));
+            painter.setPen(QPen(c, 2.5));
+            painter.drawEllipse(point, 10.0, 10.0);
+            painter.setPen(QPen(c, 1.5));
+            painter.drawEllipse(point, 14.0, 14.0);
+            if (zoom_ >= 6) {
+                painter.setPen(QColor(255, 220, 245));
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                painter.drawText(QRectF(point.x() + 16, point.y() - 18, 170, 36),
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 QStringLiteral("ROT %1 dBZ | %2 s^-1")
+                                     .arg(feature.maximumReflectivityDbz, 0, 'f', 0)
+                                     .arg(feature.azimuthalShearPerSecond, 0, 'f', 3));
+            }
+        } else if (feature.maximumReflectivityDbz >= 50.0 && zoom_ >= 7) {
+            // Strong non-rotating cores get a subtle marker so hail cores
+            // aren't invisible when the fusion toggle is off.
+            painter.setBrush(QColor(170, 190, 205, 40));
+            painter.setPen(QPen(QColor(170, 190, 205), 1.0));
+            painter.drawEllipse(point, 5.0, 5.0);
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintStormTrail(QPainter& painter) {
+    if (!stormTrailVisible_ || stormTrail_.size() < 2) return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPolygonF track;
+    for (const auto& t : stormTrail_) track << screenPoint(t.latitudeDeg, t.longitudeDeg);
+    painter.setPen(QPen(QColor(255, 209, 122, 200), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPolyline(track);
+    for (std::size_t i = 0; i < stormTrail_.size(); ++i) {
+        const auto& t = stormTrail_[i];
+        const auto p = screenPoint(t.latitudeDeg, t.longitudeDeg);
+        if (!rect().adjusted(-30, -30, 30, 30).contains(p.toPoint())) continue;
+        const auto age = static_cast<double>(stormTrail_.size() - 1 - i) /
+                         static_cast<double>(std::max<std::size_t>(1, stormTrail_.size() - 1));
+        const int alpha = static_cast<int>(std::round(220.0 * (1.0 - age * 0.75)));
+        QColor dot = t.rotating ? QColor(255, 78, 210, alpha) : QColor(255, 209, 122, alpha);
+        painter.setBrush(dot);
+        painter.setPen(QPen(QColor(8, 15, 19, alpha), 1.0));
+        const double r = t.rotating ? 6.0 : 4.5 - age * 1.5;
+        painter.drawEllipse(p, r, r);
+        if (i + 1 == stormTrail_.size() && zoom_ >= 6) {
+            painter.setPen(QColor(255, 235, 200));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(QRectF(p.x() + 9, p.y() - 20, 120, 16),
+                             Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("trail %1 dBZ").arg(t.maxDbz, 0, 'f', 0));
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintLegend(QPainter& painter) {
     const auto& descriptor = productDescriptor(product_);
+    // The legend column is a fixed 258 px stack. Panels get that narrow in a
+    // 2x2 layout on small laptops, so skip the stack instead of drawing three
+    // boxes that all get clipped on the right.
+    if (width() < 274) return;
     const QRectF panel(12, 12, 258, 50);
     painter.setPen(QPen(QColor(205, 216, 222, 130), 1));
     painter.setBrush(QColor(8, 15, 19, 220));
@@ -1738,45 +2041,154 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         label = QStringLiteral("Dealiased velocity");
     else if (product_ == ProductKind::Velocity && velocityOptions_.mode == VelocityProcessingMode::StormRelative)
         label = QStringLiteral("Storm-relative velocity");
-    painter.drawText(QRectF(20, 17, 242, 14), Qt::AlignLeft,
-                     QStringLiteral("%1 (%2)").arg(label, QString::fromUtf8(descriptor.unit.data())));
+    painter.drawText(QRectF(20, 17, 242, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                     painter.fontMetrics().elidedText(
+                         QStringLiteral("%1 (%2)").arg(label, QString::fromUtf8(descriptor.unit.data())),
+                         Qt::ElideRight, 242));
     const QRectF gradientRect(20, 34, 242, 10);
     QLinearGradient gradient(gradientRect.topLeft(), gradientRect.topRight());
     for (int step = 0; step <= 16; ++step) {
         const auto position = step / 16.0;
-        gradient.setColorAt(position, productColor(product_, position, palette_, radarOpacity_, customPalette_));
+        // Always sample the palette at full opacity. Folding the user's echo
+        // opacity in here made the swatch drift toward black as they turned
+        // transparency up, so the key stopped describing what is on the map.
+        gradient.setColorAt(position, productColor(product_, position, palette_, 100, customPalette_));
     }
     painter.setPen(Qt::NoPen);
     painter.setBrush(gradient);
     painter.drawRect(gradientRect);
     painter.setPen(QColor(205, 215, 220));
     painter.setFont(hudFont(7));
+    // Anchor the end labels inside the bar and let the middle two share the
+    // span; the old fixed 60 px boxes overlapped by ~30 px at the right edge.
+    const auto tickText = [](const double value) { return QString::number(value, 'g', 4); };
+    const auto tickLeft = [&](const int tick, const double x) -> double {
+        if (tick == 0) return gradientRect.left();
+        if (tick == 4) return gradientRect.right() - 58.0;
+        return std::max(gradientRect.left(), x - 29.0);
+    };
     for (int tick = 0; tick < 5; ++tick) {
         const auto fraction = tick / 4.0;
         const auto value = descriptor.minimum + fraction * (descriptor.maximum - descriptor.minimum);
         const auto x = gradientRect.left() + fraction * gradientRect.width();
-        const auto alignment = tick == 0 ? Qt::AlignLeft
-                             : tick == 4 ? Qt::AlignRight
-                                         : Qt::AlignCenter;
-        const auto labelLeft = tick == 0 ? gradientRect.left()
-                             : tick == 4 ? gradientRect.right() - 60.0
-                                         : x - 30.0;
-        painter.drawText(QRectF(labelLeft, 45, 60, 12), alignment,
-                         QString::number(value, 'g', 4));
+        painter.drawText(QRectF(tickLeft(tick, x), 45, 58, 12),
+                         tick == 0 ? Qt::AlignLeft : tick == 4 ? Qt::AlignRight : Qt::AlignCenter,
+                         tickText(value));
     }
 
-    if (stormReportsVisible_) {
+    // Only key the report symbols that are actually drawn. Hiding hail and wind
+    // in the Layers group used to leave the full three-symbol key on screen.
+    const auto reportKinds = std::array<bool, 3>{
+        stormReportKindsVisible_[0], stormReportKindsVisible_[1], stormReportKindsVisible_[2]};
+    const auto anyReportKind = reportKinds[0] || reportKinds[1] || reportKinds[2];
+    if (stormReportsVisible_ && anyReportKind) {
         const QRectF reportPanel(12, 68, 258, 24);
         painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
         painter.setBrush(QColor(8, 15, 19, 205));
         painter.drawRoundedRect(reportPanel, 4, 4);
-        painter.setPen(QColor("#ff3b4d"));
-        painter.drawText(QRectF(20, 72, 70, 16), Qt::AlignLeft, QStringLiteral("▲ Tornado"));
-        painter.setPen(QColor("#53d769"));
-        painter.drawText(QRectF(92, 72, 55, 16), Qt::AlignLeft, QStringLiteral("● Hail"));
-        painter.setPen(QColor("#44a7ff"));
-        painter.drawText(QRectF(153, 72, 70, 16), Qt::AlignLeft, QStringLiteral("■ Wind"));
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        const std::array<QString, 3> symbols{QStringLiteral("▲ Tornado"), QStringLiteral("● Hail"),
+                                            QStringLiteral("■ Wind")};
+        const std::array<QColor, 3> colors{QColor("#ff3b4d"), QColor("#53d769"), QColor("#44a7ff")};
+        const std::array<double, 3> offsets{20.0, 92.0, 153.0};
+        for (int index = 0; index < 3; ++index) {
+            if (!reportKinds[static_cast<std::size_t>(index)]) continue;
+            painter.setPen(colors[static_cast<std::size_t>(index)]);
+            painter.drawText(QRectF(offsets[static_cast<std::size_t>(index)], 72, 70, 16),
+                             Qt::AlignLeft | Qt::AlignVCenter, symbols[static_cast<std::size_t>(index)]);
+        }
     }
+
+    if ((shearVisible_ && !radarFeatures_.empty()) ||
+        (stormTrailVisible_ && stormTrail_.size() >= 2)) {
+        const QRectF analysisPanel(12, 96, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
+        painter.setBrush(QColor(8, 15, 19, 205));
+        painter.drawRoundedRect(analysisPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        int x = 20;
+        if (shearVisible_ && !radarFeatures_.empty()) {
+            painter.setPen(QColor(255, 78, 210));
+            painter.drawText(QRectF(x, 98, 90, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("◎ ROT/shear"));
+            x += 92;
+        }
+        if (stormTrailVisible_ && stormTrail_.size() >= 2) {
+            painter.setPen(QColor(255, 209, 122));
+            painter.drawText(QRectF(x, 98, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("— storm trail"));
+        }
+    }
+
+    // North arrow: always north-up in Web-Mercator, but chasers in a moving
+    // vehicle lose orientation at a glance. Paint a compact N arrow top-right.
+    {
+        const QRectF compass(width() - 44.0, 12.0, 32.0, 38.0);
+        painter.setPen(QPen(QColor(205, 216, 222, 130), 1));
+        painter.setBrush(QColor(8, 15, 19, 220));
+        painter.drawRoundedRect(compass, 4, 4);
+        painter.setPen(QPen(QColor(235, 240, 243), 2.0));
+        painter.setBrush(Qt::NoBrush);
+        const QPointF tip(compass.center().x(), compass.top() + 7.0);
+        const QPointF base(compass.center().x(), compass.bottom() - 12.0);
+        painter.drawLine(tip, base);
+        QPolygonF head;
+        head << tip << (tip + QPointF(-5.0, 7.0)) << (tip + QPointF(5.0, 7.0));
+        painter.setBrush(QColor(235, 240, 243));
+        painter.setPen(Qt::NoPen);
+        painter.drawPolygon(head);
+        painter.setPen(QColor(235, 240, 243));
+        painter.setFont(hudFont(8, QFont::DemiBold));
+        painter.drawText(QRectF(compass.left(), compass.bottom() - 12.0, 32.0, 11.0),
+                         Qt::AlignCenter, QStringLiteral("N"));
+    }
+}
+
+void RadarMapCanvas::paintScaleBar(QPainter& painter) {
+    if (width() < 280 || height() < 200) return;
+    // Sample the ground scale at the bar's own latitude (the widget's vertical
+    // center is well above where the bar is drawn) and clamp the bar to what
+    // actually fits, so a deep zoom cannot paint thousands of pixels past the
+    // right edge of the panel.
+    const auto barY = height() - 58.0;
+    const auto leftGeo = geographicPoint(QPointF(width() / 2.0 - 55.0, barY));
+    const auto rightGeo = geographicPoint(QPointF(width() / 2.0 + 55.0, barY));
+    const auto metersPerPixel =
+        std::max(0.01, rangeAndBearing({leftGeo.y(), leftGeo.x()}, {rightGeo.y(), rightGeo.x()})
+                          .distanceMeters / 110.0);
+    // Start at 1 m so a deep zoom still gets a bar instead of falling off the
+    // end of the table and reporting 1 km for a 300 m-wide view.
+    static const double kNice[] = {1,     2,     5,     10,    20,     50,     100,    200,    500,
+                                   1000,  2000,  5000,  10000, 20000,  50000,  100000, 200000, 500000};
+    const auto maximumBarPx = std::min(150.0, std::max(40.0, width() - 190.0));
+    double chosen = kNice[0];
+    for (const auto candidate : kNice) {
+        if (candidate / metersPerPixel <= maximumBarPx) chosen = candidate;
+        else break;
+    }
+    const auto barPx = std::clamp(chosen / metersPerPixel, 24.0, maximumBarPx);
+    const QRectF panel(12.0, barY, barPx + 88.0, 22.0);
+    painter.setPen(QPen(QColor(205, 216, 222, 130), 1));
+    painter.setBrush(QColor(8, 15, 19, 220));
+    painter.drawRoundedRect(panel, 4, 4);
+    const auto barTop = panel.center().y() - 3.0;
+    painter.setPen(QPen(QColor(235, 240, 243), 2.0));
+    painter.drawLine(QPointF(20.0, barTop + 6.0), QPointF(20.0 + barPx, barTop + 6.0));
+    painter.drawLine(QPointF(20.0, barTop + 2.0), QPointF(20.0, barTop + 6.0));
+    painter.drawLine(QPointF(20.0 + barPx, barTop + 2.0), QPointF(20.0 + barPx, barTop + 6.0));
+    painter.setPen(QColor(235, 240, 243));
+    painter.setFont(hudFont(7, QFont::DemiBold));
+    // Label the distance the bar actually spans, not the table entry: clamping
+    // can shorten the bar away from `chosen`.
+    const auto barMeters = barPx * metersPerPixel;
+    const auto label = barMeters >= 1000.0
+        ? QStringLiteral("%1 km").arg(barMeters / 1000.0, 0, 'f', barMeters < 10000.0 ? 1 : 0)
+        : QStringLiteral("%1 m").arg(barMeters, 0, 'f', 0);
+    painter.drawText(QRectF(20.0 + barPx + 6.0, panel.top() + 3.0,
+                            std::max(40.0, panel.right() - (20.0 + barPx + 6.0) - 4.0), 16.0),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     painter.fontMetrics().elidedText(label, Qt::ElideRight,
+                                                      static_cast<int>(panel.right() - (20.0 + barPx + 6.0) - 4.0)));
 }
 
 void RadarMapCanvas::paintProbe(QPainter& painter) {
@@ -1803,18 +2215,30 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         const auto cardWidth = std::min(390.0, std::max(280.0, width() - 24.0));
         const auto maximumHeight = std::max(130.0, std::min(270.0, height() - 24.0));
         const auto contentWidth = cardWidth - 32.0;
+        const auto fixedPrefix = 38.0 + (isWarning ? 29.0 : 0.0);
         painter.setFont(hudFont(9, QFont::DemiBold));
-        const auto headlineHeight = headline.isEmpty()
+        auto headlineHeight = headline.isEmpty()
             ? 0.0
             : static_cast<double>(painter.fontMetrics().boundingRect(
                   QRect(0, 0, static_cast<int>(contentWidth), 1000),
                   Qt::TextWordWrap, headline).height());
+        // A long NWS headline used to be measured at full height and then
+        // subtracted from the card, which drove the body rect negative: the clip
+        // collapsed, the description silently vanished, and the scrollbar thumb
+        // was drawn outside its own track. Cap the headline so the card always
+        // keeps a readable body region, and elide the headline if even that is
+        // not enough.
+        const auto headlineBudget = std::max(0.0, (maximumHeight - fixedPrefix - 12.0) * 0.5);
+        auto headlineTruncated = false;
+        if (headlineHeight > headlineBudget) {
+            headlineTruncated = true;
+            headlineHeight = headlineBudget;
+        }
         painter.setFont(hudFont(8));
         const auto bodyHeight = static_cast<double>(painter.fontMetrics().boundingRect(
             QRect(0, 0, static_cast<int>(contentWidth - 8.0), 10000),
             Qt::TextWordWrap, body).height());
-        const auto contentTopOffset = 38.0 + (isWarning ? 29.0 : 0.0) +
-                                      (headline.isEmpty() ? 0.0 : headlineHeight + 3.0);
+        const auto contentTopOffset = fixedPrefix + (headline.isEmpty() ? 0.0 : headlineHeight + 3.0);
         const auto naturalHeight = contentTopOffset + bodyHeight + 12.0;
         const auto cardHeight = std::clamp(naturalHeight, 130.0, maximumHeight);
         if (pinnedInfoCardPosition_.x() < 0.0 || pinnedInfoCardPosition_.y() < 0.0) {
@@ -1843,12 +2267,15 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         painter.setBrush(accent);
         painter.drawRoundedRect(QRectF(x, y, 5.0, cardHeight), 3.0, 3.0);
 
+        // Reserve room for the lock glyph as well as the close button so an
+        // elided title never runs underneath either one.
+        const auto headerTextWidth = cardWidth - 54.0 - (pinnedInfoLocked_ ? 20.0 : 0.0);
         painter.setFont(hudFont(10, QFont::DemiBold));
         painter.setPen(QColor("#f5f8fa"));
-        painter.drawText(QRectF(x + 16.0, y + 10.0, cardWidth - 54.0, 21.0),
+        painter.drawText(QRectF(x + 16.0, y + 10.0, headerTextWidth, 21.0),
                          Qt::AlignLeft | Qt::AlignVCenter,
                          painter.fontMetrics().elidedText(title, Qt::ElideRight,
-                                                          static_cast<int>(cardWidth - 54.0)));
+                                                          static_cast<int>(headerTextWidth)));
 
         const QRectF closeRect(x + cardWidth - 34.0, y + 7.0, 25.0, 25.0);
         painter.setPen(QColor("#aebbc2"));
@@ -1869,8 +2296,13 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
 
         auto contentTop = y + 38.0;
         if (isWarning) {
+            // Measure the badge with the font it is actually drawn in. The old
+            // code measured at 11 pt and rendered at 8 pt, leaving ~17 px of
+            // dead pill on each side of the most prominent element on the card.
+            const auto badgeFont = hudFont(8, QFont::DemiBold);
+            const auto badgeText = severity.toUpper();
             const auto badgeWidth = std::min(150.0,
-                painter.fontMetrics().horizontalAdvance(severity.toUpper()) + 18.0);
+                QFontMetrics(badgeFont).horizontalAdvance(badgeText) + 18.0);
             const QRectF badge(x + 16.0, contentTop, badgeWidth, 22.0);
             auto badgeFill = accent;
             badgeFill.setAlpha(45);
@@ -1878,21 +2310,40 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
             painter.setBrush(badgeFill);
             painter.drawRoundedRect(badge, 5.0, 5.0);
             painter.setPen(accent.lighter(125));
-            painter.setFont(hudFont(8, QFont::DemiBold));
-            painter.drawText(badge, Qt::AlignCenter, severity.toUpper());
+            painter.setFont(badgeFont);
+            painter.drawText(badge, Qt::AlignCenter, badgeText);
             contentTop += 29.0;
         }
 
         if (!headline.isEmpty()) {
             painter.setPen(QColor("#e5edf1"));
             painter.setFont(hudFont(9, QFont::DemiBold));
+            // Clip the headline to the card and mark the cut, rather than
+            // letting it spill unbacked over the map below.
+            painter.save();
+            painter.setClipRect(QRectF(x, contentTop, cardWidth, headlineHeight));
             painter.drawText(QRectF(x + 16.0, contentTop, cardWidth - 32.0, headlineHeight),
                              Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, headline);
+            painter.restore();
+            if (headlineTruncated) {
+                // Vertical fade on the cut edge so it reads as "more above"
+                // rather than as a rendering glitch.
+                QLinearGradient fade(contentTop, contentTop + headlineHeight - 9.0,
+                                     contentTop, contentTop + headlineHeight);
+                fade.setColorAt(0.0, QColor(8, 15, 20, 0));
+                fade.setColorAt(1.0, QColor(8, 15, 20, 235));
+                painter.fillRect(QRectF(x + 5.0, contentTop + headlineHeight - 9.0,
+                                        cardWidth - 10.0, 9.0), fade);
+            }
             contentTop += headlineHeight + 3.0;
         }
 
-        const QRectF bodyRect(x + 16.0, contentTop, cardWidth - 32.0,
-                               y + cardHeight - contentTop - 12.0);
+        // The headline cap above guarantees a non-negative body, but a tiny
+        // panel can still squeeze it; clamp defensively so the clip rect is
+        // never degenerate (which silently blanks the whole card body).
+        const auto bodyTop = std::min(contentTop, y + cardHeight - 12.0);
+        const QRectF bodyRect(x + 16.0, bodyTop, cardWidth - 32.0,
+                              std::max(0.0, y + cardHeight - bodyTop - 12.0));
         pinnedInfoBodyRect_ = bodyRect;
         pinnedInfoContentHeight_ = static_cast<int>(std::ceil(bodyHeight));
         const auto maximumScroll = std::max(
@@ -1933,37 +2384,65 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
     pinnedInfoScrollOffset_ = 0.0;
     pinnedInfoScrollTarget_ = 0.0;
     pinnedInfoScrollTimer_->stop();
+    // The transient readout used to inherit whatever font the last HUD helper
+    // happened to leave on the painter. Set it explicitly so it can never
+    // silently change appearance.
+    painter.setFont(hudFont(8, QFont::DemiBold));
     const auto metrics = painter.fontMetrics();
-    const auto textWidth = metrics.horizontalAdvance(probeText_);
+    const auto boxText = metrics.elidedText(probeText_, Qt::ElideRight,
+                                            std::max(80, width() - 28));
+    const auto textWidth = metrics.horizontalAdvance(boxText) + 12.0;
+    QRectF box(0, 0, textWidth, 23.0);
+    // Prefer down-right of the cursor, then flip to whichever quadrant has room,
+    // and finally clamp. The old two-branch flip drove x to about -270 in the
+    // left third of a 2x2 panel, hiding most of the readout.
+    const double margin = 6.0;
     auto x = probePosition_.x() + 14.0;
+    if (x + textWidth + margin > width()) x = probePosition_.x() - textWidth - 14.0;
+    if (x < margin) x = std::min(probePosition_.x() + 14.0, width() - textWidth - margin);
     auto y = probePosition_.y() + 14.0;
-    if (x + textWidth + 18.0 > width()) x = probePosition_.x() - textWidth - 18.0;
-    if (y + 28.0 > height()) y = probePosition_.y() - 30.0;
-    const QRectF box(x, y, textWidth + 12.0, 23.0);
+    if (y + box.height() + margin > height()) y = probePosition_.y() - box.height() - 14.0;
+    y = std::clamp(y, margin, std::max(margin, height() - box.height() - margin));
+    box.moveTo(std::max(margin, x), y);
     painter.setPen(QPen(QColor(210, 220, 225), 1));
     painter.setBrush(QColor(5, 11, 14, 235));
     painter.drawRoundedRect(box, 3, 3);
     painter.setPen(QColor(242, 246, 248));
-    painter.drawText(box.adjusted(6, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft, probeText_);
+    painter.drawText(box.adjusted(6, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft, boxText);
 }
 
 void RadarMapCanvas::paintStationCard(QPainter& painter) {
     if (hoverRadarId_.isEmpty()) return;
-    const auto it = std::find_if(sites_.cbegin(), sites_.cend(), [this](const RadarSite& site) {
-        return QString::fromStdString(site.id) == hoverRadarId_;
-    });
-    if (it == sites_.cend()) return;
-    const auto elevation = QStringLiteral("%1 m").arg(it->antennaElevationMeters, 0, 'f', 0);
+    // siteIndexes_ is already an id -> position map; walking sites_ and
+    // converting every std::string to a QString cost ~200 conversions per frame
+    // just to resolve a hover.
+    const auto index = siteIndexes_.value(hoverRadarId_, static_cast<std::size_t>(-1));
+    if (index == static_cast<std::size_t>(-1) || index >= sites_.size()) return;
+    const auto& site = sites_[index];
+    const auto elevation = QStringLiteral("%1 m").arg(site.antennaElevationMeters, 0, 'f', 0);
     const auto text = QStringLiteral("%1  %2\n%3  |  %4")
-                          .arg(hoverRadarId_, QString::fromStdString(it->name),
-                               QString::fromStdString(it->owner), elevation);
-    const QRectF panel(width() - 330.0, 12.0, 318.0, 45.0);
+                          .arg(hoverRadarId_, QString::fromStdString(site.name),
+                               QString::fromStdString(site.owner), elevation);
+    // Sit below the north arrow instead of under it (the card used to contain
+    // the compass entirely, hiding it for the whole hover), and clamp to the
+    // panel so the radar ID is never clipped on a 300 px-wide panel.
+    const auto cardWidth = std::min(318.0, std::max(150.0, width() - 24.0));
+    const QRectF panel(std::max(6.0, width() - cardWidth - 12.0), 56.0, cardWidth, 45.0);
     painter.setPen(QPen(QColor(128, 211, 255, 170), 1));
     painter.setBrush(QColor(8, 15, 19, 230));
     painter.drawRoundedRect(panel, 4, 4);
     painter.setPen(QColor(238, 244, 247));
     painter.setFont(hudFont(8, QFont::DemiBold));
-    painter.drawText(panel.adjusted(9, 4, -8, -4), Qt::AlignLeft | Qt::AlignVCenter, text);
+    // Elide line by line: QFontMetrics::elidedText is single-line, so eliding
+    // the joined string only trimmed the end of the last row and let a long
+    // site name still be cut mid-glyph by the card edge.
+    const int textWidth = static_cast<int>(cardWidth) - 20;
+    const auto first = text.split(QLatin1Char('\n'));
+    const auto elide = [&](const QString& line) {
+        return painter.fontMetrics().elidedText(line, Qt::ElideRight, textWidth);
+    };
+    painter.drawText(panel.adjusted(9, 4, -8, -4), Qt::AlignLeft | Qt::AlignVCenter,
+                     elide(first.value(0)) + QLatin1Char('\n') + elide(first.value(1)));
 }
 
 void RadarMapCanvas::paintMeasurement(QPainter& painter) {
@@ -1984,12 +2463,26 @@ void RadarMapCanvas::paintMeasurement(QPainter& painter) {
                            .arg(distanceKm, 0, 'f', 1)
                            .arg(bearing, 0, 'f', 1)
                            .arg(QChar(0x00b0));
+    // Size the plate to the text and keep it on screen. The old fixed 112 px box
+    // cut roughly 60 px off a cross-section label, and nothing clamped the
+    // plate, so a measurement near any edge drew it off-panel.
+    painter.setFont(hudFont(8, QFont::DemiBold));
+    const auto labelWidth =
+        std::min(painter.fontMetrics().horizontalAdvance(label) + 14.0,
+                 std::max(60.0, width() - 12.0));
+    const double labelHeight = 20.0;
     const auto midpoint = (start + end) * 0.5;
-    const QRectF box(midpoint.x() - 56, midpoint.y() - 22, 112, 20);
+    const double boxX = std::clamp(midpoint.x() - labelWidth / 2.0, 6.0,
+                                   std::max(6.0, width() - labelWidth - 6.0));
+    const double boxY = std::clamp(midpoint.y() - 24.0, 6.0,
+                                   std::max(6.0, height() - labelHeight - 6.0));
+    const QRectF box(boxX, boxY, labelWidth, labelHeight);
     painter.setPen(QColor(245, 245, 225));
-    painter.setBrush(QColor(8, 15, 19, 225));
+    painter.setBrush(QColor(8, 15, 19, 235));
     painter.drawRoundedRect(box, 3, 3);
-    painter.drawText(box, Qt::AlignCenter, label);
+    painter.drawText(box, Qt::AlignCenter,
+                     painter.fontMetrics().elidedText(label, Qt::ElideRight,
+                                                      static_cast<int>(labelWidth) - 8));
 }
 
 QString RadarMapCanvas::tileKey(const int x, const int y) const {
@@ -2044,17 +2537,30 @@ void RadarMapCanvas::panBy(const QPointF& delta) {
 
 QString RadarMapCanvas::radarAt(const QPointF& point) const {
     ensureSiteWorldPoints();
+    // Mirror the declutter rules paintEvent applies, otherwise the hit test
+    // disagrees with the screen: at zoom 5 a hidden marker was still clickable
+    // and aiming at empty space selected a different radar than the one drawn.
+    ensureSiteWorldPoints();
+    QSet<QString> occupiedMarkerCells;
     for (std::size_t siteIndex = 0; siteIndex < sites_.size(); ++siteIndex) {
         const auto& site = sites_[siteIndex];
         if (!site.latitude || !site.longitude) continue;
         const auto marker = siteIndex < static_cast<std::size_t>(siteWorldPoints_.size())
                                 ? screenPointFromWorld(siteWorldPoints_.at(static_cast<qsizetype>(siteIndex)))
                                 : screenPoint(*site.latitude, *site.longitude);
+        if (!QRectF(rect()).adjusted(-50, -30, 50, 30).contains(marker)) continue;
         const auto id = QString::fromStdString(site.id);
         const auto compact = zoom_ <= 4 && id != selectedRadar_;
+        if (zoom_ == 5 && id != selectedRadar_ && id != hoverRadarId_) {
+            const auto cell = QStringLiteral("%1/%2")
+                                  .arg(static_cast<int>(marker.x()) / 54)
+                                  .arg(static_cast<int>(marker.y()) / 25);
+            if (occupiedMarkerCells.contains(cell)) continue;
+            occupiedMarkerCells.insert(cell);
+        }
         const QRectF pill = compact ? QRectF(marker.x() - 7.0, marker.y() - 7.0, 14.0, 14.0)
                                     : QRectF(marker.x() - 24.0, marker.y() - 11.0, 48.0, 22.0);
-        if (pill.contains(point)) return QString::fromStdString(site.id);
+        if (pill.contains(point)) return id;
     }
     return {};
 }
@@ -2442,8 +2948,13 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         }
     }
     requestVisibleTiles();
-    paintRadarOverlay(painter);
-    paintWeatherOverlays(painter);
+    if (warningsOnTop_) {
+        paintRadarOverlay(painter);
+        paintWeatherOverlays(painter);
+    } else {
+        paintWeatherOverlays(painter);
+        paintRadarOverlay(painter);
+    }
     paintPlacefiles(painter);
     paintLightningOverlay(painter);
 
@@ -2486,60 +2997,61 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         painter.drawText(pill, Qt::AlignCenter, id);
     }
 
-    if (chunk_ && !chunk_->rays.empty()) {
+    // Bottom chrome: the ray/quality readout on the left, attribution on the
+    // right. The two used to overlap on any panel narrower than 772 px, which
+    // is every panel in a 2x2 layout on a 1366x768 or 1440x900 screen. The
+    // readout wins the space; the attribution yields when it cannot fit, and
+    // both elide rather than hard-cut.
+    const double attributionWidth = 238.0;
+    const double chromeLeft = 12.0;
+    const double chromeRight = width() - 12.0;
+    const double statusWidth =
+        std::clamp(chromeRight - chromeLeft - attributionWidth - 12.0, 0.0, 510.0);
+
+    if (chunk_ && !chunk_->rays.empty() && statusWidth >= 90.0) {
         painter.setFont(hudFont(9));
         painter.setPen(QColor(232, 238, 240));
         painter.setBrush(QColor(8, 15, 19, 205));
-        painter.drawRoundedRect(QRectF(12, height() - 30, 510, 22), 4, 4);
-        const auto dataDate = dataTime_.isValid()
-                                  ? dataTime_.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t"))
-                                  : QStringLiteral("time unavailable");
-        const auto overlayLabel = QStringLiteral("%1 real rays  |  NOAA data: %2%3")
-                                      .arg(chunk_->rays.size()).arg(dataDate)
-                                      .arg(qualityText_.isEmpty() && scanQualityText_.isEmpty()
-                                               ? QString{}
-                                               : QStringLiteral("  |  %1%2%3")
-                                                     .arg(qualityText_)
-                                                     .arg(!qualityText_.isEmpty() && !scanQualityText_.isEmpty()
-                                                              ? QStringLiteral(" | ") : QString{})
-                                                     .arg(scanQualityText_));
-        painter.drawText(QRectF(20, height() - 27, 494, 16), Qt::AlignLeft, overlayLabel);
+        const QRectF statusPlate(chromeLeft, height() - 30.0, statusWidth, 22.0);
+        painter.drawRoundedRect(statusPlate, 4, 4);
+        const QRectF statusText(statusPlate.left() + 8.0, statusPlate.top() + 3.0,
+                                statusPlate.width() - 16.0, 16.0);
+        painter.drawText(statusText, Qt::AlignLeft | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(elidedStatusText(), Qt::ElideRight,
+                                                          static_cast<int>(statusText.width())));
     }
-    painter.setPen(QColor(43, 45, 51));
-    painter.setBrush(QColor(26, 27, 30, 225));
-    painter.drawRoundedRect(QRectF(width() - 250, height() - 25, 238, 18), 3, 3);
-    painter.setPen(QColor(146, 152, 160));
-    painter.drawText(QRectF(width() - 242, height() - 22, 222, 13), Qt::AlignRight,
-                     QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin"));
-    if (!supplementalAttribution_.isEmpty()) {
-        painter.setPen(QColor(43, 45, 51));
-        painter.setBrush(QColor(26, 27, 30, 225));
-        painter.drawRoundedRect(QRectF(width() - 250, height() - 46, 238, 18), 3, 3);
-        painter.setPen(QColor(146, 152, 160));
-        painter.drawText(QRectF(width() - 242, height() - 43, 222, 13), Qt::AlignRight,
-                         supplementalAttribution_);
+
+    const double attributionLeft = chromeRight - attributionWidth;
+    const bool attributionFits = attributionLeft >= chromeLeft + statusWidth + 8.0;
+    if (attributionFits) {
+        const auto drawAttributionPlate = [&](const double y, const QString& label) {
+            const QRectF plate(attributionLeft, y, attributionWidth, 18.0);
+            painter.setPen(QPen(QColor(205, 216, 222, 130), 1));
+            painter.setBrush(QColor(8, 15, 19, 225));
+            painter.drawRoundedRect(plate, 3, 3);
+            painter.setPen(QColor(146, 152, 160));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            const QRectF text(plate.left() + 8.0, plate.top(), plate.width() - 16.0, plate.height());
+            painter.drawText(text, Qt::AlignRight | Qt::AlignVCenter,
+                             painter.fontMetrics().elidedText(label, Qt::ElideRight,
+                                                              static_cast<int>(text.width())));
+        };
+        drawAttributionPlate(height() - 25.0,
+                             QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin"));
+        if (!supplementalAttribution_.isEmpty())
+            drawAttributionPlate(height() - 46.0, supplementalAttribution_);
     }
+
     paintLegend(painter);
+    paintScaleBar(painter);
+    // The loading chip used to paint last, on top of the pinned detail card, so
+    // an alert you had just clicked vanished behind a spinner for the whole
+    // download. Draw it under the cards instead.
+    paintLoadingChip(painter);
     paintProbe(painter);
     paintMeasurement(painter);
     paintStationCard(painter);
 
-    if (loading_) {
-        const QRectF chip(width() - 294.0, 64.0, 282.0, 40.0);
-        painter.setPen(QPen(QColor(128, 211, 255, 170), 1));
-        painter.setBrush(QColor(5, 12, 16, 232));
-        painter.drawRoundedRect(chip, 5, 5);
-        const QPointF center(chip.left() + 21.0, chip.center().y());
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(QColor(128, 211, 255), 3, Qt::SolidLine, Qt::RoundCap));
-        painter.drawArc(QRectF(center.x() - 10, center.y() - 10, 20, 20),
-                        loadingAngle_ * 16, 250 * 16);
-        painter.setPen(QColor(235, 243, 247));
-        painter.setFont(hudFont(8, QFont::DemiBold));
-        painter.drawText(chip.adjusted(42, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                         loadingMessage_.isEmpty() ? QStringLiteral("Loading radar data")
-                                                   : loadingMessage_);
-    }
     if (activePanel_) {
         auto border = activeBorderColor_;
         border.setAlpha(220);
@@ -2578,6 +3090,16 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
+    // Middle-button pan: the near-universal map gesture, and the only one that
+    // works without risking a click on a warning polygon.
+    if (event->button() == Qt::MiddleButton) {
+        dragging_ = true;
+        dragged_ = true; // never treat a middle drag as a click
+        lastMousePosition_ = event->pos();
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
     QWidget::mousePressEvent(event);
 }
 
@@ -2594,13 +3116,23 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
+    // Hover feedback. unsetCursor() falls back to the *parent's* cursor, not to
+    // the one setMeasureMode/setCrossSectionMode installed, so the crosshair
+    // used to disappear for the rest of the session after a single card drag.
+    const auto toolCursor = (measureMode_ || crossSectionMode_) ? Qt::CrossCursor
+                                                               : Qt::ArrowCursor;
     const auto overCardHeader = !pinnedInfo_.isEmpty() &&
                                 pinnedInfoCardRect_.contains(event->position()) &&
                                 event->position().y() <= pinnedInfoCardRect_.top() + 38.0;
     if (overCardHeader && event->buttons() == Qt::NoButton) {
         setCursor(Qt::OpenHandCursor);
-    } else if (cursor().shape() == Qt::OpenHandCursor) {
-        unsetCursor();
+    } else if (!dragging_ && !measureMode_ && !crossSectionMode_ &&
+               !radarAt(event->position()).isEmpty()) {
+        // Stations are the most-clicked thing on the map and nothing on screen
+        // said so. Point at them.
+        setCursor(Qt::PointingHandCursor);
+    } else if (cursor().shape() != toolCursor) {
+        setCursor(toolCursor);
     }
     if ((measureMode_ || crossSectionMode_) && measureStart_.has_value()) {
         measureEnd_ = geographicPoint(event->position());
@@ -2627,7 +3159,7 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
 void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && draggingPinnedInfoCard_) {
         draggingPinnedInfoCard_ = false;
-        unsetCursor();
+        setCursor((measureMode_ || crossSectionMode_) ? Qt::CrossCursor : Qt::ArrowCursor);
         event->accept();
         return;
     }
@@ -2649,6 +3181,13 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
                 setPinnedOverlay(overlayAt(event->position()), event->position());
             }
         }
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::MiddleButton && dragging_) {
+        dragging_ = false;
+        dragged_ = false;
+        setCursor((measureMode_ || crossSectionMode_) ? Qt::CrossCursor : Qt::ArrowCursor);
         event->accept();
         return;
     }
@@ -2676,9 +3215,21 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         event->accept();
         return;
     }
-    const auto steps = event->angleDelta().y() / 120;
-    if (steps == 0) return;
-    setZoomAt(zoom_ + steps, event->position());
+    // High-resolution wheels and precision trackpads deliver fractional
+    // angleDelta values (15, 20, 40). The old integer `angleDelta/120` gave 0
+    // for all of them, so map zoom was completely dead on those devices and the
+    // un-accepted event even bubbled up to the parent layout. Normalize to a
+    // float step and honour pixelDelta when the platform supplies it.
+    const auto angleDelta = static_cast<double>(event->angleDelta().y());
+    const auto pixelDelta = static_cast<double>(event->pixelDelta().y());
+    double steps = angleDelta / 120.0;
+    if (steps == 0.0) {
+        if (pixelDelta == 0.0) return;
+        steps = pixelDelta / 40.0;
+    }
+    const auto delta = std::clamp(steps, -4.0, 4.0);
+    if (delta == 0.0) return;
+    setZoomAt(zoom_ + static_cast<int>(std::trunc(delta)), event->position());
     updateProbe(event->position());
     event->accept();
 }
@@ -2766,6 +3317,31 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     const auto inspectAction = menu.addAction(tr("Inspect at cursor"));
     connect(inspectAction, &QAction::triggered, this, [this, point] { inspectAt(point); });
 
+    // Escape hatches. The right-click menu is where users go to get out of a
+    // state, but it previously offered no way to dismiss the detail card or
+    // cancel a tool - both were only reachable from the toolbar or Esc.
+    if (!pinnedInfo_.isEmpty()) {
+        const auto clearCard = menu.addAction(pinnedInfoLocked_ ? tr("Close card (unlock and dismiss)")
+                                                                : tr("Close card"));
+        connect(clearCard, &QAction::triggered, this, [this, point] {
+            setPinnedOverlayLocked(false);
+            setPinnedOverlay({}, point);
+        });
+    }
+    if (measureMode_ || crossSectionMode_ || measureStart_.has_value()) {
+        const auto cancelTool = menu.addAction(measureMode_ ? tr("Cancel measure")
+                                                             : tr("Cancel cross-section"));
+        connect(cancelTool, &QAction::triggered, this, [this] {
+            if (measureMode_) {
+                setMeasureMode(false);
+                emit measureModeToggled(false);
+            } else if (crossSectionMode_) {
+                setCrossSectionMode(false);
+                emit crossSectionModeToggled(false);
+            }
+        });
+    }
+
     menu.addSeparator();
     const auto measureAction = menu.addAction(tr("Measure (two-click)"));
     measureAction->setCheckable(true);
@@ -2781,6 +3357,15 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     const auto xsAction = menu.addAction(tr("Cross-section (two-click)"));
     xsAction->setCheckable(true);
     xsAction->setChecked(crossSectionMode_);
+    // Never leave the item checked-but-greyed: if the active product cannot
+    // support a cross-section, clear the mode rather than showing a dead tick.
+    if (isDerivedProduct(product_)) {
+        if (crossSectionMode_) {
+            setCrossSectionMode(false);
+            emit crossSectionModeToggled(false);
+        }
+        xsAction->setChecked(false);
+    }
     xsAction->setEnabled(!isDerivedProduct(product_));
     connect(xsAction, &QAction::toggled, this, [this](bool enabled) {
         if (measureMode_) {
@@ -2835,6 +3420,25 @@ void RadarMapCanvas::redoView() {
 void RadarMapCanvas::clearViewHistory() {
     viewBack_.clear();
     viewForward_.clear();
+}
+
+void RadarMapCanvas::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape) {
+        if (!pinnedInfo_.isEmpty()) {
+            clearPinnedOverlay();
+            event->accept();
+            return;
+        }
+        if (measureMode_ || crossSectionMode_) {
+            setMeasureMode(false);
+            setCrossSectionMode(false);
+            emit measureModeToggled(false);
+            emit crossSectionModeToggled(false);
+            event->accept();
+            return;
+        }
+    }
+    QWidget::keyPressEvent(event);
 }
 
 } // namespace cappedweather

@@ -8,6 +8,8 @@
 #include <QMainWindow>
 #include <QMap>
 #include <QDateTime>
+#include <QPointer>
+#include <QPointF>
 #include <QSet>
 #include <QHash>
 #include <QStringList>
@@ -20,6 +22,7 @@ class QByteArray;
 class QCompleter;
 class QDateTime;
 class QDateTimeEdit;
+class QDialog;
 class QDockWidget;
 class QEvent;
 class QModelIndex;
@@ -42,6 +45,7 @@ class NexradSource;
 class OperaSource;
 class GlmSource;
 class RadarMapCanvas;
+class CrossSectionWidget;
 class RadarListModel;
 class WeatherOverlaySource;
 class PlacefileSource;
@@ -95,6 +99,7 @@ private:
     void rebuildStationPicker();
     void updateStationSummary();
     void updateUnifiedStatus();
+    void applyUnifiedStatusElision();
     void rebuildTiltCombo();
     void updateProductAvailability();
     void updatePlaybackControls();
@@ -138,6 +143,11 @@ private:
     RadarHealthState classifyHealth() const;
     void updateVelocityControls();
     void showCrossSection(const QPointF& start, const QPointF& end);
+    void refreshCrossSection();
+    void togglePanelMaximized();
+    void updateOfflineBanner();
+    void applyDataSaverPreset();
+    void setupMenus();
     void importCustomPalette();
     void exportSnapshot();
     void exportTimelineAnimation();
@@ -192,6 +202,9 @@ private:
     QDockWidget* playbackDock_ = nullptr;
     QComboBox* productCombo_ = nullptr;
     QVector<QToolButton*> productChips_;
+    // Spells out the active product; the chips themselves only carry the short
+    // operational abbreviation so a two-column grid fits a narrow dock.
+    QLabel* activeProductLabel_ = nullptr;
     QComboBox* tiltCombo_ = nullptr;
     QToolButton* tiltMinus_ = nullptr;
     QToolButton* tiltPlus_ = nullptr;
@@ -214,12 +227,19 @@ private:
     QLabel* frameLabel_ = nullptr;
     QLabel* overlayStatusLabel_ = nullptr;
     QLabel* unifiedStatusLabel_ = nullptr;
+    QString unifiedStatusFullText_;
     QLabel* glmStatusNote_ = nullptr;
     QLabel* emptyStateHint_ = nullptr;
+    QLabel* offlineBanner_ = nullptr;
+    QToolButton* emptyStateGoButton_ = nullptr;
     QProgressBar* loadingProgress_ = nullptr;
     QSlider* frameSlider_ = nullptr;
     QDateTimeEdit* timeJumpEdit_ = nullptr;
     QSlider* radarOpacitySlider_ = nullptr;
+    QSlider* warningOpacitySlider_ = nullptr;
+    QCheckBox* warningsOnTopCheck_ = nullptr;
+    QToolButton* maximizePanelButton_ = nullptr;
+    QToolButton* dataSaverButton_ = nullptr;
     QCheckBox* proximityFilterCheck_ = nullptr;
     QDoubleSpinBox* proximityFilterRadius_ = nullptr;
     QToolButton* previousButton_ = nullptr;
@@ -244,6 +264,11 @@ private:
     QLabel* lightningBadge_ = nullptr;
     QCheckBox* lightningFusionCheck_ = nullptr;
     QLabel* fusionBadge_ = nullptr;
+    QCheckBox* shearCheck_ = nullptr;
+    QLabel* shearBadge_ = nullptr;
+    QCheckBox* trailCheck_ = nullptr;
+    QCheckBox* smoothingCheck_ = nullptr;
+    QLabel* scanDiagnosticsLabel_ = nullptr;
     QCheckBox* placefilesCheck_ = nullptr;
     QLabel* placefilesBadge_ = nullptr;
     QComboBox* scopeCombo_ = nullptr;
@@ -300,6 +325,18 @@ private:
     bool synchronizePanels_ = true;
     bool synchronizingMapView_ = false;
     AppTheme theme_ = AppTheme::Prototype;
+    // Modeless cross-section: stays usable beside live radar. Updated on
+    // showFrame() via refreshCrossSection().
+    QPointer<QDialog> crossSectionDialog_;
+    class CrossSectionWidget* crossSectionWidget_ = nullptr;
+    QPointF crossSectionStart_;
+    QPointF crossSectionEnd_;
+    QString crossSectionRadarId_;
+    // Temporary 1-panel focus without destroying the layout preset.
+    bool panelMaximized_ = false;
+    int maximizedPanelIndex_ = 0;
+    int layoutBeforeMaximize_ = 0;
+    int consecutiveFailures_ = 0;
 };
 
 } // namespace cappedweather

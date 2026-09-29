@@ -22,6 +22,13 @@ public:
 
     bool exportCsv(const QString& path) const;
 
+    // Live-update a modeless cross-section when the timeline advances.
+    // Rebuilds cells for the new chunk and repaints; keeps geometry/start-end.
+    void setData(std::shared_ptr<const DecodedChunk> chunk, ProductKind product,
+                 RadarMapCanvas::PaletteKind palette,
+                 QVector<RadarMapCanvas::PaletteStop> customPalette,
+                 VelocityProcessingOptions velocityOptions);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
 

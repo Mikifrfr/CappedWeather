@@ -98,6 +98,7 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 
 - Six native Level II moments plus two volume-derived 2D products: 18 dBZ Echo Tops (kft MSL) and VIL (kg/m²), each with product-specific scales, palettes, probing, panel persistence, and timeline rendering. See `docs/derived-products.md` for formulas and quality limits.
 - Switchable 1x1, 1x2, 2x1, and 2x2 radar layouts. Every panel can use its own radar, product, tilt, and velocity mode; map navigation can remain linked.
+- Product chips carry the standard operational abbreviation (REF, VEL, SW, ZDR, RHOHV, PHIDP, ET18, VIL) so the whole set fits a narrow dock; the active product is spelled out in full directly above the grid and in each chip's tooltip.
 - Discrete native operational palettes for all six products, with improved legend labels.
 - Importable, persistent custom palettes using `native_value,#RRGGBB` lines, plus Capped and color-safe presets.
 - TDWR volumes expose their available base moments (reflectivity, radial velocity, and spectrum width); unavailable dual-polarization products are disabled automatically.
@@ -130,8 +131,17 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 
 ## Operator notes
 
-- `Measure` reports great-circle distance and bearing. `Cross-section` uses the same two-point gesture and opens a distance/height view across all available tilts.
+- `Measure` reports great-circle distance and bearing. `Cross-section` uses the same two-point gesture and opens a distance/height view across all available tilts. Middle-drag pans; hover a station for a pointer cursor; right-click for a menu that also offers *Close card* and *Cancel tool*.
+- High-resolution wheels and precision trackpads zoom normally (fractional wheel deltas are normalized, with a `pixelDelta` fallback).
 - The velocity controls apply to the active panel. Storm direction is the direction toward which the storm moves; speed and Nyquist are in m/s.
 - Custom palettes are discrete native-value thresholds. Example: `20,#02fd02` followed by `30,#008e00`.
 - `Timeline GIF` exports every currently loaded frame for the active radar. Use the playback dock's `L2 files`, `L2 folder`, or `AWS archive` actions first when exporting a historical case.
 - Network Settings provide request concurrency, retries, timeouts, cache limits, contact information, chase position, history depth, and panel-navigation linking.
+
+## Accessibility
+
+- Every control has a visible keyboard focus indicator in both themes. Qt stops drawing its default focus ring as soon as a stylesheet sets a `border`, so focus is defined explicitly per theme.
+- Secondary text (captions, group headers, layer sub-labels, the station-picker placeholder) clears 4.5:1 against the dock background, and disabled controls keep a visible border rather than fading to ~1.1:1.
+- The status bar elides its three-part summary instead of hard-cutting, with the full text on hover; on-map HUD text carries a dark halo so labels stay legible over bright echo.
+- Both themes style the same widget set, so switching themes never leaves a native-looking control in a themed dialog. The settings dialog scrolls, keeping OK/Cancel reachable at larger text sizes.
+- Full card keyboard focus and a font-scale preference remain open items (see `TODO.md`).

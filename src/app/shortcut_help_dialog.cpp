@@ -23,9 +23,11 @@ ShortcutHelpDialog::ShortcutHelpDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(intro);
 
     auto* text = new QTextEdit(this);
+    text->setObjectName(QStringLiteral("shortcutList"));
     text->setReadOnly(true);
-    text->setStyleSheet(QStringLiteral(
-        "QTextEdit { background: #1a1b1e; color: #d4d6d9; border: 1px solid #2b2d33; }"));
+    // Colors come from the active theme sheet. A hardcoded inline sheet pinned
+    // this dialog to Classic grays permanently, so it looked like a different
+    // app under the Squall theme.
     populateShortcutsInto(text);
     layout->addWidget(text, 1);
 
@@ -38,13 +40,17 @@ void ShortcutHelpDialog::populateShortcutsInto(QTextEdit* text) {
     const ShortcutEntry entries[] = {
         {"Space",        "Play / pause timeline"},
         {"Left / Right", "Previous / next frame"},
+        {"Home / End",   "Oldest / newest frame"},
         {"PgUp / PgDn",  "Tilt up / down"},
         {"+ / -",        "Zoom in / out"},
         {"R",            "Recenter on selected radar"},
         {"L",            "Jump to LIVE (latest volume)"},
         {"1 - 8",        "Switch product (REF, VEL, SW, ZDR, CC, PHI, ET18, VIL)"},
+        {"P",            "Lock / unlock pinned card"},
+        {"Ctrl+Z / Ctrl+Shift+Z", "Undo / redo map view"},
+        {"F11",          "Maximize / restore active panel"},
+        {"Esc",          "Close card, cancel measure / cross-section"},
         {"?",            "Show this help dialog"},
-        {"Esc",          "Close this dialog"},
         {"F1",           "Show this help dialog"},
     };
     QString html = QStringLiteral("<table cellpadding='4' cellspacing='0' border='0'>");

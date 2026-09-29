@@ -25,6 +25,7 @@
 #include <vector>
 
 class QMouseEvent;
+class QKeyEvent;
 class QEnterEvent;
 class QEvent;
 class QPaintEvent;
@@ -77,6 +78,13 @@ public:
     void setLightningCells(std::vector<LightningCellSnapshot> cells);
     void setLightningVisible(bool visible);
     void setLightningFusionVisible(bool visible);
+    void setShearVisible(bool visible);
+    [[nodiscard]] bool shearVisible() const { return shearVisible_; }
+    void setStormTrailVisible(bool visible);
+    [[nodiscard]] bool stormTrailVisible() const { return stormTrailVisible_; }
+    void setDisplaySmoothing(bool enabled);
+    [[nodiscard]] bool displaySmoothing() const { return displaySmoothing_; }
+    [[nodiscard]] QString scanDiagnosticsText() const;
     void setWarningsVisible(bool visible);
     void setStormReportsVisible(bool visible);
     void setStormReportKindVisible(StormReportKind kind, bool visible);
@@ -101,6 +109,11 @@ public:
     void setPalette(PaletteKind palette);
     void setCustomPalette(QVector<PaletteStop> stops);
     void setRadarOpacity(int percent);
+    void setWarningOpacity(int percent);
+    void setWarningsOnTop(bool onTop);
+    [[nodiscard]] int warningOpacity() const { return warningOpacity_; }
+    [[nodiscard]] bool warningsOnTop() const { return warningsOnTop_; }
+    void clearPinnedOverlay();
     void setBelowThresholdVisible(bool visible);
     void setVelocityProcessing(VelocityProcessingOptions options);
     void setMeasureMode(bool enabled);
@@ -188,6 +201,7 @@ protected:
     void leaveEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     enum class PinnedInfoKind {
@@ -196,6 +210,11 @@ private:
         StormReport,
         Lightning,
         Placefile,
+        // A frozen cursor readout. "Inspect at cursor" used to write the same
+        // transient text the hover uses, so the next mouse move silently wiped
+        // it and the action looked broken. Pinning it makes it readable, and
+        // makes the card body selectable.
+        Probe,
     };
 
     struct OverlayHit {
@@ -227,10 +246,16 @@ private:
     void paintWeatherOverlays(QPainter& painter);
     void paintPlacefiles(QPainter& painter);
     void paintLightningOverlay(QPainter& painter);
+    void paintShearOverlay(QPainter& painter);
+    void paintStormTrail(QPainter& painter);
     void paintLegend(QPainter& painter);
+    void paintScaleBar(QPainter& painter);
     void paintProbe(QPainter& painter);
     void paintStationCard(QPainter& painter);
     void paintMeasurement(QPainter& painter);
+    void paintLoadingChip(QPainter& painter);
+    QString elidedStatusText() const;
+    void invalidateStatusText();
     void updateProbe(const QPointF& point);
     std::optional<std::size_t> lightningCellAt(const QPointF& point) const;
     QString lightningInfo(std::size_t index) const;
@@ -301,6 +326,10 @@ private:
     QString loadingMessage_;
     QString qualityText_;
     QString scanQualityText_;
+    // The bottom-left readout is pure HUD chrome and is recomposed from four
+    // inputs; cache it so paintEvent does not rebuild it on every frame.
+    mutable QString statusTextCache_;
+    mutable bool statusTextCacheValid_ = false;
     QString warningFilter_;
     QString hoverRadarId_;
     QString pinnedInfo_;
@@ -332,6 +361,18 @@ private:
     bool placefilesVisible_ = true;
     bool lightningVisible_ = true;
     bool lightningFusionVisible_ = true;
+    bool shearVisible_ = true;
+    bool stormTrailVisible_ = true;
+    bool displaySmoothing_ = false;
+    struct TrailPoint {
+        double latitudeDeg = 0.0;
+        double longitudeDeg = 0.0;
+        double maxDbz = 0.0;
+        QDateTime time;
+        bool rotating = false;
+    };
+    std::vector<TrailPoint> stormTrail_;
+    static constexpr std::size_t kStormTrailLimit = 24;
     std::array<bool, 3> stormReportKindsVisible_{true, true, true};
     std::optional<OverlayVisibility> overlayOverrides_;
     std::optional<QPointF> proximityAnchor_; // longitude, latitude
@@ -339,6 +380,8 @@ private:
     PaletteKind palette_ = PaletteKind::Capped;
     QVector<PaletteStop> customPalette_;
     int radarOpacity_ = 80;
+    int warningOpacity_ = 90;
+    bool warningsOnTop_ = true;
     bool belowThresholdVisible_ = false;
     bool measureMode_ = false;
     bool crossSectionMode_ = false;
