@@ -6,6 +6,7 @@
 #include "core/velocity_processing.hpp"
 #include "core/lightning_overlay.hpp"
 #include "core/radar_lightning_fusion.hpp"
+#include "core/storm_tracker.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/placefile.hpp"
 
@@ -46,6 +47,8 @@ struct BasemapTileUrls {
     QUrl reference;
 };
 BasemapTileUrls basemapTileUrls(int zoom, int x, int y);
+// Interface text scale multiplier for all canvas HUD painters.
+void setHudFontScale(double scale);
 
 class RadarMapCanvas final : public QWidget {
     Q_OBJECT
@@ -82,6 +85,7 @@ public:
     [[nodiscard]] bool shearVisible() const { return shearVisible_; }
     void setStormTrailVisible(bool visible);
     [[nodiscard]] bool stormTrailVisible() const { return stormTrailVisible_; }
+    [[nodiscard]] bool hasStormTracks() const;
     void setDisplaySmoothing(bool enabled);
     [[nodiscard]] bool displaySmoothing() const { return displaySmoothing_; }
     [[nodiscard]] QString scanDiagnosticsText() const;
@@ -399,15 +403,10 @@ private:
     bool shearVisible_ = true;
     bool stormTrailVisible_ = true;
     bool displaySmoothing_ = false;
-    struct TrailPoint {
-        double latitudeDeg = 0.0;
-        double longitudeDeg = 0.0;
-        double maxDbz = 0.0;
-        QDateTime time;
-        bool rotating = false;
-    };
-    std::vector<TrailPoint> stormTrail_;
-    static constexpr std::size_t kStormTrailLimit = 24;
+    // One history per storm (matched across volumes by proximity), fed from
+    // the fusion completion. Replaces the old single-centroid trail, whose
+    // global max jumped between cells.
+    StormTracker stormTracker_;
     std::array<bool, 3> stormReportKindsVisible_{true, true, true};
     std::optional<OverlayVisibility> overlayOverrides_;
     std::optional<QPointF> proximityAnchor_; // longitude, latitude

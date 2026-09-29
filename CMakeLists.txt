@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(CappedWeather VERSION 0.5.0 LANGUAGES CXX)
+project(CappedWeather VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +57,8 @@ add_library(cappedweather_core STATIC
     src/core/flash_rate_grid.cpp
     src/core/glm_l2_reader.cpp
     src/core/radar_lightning_fusion.cpp
+    src/core/storm_tracker.cpp
+    src/core/volume_spill.cpp
 )
 
 target_include_directories(cappedweather_core
@@ -279,11 +281,19 @@ if(CAPPEDWEATHER_BUILD_APP)
             MACOSX_BUNDLE TRUE
         )
 
-        if(WIN32 AND CAPPEDWEATHER_NETCDF_TARGET)
+        if(WIN32 AND (CAPPEDWEATHER_NETCDF_TARGET OR CAPPEDWEATHER_HDF5_TARGET))
+            set(_cw_runtime_dirs "${CAPPEDWEATHER_QT_ROOT}/bin")
+            if(CAPPEDWEATHER_NETCDF_TARGET)
+                list(APPEND _cw_runtime_dirs "$<TARGET_FILE_DIR:${CAPPEDWEATHER_NETCDF_TARGET}>")
+            endif()
+            # TARGET_FILE_DIR needs a real target; the HDF5 fallback can be a
+            # bare library path list, in which case there is nothing to harvest.
+            if(CAPPEDWEATHER_HDF5_TARGET AND TARGET ${CAPPEDWEATHER_HDF5_TARGET})
+                list(APPEND _cw_runtime_dirs "$<TARGET_FILE_DIR:${CAPPEDWEATHER_HDF5_TARGET}>")
+            endif()
             install(TARGETS CappedWeather
                 RUNTIME_DEPENDENCIES
-                    DIRECTORIES "$<TARGET_FILE_DIR:${CAPPEDWEATHER_NETCDF_TARGET}>"
-                                "${CAPPEDWEATHER_QT_ROOT}/bin"
+                    DIRECTORIES ${_cw_runtime_dirs}
                     PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
                     POST_EXCLUDE_REGEXES ".*[Ss]ystem32/.*"
                 BUNDLE DESTINATION .
@@ -314,7 +324,12 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Operational real-time Level II radar view
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_FILE_NAME "CappedWeather-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 if(WIN32)
-    set(CPACK_GENERATOR "ZIP")
+    set(CPACK_GENERATOR "ZIP;NSIS")
+    set(CPACK_NSIS_PACKAGE_NAME "CappedWeather")
+    set(CPACK_NSIS_DISPLAY_NAME "CappedWeather Level II Radar")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "CappedWeather")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MENU_LINKS "bin/CappedWeather.exe" "CappedWeather Level II Radar")
 else()
     set(CPACK_GENERATOR "TGZ")
 endif()

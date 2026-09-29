@@ -6,10 +6,10 @@ CappedWeather is a small Qt6/C++ WSR-88D and TDWR Level II viewer focused on dir
 
 Grab the latest portable build from the [Releases page](https://github.com/Mikifrfr/CappedWeather/releases):
 
-- **Windows**: `CappedWeather-*-Windows-*.zip` — unzip and run `CappedWeather.exe`, no install needed.
+- **Windows**: `CappedWeather-*-Windows-*.exe` — one-click NSIS installer (Start-menu shortcut, bundled Qt + BZip2 + netCDF + HDF5). Prefer portable? `CappedWeather-*-Windows-*.zip` — unzip and run `CappedWeather.exe`, no install needed.
 - **Linux**: `CappedWeather-v*-Linux-x86_64.tgz` — extract and run `./AppDir/AppRun` (built on Ubuntu 22.04, runs on newer distros too).
 
-Release builds stub the GLM lightning reader (no netCDF); everything else is live.
+Release builds bundle netCDF-C and HDF5, so live GLM lightning ingestion and European OPERA volumes work out of the box; everything is live.
 
 ## Screenshots
 
@@ -122,7 +122,9 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Filmstrip timeline under the transport buttons: one block per loaded volume, red ticks for warning onsets, amber caps for bookmarks (`B` or right-click).
 - Linked cursor probe: hovering one panel shows a ghost readout with the same gate sampled in every other visible panel (each in its own product).
 - `Ctrl+K` command palette over radars, products, layouts, and actions.
-- Storm-track extrapolation (+10/+20/+30 min dead reckoning), double-click a pinned card to expand it, dark-halo warning outlines that survive bright echo.- Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
+- Storm tracks follow each storm, not the global max: a proximity-matched per-storm tracker (12 tracks, 2-miss coasting, scrub-safe) replaces the single-centroid trail. Every storm draws its own fading history line; the longest track keeps the dots, `trail dBZ` label, and +10/+20/+30 min extrapolation.
+- Double-click a pinned card to expand it, dark-halo warning outlines that survive bright echo.
+- Parser rejection diagnostics and randomized malformed-input tests for Message 31 framing and moment bounds.
 - Persistent operational settings for panels, products, palettes, overlays, opacity, playback, timeline depth, and window geometry.
 
 ## Performance

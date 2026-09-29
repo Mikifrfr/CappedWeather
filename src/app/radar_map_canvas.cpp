@@ -45,11 +45,15 @@ namespace cappedweather {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 
+// Interface text scale (Settings → Display). Multiplies every HUD painter
+// size; the app font is scaled separately in MainWindow::applyFontScale.
+double g_hudScale = 1.0;
+
 QFont hudFont(const int pointSize, const QFont::Weight weight = QFont::Normal) {
     QFont font;
     font.setFamilies({QStringLiteral("IBM Plex Sans"), QStringLiteral("Segoe UI"),
                       QStringLiteral("Noto Sans"), QStringLiteral("DejaVu Sans")});
-    font.setPointSize(pointSize);
+    font.setPointSizeF(pointSize * g_hudScale);
     font.setWeight(weight);
     return font;
 }
@@ -316,6 +320,13 @@ BasemapTileUrls basemapTileUrls(const int zoom, const int x, const int y) {
     };
 }
 
+// Same linkage treatment as basemapTileUrls above: declared in the header,
+// so the definition must live in cappedweather scope, outside the anonymous
+// namespace that owns g_hudScale's helpers.
+void setHudFontScale(const double scale) {
+    g_hudScale = std::clamp(scale, 0.8, 1.5);
+}
+
 namespace {
 
 void watchTile(SharedTileStore& store, const QString& key, RadarMapCanvas* canvas) {
@@ -553,7 +564,7 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         chunk_.reset();
         invalidateOverlay();
         invalidateLightningFusion();
-        stormTrail_.clear();
+        stormTracker_.clear();
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -665,6 +676,13 @@ void RadarMapCanvas::setStormTrailVisible(const bool visible) {
     update();
 }
 
+bool RadarMapCanvas::hasStormTracks() const {
+    for (const auto& track : stormTracker_.tracks()) {
+        if (track.fixes.size() >= 2) return true;
+    }
+    return false;
+}
+
 void RadarMapCanvas::setDisplaySmoothing(const bool enabled) {
     if (displaySmoothing_ == enabled) return;
     displaySmoothing_ = enabled;
@@ -726,27 +744,14 @@ void RadarMapCanvas::rebuildLightningFusion() {
                 guard->lightningAssociations_ = std::move(associations);
                 guard->lightningFusionComputedGeneration_ = generation;
                 guard->refreshPinnedLightningInfo();
-                // Storm trail: keep the strongest feature per volume so the
-                // meso track survives timeline scrubbing. Bounded, no fake
-                // interpolation — one honest point per decoded volume.
-                if (!guard->radarFeatures_.empty()) {
-                    const auto* best = &guard->radarFeatures_.front();
-                    for (const auto& f : guard->radarFeatures_) {
-                        if (f.maximumReflectivityDbz > best->maximumReflectivityDbz) best = &f;
-                    }
-                    TrailPoint point;
-                    point.latitudeDeg = best->latitudeDeg;
-                    point.longitudeDeg = best->longitudeDeg;
-                    point.maxDbz = best->maximumReflectivityDbz;
-                    point.time = guard->dataTime_;
-                    point.rotating = best->rotating;
-                    if (guard->stormTrail_.empty() ||
-                        !guard->stormTrail_.back().time.isValid() ||
-                        guard->stormTrail_.back().time != point.time) {
-                        guard->stormTrail_.push_back(point);
-                        while (guard->stormTrail_.size() > kStormTrailLimit)
-                            guard->stormTrail_.erase(guard->stormTrail_.begin());
-                    }
+                // Per-storm tracks: fold the whole feature set into the
+                // tracker (newest volume only — the tracker itself ignores
+                // older-or-equal updates, so timeline scrubbing can never
+                // corrupt the tracks).
+                if (guard->dataTime_.isValid()) {
+                    guard->stormTracker_.update(
+                        guard->radarFeatures_,
+                        static_cast<double>(guard->dataTime_.toSecsSinceEpoch()));
                 }
             }
             guard->update();
@@ -2127,51 +2132,77 @@ void RadarMapCanvas::paintShearOverlay(QPainter& painter) {
 }
 
 void RadarMapCanvas::paintStormTrail(QPainter& painter) {
-    if (!stormTrailVisible_ || stormTrail_.size() < 2) return;
+    if (!stormTrailVisible_) return;
+    const auto& tracks = stormTracker_.tracks();
+    if (tracks.empty()) return;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
+    // Primary track = longest history (tie: strongest latest fix). It keeps
+    // the full dot + label + extrapolation treatment; every other storm
+    // draws as a thin history line so multi-cell days read at a glance.
+    const StormTrack* primary = nullptr;
+    for (const auto& track : tracks) {
+        if (track.fixes.size() < 2) continue;
+        if (!primary || track.fixes.size() > primary->fixes.size() ||
+            (track.fixes.size() == primary->fixes.size() &&
+             track.fixes.back().maximumReflectivityDbz >
+                 primary->fixes.back().maximumReflectivityDbz))
+            primary = &track;
+    }
+    for (const auto& track : tracks) {
+        if (track.fixes.size() < 2 || &track == primary) continue;
+        QPolygonF line;
+        for (const auto& fix : track.fixes) line << screenPoint(fix.latitudeDeg, fix.longitudeDeg);
+        painter.setPen(QPen(QColor(255, 209, 122, 90), 1.5, Qt::SolidLine, Qt::RoundCap,
+                            Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolyline(line);
+    }
+    if (!primary) {
+        painter.restore();
+        return;
+    }
+    const auto& fixes = primary->fixes;
     QPolygonF track;
-    for (const auto& t : stormTrail_) track << screenPoint(t.latitudeDeg, t.longitudeDeg);
+    for (const auto& fix : fixes) track << screenPoint(fix.latitudeDeg, fix.longitudeDeg);
     painter.setPen(QPen(QColor(255, 209, 122, 200), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter.setBrush(Qt::NoBrush);
     painter.drawPolyline(track);
-    for (std::size_t i = 0; i < stormTrail_.size(); ++i) {
-        const auto& t = stormTrail_[i];
-        const auto p = screenPoint(t.latitudeDeg, t.longitudeDeg);
+    for (std::size_t i = 0; i < fixes.size(); ++i) {
+        const auto& fix = fixes[i];
+        const auto p = screenPoint(fix.latitudeDeg, fix.longitudeDeg);
         if (!rect().adjusted(-30, -30, 30, 30).contains(p.toPoint())) continue;
-        const auto age = static_cast<double>(stormTrail_.size() - 1 - i) /
-                         static_cast<double>(std::max<std::size_t>(1, stormTrail_.size() - 1));
+        const auto age = static_cast<double>(fixes.size() - 1 - i) /
+                         static_cast<double>(std::max<std::size_t>(1, fixes.size() - 1));
         const int alpha = static_cast<int>(std::round(220.0 * (1.0 - age * 0.75)));
-        QColor dot = t.rotating ? QColor(255, 78, 210, alpha) : QColor(255, 209, 122, alpha);
+        QColor dot = fix.rotating ? QColor(255, 78, 210, alpha) : QColor(255, 209, 122, alpha);
         painter.setBrush(dot);
         painter.setPen(QPen(QColor(8, 15, 19, alpha), 1.0));
-        const double r = t.rotating ? 6.0 : 4.5 - age * 1.5;
+        const double r = fix.rotating ? 6.0 : 4.5 - age * 1.5;
         painter.drawEllipse(p, r, r);
-        if (i + 1 == stormTrail_.size() && zoom_ >= 6) {
+        if (i + 1 == fixes.size() && zoom_ >= 6) {
             painter.setPen(QColor(255, 235, 200));
             painter.setFont(hudFont(7, QFont::DemiBold));
             painter.drawText(QRectF(p.x() + 9, p.y() - 20, 120, 16),
                              Qt::AlignLeft | Qt::AlignVCenter,
-                             QStringLiteral("trail %1 dBZ").arg(t.maxDbz, 0, 'f', 0));
+                             QStringLiteral("trail %1 dBZ").arg(fix.maximumReflectivityDbz, 0, 'f', 0));
         }
     }
-    // Extrapolated motion from a least-squares fit over the newest fixes
-    // (+10/+20/+30 min). This is dead reckoning on the centroid track, not
-    // a forecast: it answers "where is this core headed" at a glance while
-    // chasing. Three gates keep a centroid jump from becoming a cross-state
-    // arrow: enough fixes with a real time span, a plausible storm speed,
-    // and a hard cap on the drawn length.
-    if (zoom_ >= 6 && stormTrail_.size() >= 3) {
-        const auto window = std::min<std::size_t>(5, stormTrail_.size());
-        const auto& newest = stormTrail_.back();
+    // Extrapolated motion from a least-squares fit over the newest fixes of
+    // the primary track (+10/+20/+30 min). Dead reckoning, not a forecast.
+    // Three gates keep a centroid jump from becoming a cross-state arrow:
+    // enough fixes with a real time span, a plausible storm speed, and a
+    // hard cap on the drawn length.
+    if (zoom_ >= 6 && fixes.size() >= 3) {
+        const auto window = std::min<std::size_t>(5, fixes.size());
+        const auto& newest = fixes.back();
         double sumT = 0.0, sumTT = 0.0, sumLat = 0.0, sumLon = 0.0, sumTLat = 0.0, sumTLon = 0.0;
         int fitted = 0;
-        const TrailPoint* oldest = nullptr;
-        for (std::size_t i = stormTrail_.size() - window; i < stormTrail_.size(); ++i) {
-            const auto& fix = stormTrail_[i];
-            if (!fix.time.isValid() || !newest.time.isValid()) continue;
+        const StormTrackFix* oldest = nullptr;
+        for (std::size_t i = fixes.size() - window; i < fixes.size(); ++i) {
+            const auto& fix = fixes[i];
             // Seconds before the newest fix (<= 0), so the fit is anchored at now.
-            const auto dt = static_cast<double>(fix.time.secsTo(newest.time));
+            const auto dt = fix.epochSeconds - newest.epochSeconds;
             sumT += dt;
             sumTT += dt * dt;
             sumLat += fix.latitudeDeg;
@@ -2182,8 +2213,7 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
             ++fitted;
         }
         const auto denom = fitted * sumTT - sumT * sumT;
-        const auto spanSeconds =
-            (fitted > 0 && oldest) ? static_cast<double>(oldest->time.secsTo(newest.time)) : 0.0;
+        const auto spanSeconds = (fitted > 0 && oldest) ? newest.epochSeconds - oldest->epochSeconds : 0.0;
         // Gate 1: at least 3 fixes spanning 2+ minutes — two points only ever
         // describe a jump, never motion.
         if (fitted >= 3 && spanSeconds >= 120.0 && std::abs(denom) > 1e-6 && oldest) {
@@ -2310,8 +2340,7 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         }
     }
 
-    if ((shearVisible_ && !radarFeatures_.empty()) ||
-        (stormTrailVisible_ && stormTrail_.size() >= 2)) {
+    if ((shearVisible_ && !radarFeatures_.empty()) || (stormTrailVisible_ && hasStormTracks())) {
         const QRectF analysisPanel(12, 96, 258, 20);
         painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
         painter.setBrush(QColor(8, 15, 19, 205));
@@ -2324,7 +2353,7 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
                              QStringLiteral("◎ ROT/shear"));
             x += 92;
         }
-        if (stormTrailVisible_ && stormTrail_.size() >= 2) {
+        if (stormTrailVisible_ && hasStormTracks()) {
             painter.setPen(QColor(255, 209, 122));
             painter.drawText(QRectF(x, 98, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("— storm trail"));

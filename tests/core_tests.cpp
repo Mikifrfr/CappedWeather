@@ -10,6 +10,8 @@
 #include "core/glm_l2_reader.hpp"
 #include "core/odim_reader.hpp"
 #include "core/radar_lightning_fusion.hpp"
+#include "core/storm_tracker.hpp"
+#include "core/volume_spill.hpp"
 #include "core/derived_products.hpp"
 
 #include <array>
@@ -17,7 +19,9 @@
 #include <bit>
 #include <cassert>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -155,6 +159,97 @@ void testDerivedSupportGate() {
         chunk.rays.back() = syntheticDerivedRay(90.0F, 2, 5.0F, 10.0);
         assert(chunkSupportsDerivedProducts(chunk));
     }
+}
+
+static RadarStormFeature syntheticFeature(const double lat, const double lon, const double dbz,
+                                                 const bool rotating = false) {
+    RadarStormFeature feature;
+    feature.latitudeDeg = lat;
+    feature.longitudeDeg = lon;
+    feature.maximumReflectivityDbz = dbz;
+    feature.rotating = rotating;
+    feature.azimuthalShearPerSecond = rotating ? 0.004 : 0.001;
+    return feature;
+}
+
+void testStormTracker() {
+    StormTracker tracker;
+    // Two storms 300 km apart drift east; a third pops up later.
+    auto tracks = tracker.update({syntheticFeature(35.0, -97.0, 60.0, true),
+                                  syntheticFeature(35.0, -94.0, 55.0)},
+                                 1000.0);
+    assert(tracks.size() == 2);
+    const int northId = tracks.at(0).id != tracks.at(1).id ? tracks.at(0).id : -1;
+    assert(northId > 0);
+    // Second volume: both move ~+0.1 deg lon (~9 km in 300 s — sane speed).
+    // IDs must survive.
+    tracks = tracker.update({syntheticFeature(35.0, -96.9, 61.0, true),
+                             syntheticFeature(35.0, -93.9, 54.0)},
+                            1300.0);
+    assert(tracks.size() == 2);
+    for (const auto& track : tracks) assert(track.fixes.size() == 2);
+    // Scrub guard: an older volume must not corrupt the tracks.
+    tracks = tracker.update({syntheticFeature(35.0, -97.0, 60.0, true)}, 1000.0);
+    assert(tracks.size() == 2);
+    for (const auto& track : tracks) assert(track.fixes.size() == 2);
+    // One storm vanishes for a volume (coasted), a new one is born elsewhere.
+    tracks = tracker.update({syntheticFeature(35.0, -96.8, 62.0, true),
+                             syntheticFeature(36.0, -92.0, 50.0)},
+                            1600.0);
+    assert(tracks.size() == 3);
+    // The vanished storm coasts once more, then dies.
+    tracks = tracker.update({syntheticFeature(35.0, -96.7, 63.0, true),
+                             syntheticFeature(36.0, -91.9, 51.0)},
+                            1900.0);
+    assert(tracks.size() == 3);
+    tracks = tracker.update({syntheticFeature(35.0, -96.6, 63.0, true),
+                             syntheticFeature(36.0, -91.8, 51.0)},
+                            2200.0);
+    assert(tracks.size() == 2);
+    // Teleporting max must not yank a track: 500 km jump starts a new one.
+    tracks = tracker.update({syntheticFeature(35.0, -96.5, 64.0, true),
+                             syntheticFeature(30.0, -85.0, 70.0)},
+                            2500.0);
+    bool foundTeleported = false;
+    for (const auto& track : tracks) {
+        if (track.fixes.size() == 1 && track.fixes.back().maximumReflectivityDbz == 70.0)
+            foundTeleported = true;
+    }
+    assert(foundTeleported);
+}
+
+void testVolumeSpillRoundTrip() {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.messageCount = 7;
+    chunk.rejectedMessages = 1;
+    chunk.rejectedBlocks = 2;
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    chunk.rays.push_back(syntheticDerivedRay(180.0F, 2, 5.0F, 10.0));
+    const auto path =
+        (std::filesystem::temp_directory_path() / "cappedweather-spill-test.cwdv").string();
+    assert(spillVolume(chunk, path));
+    const auto loaded = loadSpilledVolume(path);
+    assert(loaded);
+    assert(loaded->radarId == "KTLX");
+    assert(loaded->messageCount == 7);
+    assert(loaded->rejectedMessages == 1);
+    assert(loaded->rejectedBlocks == 2);
+    assert(loaded->rays.size() == 2);
+    const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto& want = chunk.rays[i];
+        const auto& got = loaded->rays[i];
+        assert(got.azimuthDegrees == want.azimuthDegrees);
+        assert(got.elevationNumber == want.elevationNumber);
+        assert(got.elevationDegrees == want.elevationDegrees);
+        assert(got.fields[refIndex] == want.fields[refIndex]);
+        assert(got.scaleByProduct[refIndex] == want.scaleByProduct[refIndex]);
+        assert(got.offsetByProduct[refIndex] == want.offsetByProduct[refIndex]);
+    }
+    // Corrupt copy must fail clean, never partial data.
+    assert(!loadSpilledVolume("no-such-file.cwdv"));
+    std::remove(path.c_str());
 }
 
 void testDerivedProductsSupportNegativeFirstGate() {
@@ -722,6 +817,8 @@ int main() {
     testDerivedEchoTopLowerBoundWithMissingUpperData();
     testDerivedProductsRequireVolumeDepth();
     testDerivedSupportGate();
+    testStormTracker();
+    testVolumeSpillRoundTrip();
     testDerivedProductsSupportNegativeFirstGate();
     testCatalog();
     testOperaCatalog();

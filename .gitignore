@@ -4,6 +4,8 @@
 /.vs/
 /_CPack_Packages/
 /CappedWeather-*.zip
+/CappedWeather-*.exe
+/CappedWeather-*.msi
 *.user
 *.suo
 

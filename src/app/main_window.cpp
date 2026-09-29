@@ -13,6 +13,7 @@
 #include "app/cross_section_widget.hpp"
 #include "app/command_palette.hpp"
 #include "app/timeline_strip.hpp"
+#include "core/volume_spill.hpp"
 #include "app/gif_writer.hpp"
 #include "app/shortcut_help_dialog.hpp"
 #include "core/level2_decoder.hpp"
@@ -73,6 +74,12 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QSizePolicy>
+#include <QStandardPaths>
+#if defined(CAPPEDWEATHER_HAS_MULTIMEDIA)
+#include <QMediaCaptureSession>
+#include <QMediaRecorder>
+#include <QWindowCapture>
+#endif
 #include <QSlider>
 #include <QStandardItemModel>
 #include <QSpinBox>
@@ -127,6 +134,28 @@ bool placefileUrlContainsCredentials(const QUrl& url) {    if (!url.userName().i
             key.contains(QStringLiteral("auth"));
     });
 }
+
+// Spill-to-disk file layout: <CacheLocation>/volumes/<radarId>/<safeVolumeId>.cwdv.
+// Volume ids come from S3 keys and timestamps, so anything outside alnum +
+// "-_." is flattened before touching the filesystem.
+QString spillFilePath(const QString& radarId, const QString& volumeId) {
+    QString safe;
+    safe.reserve(volumeId.size());
+    for (const auto ch : volumeId) {
+        safe.push_back(ch.isLetterOrNumber() || ch == QLatin1Char('-') || ch == QLatin1Char('_') ||
+                               ch == QLatin1Char('.')
+                           ? ch
+                           : QLatin1Char('_'));
+    }
+    if (safe.isEmpty()) safe = QStringLiteral("volume");
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
+           QStringLiteral("/volumes/") + radarId + QLatin1Char('/') + safe +
+           QStringLiteral(".cwdv");
+}
+
+// Spilled tail length beyond the RAM window: 8 volumes ≈ 130-250 MB on disk
+// worst case, bounded and LRU-dropped from the front.
+constexpr int kSpilledKeepVolumes = 8;
 
 // Chip dot colors mirror the offtrack sidebar mockup.
 QColor productChipColor(const ProductKind kind) {
@@ -660,6 +689,18 @@ void MainWindow::applyTheme(const AppTheme theme) {
     update();
 }
 
+void MainWindow::applyFontScale(const double scale) {
+    fontScale_ = std::clamp(scale, 0.8, 1.5);
+    setHudFontScale(fontScale_);
+    QFont appFont = QGuiApplication::font();
+    appFont.setPointSizeF(std::max(1.0, uiBasePointSize_ * fontScale_));
+    QGuiApplication::setFont(appFont);
+    for (auto* panel : maps_) {
+        if (panel != nullptr) panel->update();
+    }
+    update();
+}
+
 void MainWindow::buildUi() {
     setWindowTitle(QStringLiteral("CappedWeather - Level II Radar"));
 
@@ -667,6 +708,7 @@ void MainWindow::buildUi() {
     uiFont.setFamilies({QStringLiteral("IBM Plex Sans"), QStringLiteral("Segoe UI"),
                         QStringLiteral("Noto Sans"), QStringLiteral("DejaVu Sans")});
     QGuiApplication::setFont(uiFont);
+    uiBasePointSize_ = uiFont.pointSizeF() > 0.0 ? uiFont.pointSizeF() : 9.0;
     QFont monoFont = uiFont;
     monoFont.setFamilies({QStringLiteral("IBM Plex Mono"), QStringLiteral("Cascadia Mono"),
                           QStringLiteral("Consolas"), QStringLiteral("monospace")});
@@ -1620,6 +1662,12 @@ void MainWindow::buildUi() {
     timelineButton->setToolTip(QStringLiteral("Export loaded frames as GIF (cancellable, with progress)"));
     connect(timelineButton, &QToolButton::clicked, this, &MainWindow::exportTimelineAnimation);
     detailsRow->addWidget(timelineButton);
+    auto* mp4Button = new QToolButton(playbackBody);
+    mp4Button->setObjectName(QStringLiteral("timelineMp4Button"));
+    mp4Button->setText(QStringLiteral("Timeline MP4"));
+    mp4Button->setToolTip(QStringLiteral("Record the timeline as MP4 video (realtime window capture)"));
+    connect(mp4Button, &QToolButton::clicked, this, &MainWindow::exportTimelineMp4);
+    detailsRow->addWidget(mp4Button);
     playbackLayout->addLayout(detailsRow);
     auto* archiveRow = new QHBoxLayout();
     archiveRow->setContentsMargins(0, 0, 0, 0);
@@ -2168,7 +2216,16 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
                                  });
     // Evicted while deriving (history cap) or superseded: nothing to swap.
     if (it == session->history.end()) return;
-    it->chunk = std::move(derived);
+    if (it->chunk) {
+        it->chunk = std::move(derived);
+    } else if (!it->spilledPath.isEmpty()) {
+        // Frame spilled mid-derive: persist the derived superset over the
+        // base spill so a later scrub still gets ET/VIL. Best effort.
+        spillVolume(*derived, it->spilledPath.toStdString());
+        return;
+    } else {
+        return;
+    }
     if (radarId == selectedRadarId() &&
         session->frameIndex >= 0 &&
         session->frameIndex < static_cast<int>(session->history.size()) &&
@@ -2180,6 +2237,61 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
             if (panel->radarId() != radarId) continue;
             panel->setDecodedChunk(it->chunk, it->dataTime);
         }
+    }
+}
+
+std::shared_ptr<DecodedChunk> MainWindow::frameChunk(RadarSession& session,
+                                                      const std::size_t index) {
+    if (index >= session.history.size()) return nullptr;
+    auto& frame = session.history[index];
+    if (frame.chunk) return frame.chunk;
+    // Scrub hit on a spilled frame: fault back in synchronously (tens of
+    // ms for a volume-sized read) and re-enforce the budget so RAM stays
+    // bounded. Unreadable spill (version bump, disk error) reads as a
+    // missing frame; the path is cleared so we stop retrying it.
+    if (frame.spilledPath.isEmpty()) return nullptr;
+    auto loaded = loadSpilledVolume(frame.spilledPath.toStdString());
+    if (!loaded) {
+        QFile::remove(frame.spilledPath);
+        frame.spilledPath.clear();
+        return nullptr;
+    }
+    frame.chunk = std::move(loaded);
+    enforceSpillBudget(session, static_cast<int>(index));
+    return frame.chunk;
+}
+
+void MainWindow::enforceSpillBudget(RadarSession& session,
+                                    const int excludeIndex) {
+    const auto ramWindow = static_cast<std::size_t>(std::max(2, maximumHistoryFrames_));
+    // Oldest resident frames beyond the RAM window spill to disk instead of
+    // being dropped. A failed spill (disk full) keeps the frame resident
+    // and stops: growing RAM beats losing the volume.
+    for (;;) {
+        std::size_t resident = 0;
+        int oldestResident = -1;
+        for (std::size_t i = 0; i < session.history.size(); ++i) {
+            if (session.history[i].chunk) {
+                ++resident;
+                if (oldestResident < 0 && static_cast<int>(i) != excludeIndex)
+                    oldestResident = static_cast<int>(i);
+            }
+        }
+        if (resident <= ramWindow || oldestResident < 0) break;
+        auto& frame = session.history[static_cast<std::size_t>(oldestResident)];
+        const auto path = spillFilePath(session.radarId, frame.volumeId);
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        if (!spillVolume(*frame.chunk, path.toStdString())) break;
+        frame.chunk.reset();
+        frame.spilledPath = path;
+    }
+    // Total window: RAM frames plus the spilled tail. Anything older is
+    // deleted from disk and forgotten.
+    while (session.history.size() > ramWindow + static_cast<std::size_t>(kSpilledKeepVolumes)) {
+        auto& front = session.history.front();
+        if (!front.spilledPath.isEmpty()) QFile::remove(front.spilledPath);
+        session.history.erase(session.history.begin());
+        // frameIndex is recomputed from the selected volume id by the caller.
     }
 }
 
@@ -2213,11 +2325,9 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
         return left.dataTime == right.dataTime ? left.volumeId < right.volumeId
                                                : left.dataTime < right.dataTime;
     });
-    const auto maximumHistory = static_cast<std::size_t>(std::max(2, maximumHistoryFrames_));
-    if (session->history.size() > maximumHistory) {
-        session->history.erase(session->history.begin(), session->history.begin() +
-            static_cast<std::ptrdiff_t>(session->history.size() - maximumHistory));
-    }
+    // Oldest frames spill to disk instead of being dropped, so the timeline
+    // outgrows RAM without losing volumes.
+    enforceSpillBudget(*session);
     if (isCurrentVolume) session->pendingVolumeId.clear();
     for (auto* panel : maps_) if (panel->radarId() == radarId) panel->setLoading(false);
     if (followLatest) {
@@ -2238,12 +2348,15 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
         updatePlaybackControls();
         showFrame(session->frameIndex);
     } else if (!session->history.empty()) {
-        const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
-        for (auto* panel : maps_) if (panel->radarId() == radarId) {
-            panel->setDecodedChunk(frame.chunk, frame.dataTime);
-            panel->setVolumeQuality(std::max(0, frame.chunkCount - frame.failedChunks),
-                                    frame.chunkCount, frame.failedChunks,
-                                    frame.chunk->rejectedMessages, frame.chunk->rejectedBlocks);
+        const auto chunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
+        if (chunk) {
+            const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
+            for (auto* panel : maps_) if (panel->radarId() == radarId) {
+                panel->setDecodedChunk(chunk, frame.dataTime);
+                panel->setVolumeQuality(std::max(0, frame.chunkCount - frame.failedChunks),
+                                        frame.chunkCount, frame.failedChunks,
+                                        chunk->rejectedMessages, chunk->rejectedBlocks);
+            }
         }
     }
     if (!session->requestActive) {
@@ -2369,7 +2482,19 @@ void MainWindow::rebuildTiltCombo() {
         rebuildTiltGrid();
         return;
     }
-    const auto& currentVolume = *session->history.at(static_cast<std::size_t>(session->frameIndex)).chunk;
+    const auto currentChunk =
+        frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
+    if (!currentChunk) {
+        // Spilled frame whose disk copy is gone: same empty treatment as no
+        // frame at all rather than dereferencing null.
+        tiltCombo_->clear();
+        tiltCombo_->addItem(QStringLiteral("Waiting for decoded tilts"));
+        tiltCombo_->setEnabled(false);
+        map_->setElevationFilter(std::nullopt);
+        rebuildTiltGrid();
+        return;
+    }
+    const auto& currentVolume = *currentChunk;
     const auto product = map_->product();
     for (const auto& ray : currentVolume.rays) {
         if (!ray.has(product)) continue;
@@ -2444,11 +2569,15 @@ void MainWindow::showFrame(const int index) {
             }
         }
         panelSession->frameIndex = selected;
+        // Faults back from disk on spilled frames; a null chunk (unreadable
+        // spill) keeps the panel's current pixels instead of blanking it.
+        const auto panelChunk = frameChunk(*panelSession, static_cast<std::size_t>(selected));
+        if (!panelChunk) continue;
         const auto& panelFrame = panelSession->history.at(static_cast<std::size_t>(selected));
-        panel->setDecodedChunk(panelFrame.chunk, panelFrame.dataTime);
+        panel->setDecodedChunk(panelChunk, panelFrame.dataTime);
         panel->setVolumeQuality(std::max(0, panelFrame.chunkCount - panelFrame.failedChunks),
                                 panelFrame.chunkCount, panelFrame.failedChunks,
-                                panelFrame.chunk->rejectedMessages, panelFrame.chunk->rejectedBlocks);
+                                panelChunk->rejectedMessages, panelChunk->rejectedBlocks);
     }
     updateProductAvailability();
     rebuildTiltCombo();
@@ -2486,13 +2615,15 @@ void MainWindow::updateProductAvailability() {
     const auto session = activeSession();
     const auto hasFrame = session && session->frameIndex >= 0 &&
                           session->frameIndex < static_cast<int>(session->history.size());
+    const auto frameChunkForAvailability =
+        hasFrame ? frameChunk(*session, static_cast<std::size_t>(session->frameIndex)) : nullptr;
     int firstAvailable = -1;
     for (int row = 0; row < productCombo_->count(); ++row) {
         const auto product = static_cast<ProductKind>(productCombo_->itemData(row).toInt());
-        const auto available = !hasFrame || std::any_of(
-            session->history.at(static_cast<std::size_t>(session->frameIndex)).chunk->rays.cbegin(),
-            session->history.at(static_cast<std::size_t>(session->frameIndex)).chunk->rays.cend(),
-            [product](const DecodedRay& ray) { return ray.has(product); });
+        const auto available = !hasFrame || !frameChunkForAvailability ||
+                               std::any_of(frameChunkForAvailability->rays.cbegin(),
+                                           frameChunkForAvailability->rays.cend(),
+                                           [product](const DecodedRay& ray) { return ray.has(product); });
         if (auto* item = itemModel->item(row)) item->setEnabled(available);
         if (available && firstAvailable < 0) firstAvailable = row;
     }
@@ -2549,6 +2680,7 @@ void MainWindow::restoreSettings() {
     synchronizePanels_ = settings.value(QStringLiteral("panels/synchronizeNavigation"), true).toBool();
     theme_ = appThemeFromInt(settings.value(QStringLiteral("ui/theme"), 1).toInt());
     applyTheme(theme_);
+    applyFontScale(settings.value(QStringLiteral("ui/fontScale"), 1.0).toDouble());
     if (alertCenter_) {
         AlertConfig alertConfig = alertCenter_->config();
         alertConfig.enabled = settings.value(QStringLiteral("alerts/enabled"), alertConfig.enabled).toBool();
@@ -2709,6 +2841,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("panels/layout"), panelLayoutCombo_->currentIndex());
         settings.setValue(QStringLiteral("panels/synchronizeNavigation"), synchronizePanels_);
         settings.setValue(QStringLiteral("ui/theme"), static_cast<int>(theme_));
+        settings.setValue(QStringLiteral("ui/fontScale"), fontScale_);
     for (int panel = 0; panel < maps_.size(); ++panel) {
         settings.setValue(QStringLiteral("panels/product%1").arg(panel),
                           static_cast<int>(maps_.at(panel)->product()));
@@ -2751,13 +2884,32 @@ void MainWindow::showSettingsDialog() {
     auto* settingsBody = new QWidget(settingsScroll);
     auto* bodyLayout = new QVBoxLayout(settingsBody);
     bodyLayout->setContentsMargins(0, 0, 8, 0);
-    auto* form = new QFormLayout();
-    bodyLayout->addLayout(form);
+    // Grouped sections instead of one 23-row flat form: the flat list made
+    // related knobs (all six GLM rows, all seven network rows) blur together.
+    const auto makeSection = [&dialog, bodyLayout](const QString& title) {
+        auto* group = new QGroupBox(title, &dialog);
+        auto* sectionForm = new QFormLayout(group);
+        bodyLayout->addWidget(group);
+        return sectionForm;
+    };
+    auto* displayForm = makeSection(QStringLiteral("Display"));
+    auto* chaseForm = makeSection(QStringLiteral("Chase"));
+    auto* timelineForm = makeSection(QStringLiteral("Timeline"));
+    auto* networkForm = makeSection(QStringLiteral("Network"));
+    auto* glmForm = makeSection(QStringLiteral("Lightning (GLM)"));
+    auto* cacheForm = makeSection(QStringLiteral("Map cache"));
     auto* themeCombo = new QComboBox(&dialog);
     themeCombo->addItem(appThemeName(AppTheme::Classic), static_cast<int>(AppTheme::Classic));
     themeCombo->addItem(appThemeName(AppTheme::Prototype), static_cast<int>(AppTheme::Prototype));
     themeCombo->setCurrentIndex(themeCombo->findData(static_cast<int>(theme_)));
     themeCombo->setToolTip(QStringLiteral("Switch the application identity live. Squall is the redesign prototype."));
+    auto* fontScale = new QSpinBox(&dialog);
+    fontScale->setRange(80, 150);
+    fontScale->setSuffix(QStringLiteral(" %"));
+    fontScale->setSingleStep(5);
+    fontScale->setValue(static_cast<int>(std::round(fontScale_ * 100.0)));
+    fontScale->setToolTip(QStringLiteral(
+        "Scales map HUD text and UI type live, no restart. Theme-pinned chrome (dock titles, badges, tabs) stays fixed."));
     auto* chaseCheck = new QCheckBox(QStringLiteral("Select the nearest radar to the chase position"), &dialog);
     chaseCheck->setChecked(chaseMode_);
     auto* latitude = new QDoubleSpinBox(&dialog);
@@ -2848,11 +3000,13 @@ void MainWindow::showSettingsDialog() {
     diskCache->setRange(16, 1024);
     diskCache->setSuffix(QStringLiteral(" MB/panel"));
     diskCache->setValue(QSettings().value(QStringLiteral("cache/diskMbPerPanel"), 64).toInt());
-    form->addRow(QStringLiteral("Theme"), themeCombo);
-    form->addRow(QStringLiteral("Chase mode"), chaseCheck);
-    form->addRow(QStringLiteral("Chase latitude"), latitude);
-    form->addRow(QStringLiteral("Chase longitude"), longitude);
-    form->addRow(QString(), chaseRow);
+    displayForm->addRow(QStringLiteral("Theme"), themeCombo);
+    displayForm->addRow(QStringLiteral("Interface text scale"), fontScale);
+    displayForm->addRow(QStringLiteral("Multi-panel"), synchronize);
+    chaseForm->addRow(QStringLiteral("Chase mode"), chaseCheck);
+    chaseForm->addRow(QStringLiteral("Chase latitude"), latitude);
+    chaseForm->addRow(QStringLiteral("Chase longitude"), longitude);
+    chaseForm->addRow(QString(), chaseRow);
     connect(detectButton, &QPushButton::clicked, &dialog, [&dialog, latitude, longitude, detectButton]() {
         detectButton->setEnabled(false);
         detectButton->setText(QStringLiteral("Detecting…"));
@@ -2898,25 +3052,23 @@ void MainWindow::showSettingsDialog() {
             nam->deleteLater();
         });
     });
-    form->addRow(QStringLiteral("Frames kept in memory"), frames);
-    form->addRow(QStringLiteral("Volumes loaded for playback"), volumes);
-    form->addRow(QStringLiteral("Network contact"), contact);
-    form->addRow(QStringLiteral("Parallel radar chunks"), parallelChunks);
-    form->addRow(QStringLiteral("Request timeout"), timeout);
-    form->addRow(QStringLiteral("Chunk retries"), retries);
-    form->addRow(QStringLiteral("Initial retry backoff"), backoff);
-    form->addRow(QStringLiteral("Radar refresh"), radarRefresh);
-    form->addRow(QStringLiteral("Warning/report refresh"), overlayRefresh);
-    form->addRow(QStringLiteral("GLM refresh"), lightningRefresh);
-    form->addRow(QStringLiteral("GLM initial history"), lightningBackfill);
-    form->addRow(QStringLiteral("GLM cell size"), lightningCell);
-    form->addRow(QStringLiteral("GLM minimum rate"), lightningRate);
-    form->addRow(QStringLiteral("GLM jump threshold"), lightningSigma);
-    form->addRow(QStringLiteral("GLM sigma window"), lightningWindow);
-    form->addRow(QStringLiteral("Map memory cache (restart)"), memoryCache);
-    form->addRow(QStringLiteral("Map disk cache (restart)"), diskCache);
-    form->addRow(QStringLiteral("Multi-panel"), synchronize);
-    layout->addLayout(form);
+    timelineForm->addRow(QStringLiteral("Frames kept in memory"), frames);
+    timelineForm->addRow(QStringLiteral("Volumes loaded for playback"), volumes);
+    networkForm->addRow(QStringLiteral("Network contact"), contact);
+    networkForm->addRow(QStringLiteral("Parallel radar chunks"), parallelChunks);
+    networkForm->addRow(QStringLiteral("Request timeout"), timeout);
+    networkForm->addRow(QStringLiteral("Chunk retries"), retries);
+    networkForm->addRow(QStringLiteral("Initial retry backoff"), backoff);
+    networkForm->addRow(QStringLiteral("Radar refresh"), radarRefresh);
+    networkForm->addRow(QStringLiteral("Warning/report refresh"), overlayRefresh);
+    glmForm->addRow(QStringLiteral("GLM refresh"), lightningRefresh);
+    glmForm->addRow(QStringLiteral("GLM initial history"), lightningBackfill);
+    glmForm->addRow(QStringLiteral("GLM cell size"), lightningCell);
+    glmForm->addRow(QStringLiteral("GLM minimum rate"), lightningRate);
+    glmForm->addRow(QStringLiteral("GLM jump threshold"), lightningSigma);
+    glmForm->addRow(QStringLiteral("GLM sigma window"), lightningWindow);
+    cacheForm->addRow(QStringLiteral("Map memory cache (restart)"), memoryCache);
+    cacheForm->addRow(QStringLiteral("Map disk cache (restart)"), diskCache);
 
     // ---- Alerts section --------------------------------------------------
     auto* alertsGroup = new QGroupBox(QStringLiteral("Alerts"), &dialog);
@@ -2963,7 +3115,6 @@ void MainWindow::showSettingsDialog() {
 
     alertsLayout->addRow(alertsEnabled);
     alertsLayout->addRow(alertsEventFilter);
-    alertsLayout->addRow(alertsEventFilter);
     alertsLayout->addRow(QStringLiteral("Event filter list"), alertsEventList);
     alertsLayout->addRow(QStringLiteral("Lightning jump threshold"), alertsSigma);
     alertsLayout->addRow(QStringLiteral("Suppress repeats for"), alertsSuppression);
@@ -3001,6 +3152,7 @@ void MainWindow::showSettingsDialog() {
 
     chaseMode_ = chaseCheck->isChecked();
     applyTheme(appThemeFromInt(themeCombo->currentData().toInt()));
+    applyFontScale(fontScale->value() / 100.0);
     chaseLatitude_ = latitude->value();
     chaseLongitude_ = longitude->value();
     maximumHistoryFrames_ = frames->value();
@@ -3026,10 +3178,7 @@ void MainWindow::showSettingsDialog() {
     overlayRefreshTimer_->setInterval(overlayRefresh->value() * 1000);
     glmSource_->configure(glmConfigFromSettings());
     glmSource_->refresh();
-    for (const auto& session : radarSessions_) {
-        while (session->history.size() > static_cast<std::size_t>(maximumHistoryFrames_))
-            session->history.erase(session->history.begin());
-    }
+    for (const auto& session : radarSessions_) enforceSpillBudget(*session);
     saveSettings();
     if (chaseMode_) selectNearestChaseRadar();
     if (alertCenter_) {
@@ -3198,6 +3347,8 @@ void MainWindow::setupMenus() {
     connect(snapshotAction, &QAction::triggered, this, &MainWindow::exportSnapshot);
     auto* gifAction = fileMenu->addAction(QStringLiteral("Export timeline GIF…"));
     connect(gifAction, &QAction::triggered, this, &MainWindow::exportTimelineAnimation);
+    auto* mp4Action = fileMenu->addAction(QStringLiteral("Record timeline MP4…"));
+    connect(mp4Action, &QAction::triggered, this, &MainWindow::exportTimelineMp4);
     fileMenu->addSeparator();
     auto* settingsAction = fileMenu->addAction(QStringLiteral("Settings…"));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettingsDialog);
@@ -3293,6 +3444,8 @@ void MainWindow::showCommandPalette() {
              [this] { exportSnapshot(); });
     addEntry(QStringLiteral("Export: timeline GIF"), QStringLiteral("Cancellable, with progress"),
              [this] { exportTimelineAnimation(); });
+    addEntry(QStringLiteral("Export: timeline MP4"), QStringLiteral("Realtime recording, sharing-friendly"),
+             [this] { exportTimelineMp4(); });
     addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
              [this] { showSettingsDialog(); });
     palette->setEntries(std::move(entries));
@@ -3641,9 +3794,11 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
     crossSectionEnd_ = end;
     crossSectionRadarId_ = selectedRadarId_;
     const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
+    const auto chunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
+    if (!chunk) return;
     if (crossSectionDialog_ && crossSectionWidget_) {
         crossSectionDialog_->setWindowTitle(QStringLiteral("%1 Cross-section — live").arg(selectedRadarId_));
-        crossSectionWidget_->setData(frame.chunk, map_->product(), map_->palette(),
+        crossSectionWidget_->setData(chunk, map_->product(), map_->palette(),
                                      map_->customPalette(), map_->velocityProcessing());
         crossSectionDialog_->show();
         crossSectionDialog_->raise();
@@ -3665,7 +3820,7 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
     note->setObjectName(QStringLiteral("groupCaption"));
     layout->addWidget(note);
     auto* crossSection = new CrossSectionWidget(
-        frame.chunk, {*site.latitude, *site.longitude}, site.antennaElevationMeters,
+        chunk, {*site.latitude, *site.longitude}, site.antennaElevationMeters,
         start, end, map_->product(), map_->palette(), map_->customPalette(),
         map_->velocityProcessing(), dialog);
     layout->addWidget(crossSection, 1);
@@ -3698,7 +3853,9 @@ void MainWindow::refreshCrossSection() {
     const auto& frame = session->history.at(static_cast<std::size_t>(session->frameIndex));
     // Only live-update when the transect product is still valid.
     if (isDerivedProduct(map_->product())) return;
-    crossSectionWidget_->setData(frame.chunk, map_->product(), map_->palette(),
+    const auto chunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
+    if (!chunk) return;
+    crossSectionWidget_->setData(chunk, map_->product(), map_->palette(),
                                  map_->customPalette(), map_->velocityProcessing());
     crossSectionDialog_->setWindowTitle(
         QStringLiteral("%1 Cross-section — %2 (live)")
@@ -3793,6 +3950,74 @@ void MainWindow::exportTimelineAnimation() {
         return;
     }
     statusBar()->showMessage(QStringLiteral("Animated timeline exported to %1").arg(path), 5000);
+}
+
+void MainWindow::exportTimelineMp4() {
+#if defined(CAPPEDWEATHER_HAS_MULTIMEDIA)
+    const auto session = activeSession();
+    if (!session || session->history.empty()) return;
+    auto* windowHandle = window()->windowHandle();
+    if (!windowHandle) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("The window is not ready for capture yet."));
+        return;
+    }
+    const auto defaultName = QStringLiteral("%1-%2-timeline.mp4")
+                                 .arg(selectedRadarId_, QString::fromUtf8(productDescriptor(map_->product()).shortName.data()));
+    const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Record timeline video"),
+                                                   defaultName, QStringLiteral("MP4 video (*.mp4)"));
+    if (path.isEmpty()) return;
+    // Realtime window capture through the platform backend (MediaFoundation
+    // on Windows): each frame holds on screen for the playback interval
+    // while the recorder runs. Frame-exact output stays the GIF path's job —
+    // this is the sharing-friendly recording. WebM/VP9 is not guaranteed by
+    // any platform backend, so MP4/H.264 is the portable target.
+    QWindowCapture capture;
+    capture.setWindow(windowHandle);
+    QMediaCaptureSession captureSession;
+    captureSession.setWindowCapture(&capture);
+    QMediaRecorder recorder;
+    recorder.setMediaFormat(QMediaFormat(QMediaFormat::MPEG4));
+    recorder.setQuality(QMediaRecorder::HighQuality);
+    recorder.setOutputLocation(QUrl::fromLocalFile(path));
+    captureSession.setRecorder(&recorder);
+    const auto previousIndex = session->frameIndex;
+    const auto total = static_cast<int>(session->history.size());
+    const auto holdMs = std::max(400, speedCombo_->currentData().toInt());
+    QProgressDialog progress(QStringLiteral("Recording %1 frames…").arg(total), QStringLiteral("Cancel"),
+                             0, total, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(250);
+    progress.setValue(0);
+    capture.start();
+    recorder.record();
+    for (int index = 0; index < total; ++index) {
+        if (progress.wasCanceled() ||
+            recorder.recorderState() == QMediaRecorder::StoppedState) {
+            break;
+        }
+        showFrame(index);
+        progress.setValue(index + 1);
+        QEventLoop wait;
+        QTimer::singleShot(holdMs, &wait, &QEventLoop::quit);
+        wait.exec(QEventLoop::ExcludeUserInputEvents);
+    }
+    recorder.stop();
+    capture.stop();
+    progress.setValue(total);
+    showFrame(previousIndex);
+    if (recorder.error() != QMediaRecorder::NoError) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Recorder error: %1").arg(recorder.errorString()));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Timeline video recorded to %1").arg(path), 5000);
+#else
+    QMessageBox::information(
+        this, QStringLiteral("Timeline MP4"),
+        QStringLiteral("Video export needs a CappedWeather build with Qt Multimedia. "
+                       "Timeline GIF works in every build."));
+#endif
 }
 
 void MainWindow::openLocalPlacefile() {

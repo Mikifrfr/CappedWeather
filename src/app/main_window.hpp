@@ -77,6 +77,7 @@ public:
     // stylesheet, panel spacing, and canvas accent colors live.
     void applyTheme(AppTheme theme);
     AppTheme theme() const { return theme_; }
+    void applyFontScale(double scale);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -165,6 +166,7 @@ private:
     void importCustomPalette();
     void exportSnapshot();
     void exportTimelineAnimation();
+    void exportTimelineMp4();
     void openLocalPlacefile();
     void addPlacefileUrl();
     void clearPlacefiles();
@@ -177,6 +179,13 @@ private:
     std::shared_ptr<RadarSession> activeSession() const;
     int panelIndex(const RadarMapCanvas* map) const;
     QString selectedRadarId() const;
+    // Spilled-frame access: returns the resident chunk, faulting back from
+    // disk on a scrub hit (and re-enforcing the RAM budget afterwards).
+    // Null only when the frame is missing or its spill is unreadable.
+    std::shared_ptr<DecodedChunk> frameChunk(RadarSession& session, std::size_t index);
+    // Keeps the newest maximumHistoryFrames_ volumes resident, spills older
+    // ones to disk (up to kSpilledKeepVolumes), drops the rest entirely.
+    void enforceSpillBudget(RadarSession& session, int excludeIndex = -1);
 
     struct RadarFrame {
         QString volumeId;
@@ -184,6 +193,10 @@ private:
         QDateTime dataTime;
         int chunkCount = 0;
         int failedChunks = 0;
+        // Spill-to-disk: empty chunk + non-empty path means the frame lives
+        // on disk and faults back in when scrubbed to. Invariant: exactly
+        // one of chunk / spilledPath is set for a live frame.
+        QString spilledPath;
     };
 
     struct RadarSession {
@@ -348,6 +361,8 @@ private:
     bool synchronizePanels_ = true;
     bool synchronizingMapView_ = false;
     AppTheme theme_ = AppTheme::Prototype;
+    double fontScale_ = 1.0;
+    double uiBasePointSize_ = 9.0;
     // Modeless cross-section: stays usable beside live radar. Updated on
     // showFrame() via refreshCrossSection().
     QPointer<QDialog> crossSectionDialog_;
