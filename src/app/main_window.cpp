@@ -3120,7 +3120,17 @@ void MainWindow::showSettingsDialog() {
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
-    dialog.resize(560, std::min(680, dialog.height() > 0 ? dialog.height() : 680));
+    // The scroll-area body reports a tiny sizeHint by design (it scrolls, so
+    // it never asks to fit its content). Sizing from dialog.height() therefore
+    // collapses to a postage stamp. Size from the screen instead, same pattern
+    // as the main-window default, with a minimum so OK/Cancel stay reachable.
+    if (const auto* screen = QGuiApplication::primaryScreen()) {
+        const auto available = screen->availableGeometry();
+        dialog.resize(560, std::clamp(available.height() - 120, 480, 680));
+    } else {
+        dialog.resize(560, 680);
+    }
+    dialog.setMinimumSize(480, 400);
     if (dialog.exec() != QDialog::Accepted) return;
 
     chaseMode_ = chaseCheck->isChecked();
