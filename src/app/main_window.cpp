@@ -293,6 +293,46 @@ QString productChipTooltip(const ProductKind kind) {
     return wrapTooltipText(head + QStringLiteral("\n") + productExplainer(kind));
 }
 
+// Reflectivity ramp swatch for the palette selector. Plain QWidget (no
+// signals), so no Q_OBJECT/moc is needed: MainWindow drives it via
+// setPalette() on combo change, custom import, and settings restore.
+class PalettePreview : public QWidget {
+public:
+    explicit PalettePreview(QWidget* parent = nullptr)
+        : QWidget(parent) {
+        setFixedHeight(14);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setToolTip(QStringLiteral("Reflectivity ramp for the selected palette"));
+        setAccessibleName(QStringLiteral("Palette preview"));
+    }
+    void setPalette(const RadarMapCanvas::PaletteKind kind,
+                    QVector<RadarMapCanvas::PaletteStop> stops) {
+        kind_ = kind;
+        stops_ = std::move(stops);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        const auto& descriptor = productDescriptor(ProductKind::Reflectivity);
+        const int w = width();
+        for (int x = 0; x < w; ++x) {
+            const double t = w <= 1 ? 0.0 : static_cast<double>(x) / (w - 1);
+            const double value = descriptor.minimum + t * (descriptor.maximum - descriptor.minimum);
+            painter.setPen(RadarMapCanvas::colorForValue(ProductKind::Reflectivity, value, kind_,
+                                                         100, stops_));
+            painter.drawLine(x, 0, x, height());
+        }
+        painter.setPen(QColor(0, 0, 0, 90));
+        painter.drawRect(0, 0, w - 1, height() - 1);
+    }
+
+private:
+    RadarMapCanvas::PaletteKind kind_ = RadarMapCanvas::PaletteKind::Capped;
+    QVector<RadarMapCanvas::PaletteStop> stops_;
+};
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -1389,6 +1429,10 @@ void MainWindow::buildUi() {
     connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
     paletteRow->addWidget(paletteButton);
     displayGroup->addLayout(paletteRow);
+    palettePreview_ = new PalettePreview(controlBody);
+    displayGroup->addWidget(palettePreview_);
+    connect(paletteCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this] { refreshPalettePreview(); });
     belowThresholdCheck_ = new QCheckBox(QStringLiteral("Below threshold"), controlBody);
     belowThresholdCheck_->setObjectName(QStringLiteral("belowThresholdCheck"));
     displayGroup->addWidget(belowThresholdCheck_);
@@ -2821,6 +2865,7 @@ void MainWindow::restoreSettings() {
                                               0, productCombo_->count() - 1));
     paletteCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("view/palette"), 1).toInt(),
                                               0, paletteCombo_->count() - 1));
+    refreshPalettePreview();
     radarOpacitySlider_->setValue(std::clamp(settings.value(QStringLiteral("view/radarOpacity"), 80).toInt(),
                                              radarOpacitySlider_->minimum(), radarOpacitySlider_->maximum()));
     warningOpacitySlider_->setValue(std::clamp(settings.value(QStringLiteral("view/warningOpacity"), 90).toInt(),
@@ -3126,6 +3171,8 @@ void MainWindow::showSettingsDialog() {
     });
     timelineForm->addRow(QStringLiteral("Frames kept in memory"), frames);
     timelineForm->addRow(QStringLiteral("Volumes loaded for playback"), volumes);
+    frames->setToolTip(QStringLiteral("Applies immediately; excess frames spill to disk."));
+    volumes->setToolTip(QStringLiteral("Applies immediately to the next history load."));
     networkForm->addRow(QStringLiteral("Network contact"), contact);
     networkForm->addRow(QStringLiteral("Parallel radar chunks"), parallelChunks);
     networkForm->addRow(QStringLiteral("Request timeout"), timeout);
@@ -3133,6 +3180,13 @@ void MainWindow::showSettingsDialog() {
     networkForm->addRow(QStringLiteral("Initial retry backoff"), backoff);
     networkForm->addRow(QStringLiteral("Radar refresh"), radarRefresh);
     networkForm->addRow(QStringLiteral("Warning/report refresh"), overlayRefresh);
+    contact->setToolTip(QStringLiteral("Applies immediately to new requests."));
+    parallelChunks->setToolTip(QStringLiteral("Applies immediately to new requests."));
+    timeout->setToolTip(QStringLiteral("Applies immediately to new requests."));
+    retries->setToolTip(QStringLiteral("Applies immediately to new requests."));
+    backoff->setToolTip(QStringLiteral("Applies immediately to new requests."));
+    radarRefresh->setToolTip(QStringLiteral("Applies immediately; restarts the refresh timer."));
+    overlayRefresh->setToolTip(QStringLiteral("Applies immediately; restarts the refresh timer."));
     glmForm->addRow(QStringLiteral("GLM refresh"), lightningRefresh);
     glmForm->addRow(QStringLiteral("GLM initial history"), lightningBackfill);
     glmForm->addRow(QStringLiteral("GLM cell size"), lightningCell);
@@ -3141,6 +3195,8 @@ void MainWindow::showSettingsDialog() {
     glmForm->addRow(QStringLiteral("GLM sigma window"), lightningWindow);
     cacheForm->addRow(QStringLiteral("Map memory cache (restart)"), memoryCache);
     cacheForm->addRow(QStringLiteral("Map disk cache (restart)"), diskCache);
+    memoryCache->setToolTip(QStringLiteral("Requires restart: the map tile store reads this once at first use."));
+    diskCache->setToolTip(QStringLiteral("Requires restart: the map tile store reads this once at first use."));
 
     // ---- Alerts section --------------------------------------------------
     auto* alertsGroup = new QGroupBox(QStringLiteral("Alerts"), &dialog);
@@ -3989,7 +4045,17 @@ void MainWindow::importCustomPalette() {
         panel->setPalette(RadarMapCanvas::PaletteKind::Custom);
     }
     paletteCombo_->setCurrentIndex(static_cast<int>(RadarMapCanvas::PaletteKind::Custom));
+    refreshPalettePreview();
     statusBar()->showMessage(QStringLiteral("Imported %1 palette stops from %2").arg(stops.size()).arg(path), 5000);
+}
+
+void MainWindow::refreshPalettePreview() {
+    // PalettePreview lives in the anonymous namespace above; the member is
+    // stored as QWidget so the header stays free of the paint details.
+    if (auto* preview = static_cast<PalettePreview*>(palettePreview_)) {
+        preview->setPalette(static_cast<RadarMapCanvas::PaletteKind>(paletteCombo_->currentIndex()),
+                            map_->customPalette());
+    }
 }
 
 void MainWindow::exportSnapshot() {

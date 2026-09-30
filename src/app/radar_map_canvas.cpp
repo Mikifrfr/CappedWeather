@@ -23,6 +23,9 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QWheelEvent>
+#include <QGestureEvent>
+#include <QPinchGesture>
+#include <QNativeGestureEvent>
 #include <QTimer>
 #include <QThreadPool>
 #include <QToolTip>
@@ -493,6 +496,10 @@ RadarMapCanvas::RadarMapCanvas(QWidget* parent)
     setMinimumSize(300, 220);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    // Touchscreens pan via synthesized mouse events already; pinch needs an
+    // explicit opt-in or Qt never delivers gesture events to this widget.
+    setAttribute(Qt::WA_AcceptTouchEvents);
+    grabGesture(Qt::PinchGesture);
     setAccessibleName(QStringLiteral("Radar map panel"));
     setAccessibleDescription(
         QStringLiteral("Live Level II radar. Arrow keys step frames, plus and minus zoom, "
@@ -3680,6 +3687,66 @@ void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
     QWidget::mouseReleaseEvent(event);
 }
 
+bool RadarMapCanvas::event(QEvent* event) {
+    if (event->type() == QEvent::Gesture) {
+        if (handleGestureEvent(static_cast<QGestureEvent*>(event))) return true;
+    } else if (event->type() == QEvent::NativeGesture) {
+        if (handleNativeGestureEvent(static_cast<QNativeGestureEvent*>(event))) return true;
+    }
+    return QWidget::event(event);
+}
+
+bool RadarMapCanvas::handleGestureEvent(QGestureEvent* gesture) {
+    auto* pinch = static_cast<QPinchGesture*>(gesture->gesture(Qt::PinchGesture));
+    if (pinch == nullptr) return false;
+    // Touchscreen pinch: accumulate the multiplicative scale and step the
+    // integer zoom each 1.25x around the pinch center, reusing the
+    // cursor-anchored path (and its view-history push) from the wheel.
+    switch (pinch->state()) {
+        case Qt::GestureStarted:
+            pinchBaseZoom_ = zoom_;
+            pinchAccum_ = 1.0;
+            break;
+        case Qt::GestureUpdated:
+            pinchAccum_ *= pinch->scaleFactor();
+            if (pinchAccum_ >= 1.25 || pinchAccum_ <= 0.8) {
+                const int steps = pinchAccum_ >= 1.0
+                    ? static_cast<int>(std::floor(std::log(pinchAccum_) / std::log(1.25)))
+                    : -static_cast<int>(std::floor(std::log(1.0 / pinchAccum_) / std::log(1.25)));
+                pinchBaseZoom_ = std::clamp(pinchBaseZoom_ + steps, kMinZoom, kMaxZoom);
+                pinchAccum_ = 1.0;
+                setZoomAt(pinchBaseZoom_, pinch->centerPoint());
+                updateProbe(pinch->centerPoint());
+            }
+            break;
+        case Qt::GestureFinished:
+        case Qt::GestureCanceled:
+            pinchAccum_ = 1.0;
+            break;
+        default:
+            break;
+    }
+    gesture->accept(pinch);
+    return true;
+}
+
+bool RadarMapCanvas::handleNativeGestureEvent(QNativeGestureEvent* gesture) {
+    // Precision-trackpad pinch arrives as a native Zoom gesture (scale in
+    // value()), not as wheel ticks. Same 1.25x-per-step accumulation.
+    if (gesture->gestureType() != Qt::ZoomNativeGesture || gesture->value() <= 0.0) return false;
+    pinchAccum_ *= static_cast<double>(gesture->value());
+    if (pinchAccum_ >= 1.25 || pinchAccum_ <= 0.8) {
+        const int steps = pinchAccum_ >= 1.0
+            ? static_cast<int>(std::floor(std::log(pinchAccum_) / std::log(1.25)))
+            : -static_cast<int>(std::floor(std::log(1.0 / pinchAccum_) / std::log(1.25)));
+        setZoomAt(zoom_ + steps, gesture->position());
+        updateProbe(gesture->position());
+        pinchAccum_ = 1.0;
+    }
+    gesture->accept();
+    return true;
+}
+
 void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
     if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position()) &&
         pinnedInfoContentHeight_ > pinnedInfoBodyRect_.height()) {
@@ -3698,6 +3765,21 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         pinnedInfoScrollTarget_ = std::clamp(
             pinnedInfoScrollTarget_ - scrollDelta, 0.0, maximumScroll);
         pinnedInfoScrollTimer_->start();
+        event->accept();
+        return;
+    }
+    // Dominant-horizontal trackpad scroll pans instead of zooming: vertical
+    // stays on the zoom path below, so existing wheel behavior is untouched.
+    const double panX = event->pixelDelta().x() != 0
+        ? static_cast<double>(event->pixelDelta().x())
+        : static_cast<double>(event->angleDelta().x()) / 8.0;
+    const double panY = event->pixelDelta().y() != 0
+        ? static_cast<double>(event->pixelDelta().y())
+        : static_cast<double>(event->angleDelta().y()) / 8.0;
+    if (panX != 0.0 && std::abs(panX) >= std::abs(panY)) {
+        // Same sign convention as mouse drag (panBy takes last - pos), so a
+        // swipe moves the map with the fingers like a drag does.
+        panBy(QPointF(-panX, 0.0));
         event->accept();
         return;
     }

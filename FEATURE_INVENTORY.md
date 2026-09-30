@@ -115,6 +115,7 @@ In the Navigation section (lines 648–687):
 - **Recenter** (`recenterSelected()`): centers on selected radar (keyboard shortcut: R).
 - **+ / −** zoom buttons (keyboard shortcuts: +/-).
 - Keyboard shortcuts also: `Space` (play/pause), `Left`/`Right` (prev/next frame), `PageUp`/`PageDown` (tilt), `1`–`8` (six native products, ET18, VIL).
+- Touch / trackpad: touchscreen pinch (`QPinchGesture`) and precision-trackpad pinch (`QNativeGestureEvent`) step the integer zoom 1.25× per step through cursor-anchored `setZoomAt()`; dominant-horizontal scroll pans via `panBy()`. Single-finger drag pans via synthesized mouse events.
 
 ### 3.5 Zoom-Aware Station Decluttering
 `paintEvent()` in `RadarMapCanvas` (line 2145): at zoom ≤ 4, only the selected radar shows as a labeled marker; others are small dots. At higher zooms, all stations in view get labels. TDWR stations get a purple color (`#BC69DF`).
@@ -291,6 +292,7 @@ Saved in `MainWindow::saveSettings()`:
 - **Operational** (index 1): native product-specific operational palettes.
 - **ColorSafe** (index 2): color-blind-friendly palette.
 - **Custom** (index 3): user-imported palette with discrete `native_value,#RRGGBB` stops.
+- A live Reflectivity ramp swatch (`PalettePreview`) sits under the selector, sampled per-pixel through `colorForValue()` at full opacity; it refreshes on selector change, custom import, and settings restore.
 
 ### 7.4 Radar Opacity
 `radarOpacitySlider_`: 20–100% (default 80%), applied to all panels via `setRadarOpacity()`.

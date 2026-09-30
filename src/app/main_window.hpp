@@ -165,6 +165,7 @@ private:
     void setupMenus();
     void showCommandPalette();
     void importCustomPalette();
+    void refreshPalettePreview();
     void exportSnapshot();
     void exportTimelineAnimation();
     void exportTimelineMp4();
@@ -219,6 +220,7 @@ private:
     QComboBox* stationCombo_ = nullptr;
     QComboBox* warningFilterCombo_ = nullptr;
     QComboBox* paletteCombo_ = nullptr;
+    QWidget* palettePreview_ = nullptr;
     QComboBox* panelLayoutCombo_ = nullptr;
     QComboBox* presetsCombo_ = nullptr;
     QToolButton* savePresetButton_ = nullptr;

@@ -30,6 +30,8 @@ class QMouseEvent;
 class QKeyEvent;
 class QEnterEvent;
 class QEvent;
+class QGestureEvent;
+class QNativeGestureEvent;
 class QPaintEvent;
 class QPainter;
 class QShowEvent;
@@ -226,6 +228,7 @@ signals:
     void probeHidden();
 
 protected:
+    bool event(QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -301,6 +304,8 @@ private:
     QString tileKey(int x, int y) const;
     void requestVisibleTiles();
     void panBy(const QPointF& delta);
+    bool handleGestureEvent(QGestureEvent* gesture);
+    bool handleNativeGestureEvent(QNativeGestureEvent* gesture);
     QString radarAt(const QPointF& point) const;
     OverlayHit overlayAt(const QPointF& point) const;
     void setZoomAt(int zoom, const QPointF& cursor);
@@ -410,6 +415,11 @@ private:
     QPoint lastMousePosition_;
     bool dragging_ = false;
     bool dragged_ = false;
+    // Touch / trackpad state. Pinch accumulates scale multiplicatively and
+    // steps the integer zoom each 1.25x so trackpads and touchscreens share
+    // the same cursor-anchored path as the wheel.
+    int pinchBaseZoom_ = 0;
+    double pinchAccum_ = 1.0;
     bool loading_ = false;
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;
