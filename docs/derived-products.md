@@ -23,8 +23,8 @@ where `Z = 10^(dBZ/10)` and `h` is height in metres. For each adjacent valid pai
 - At least two distinct reflectivity elevation angles are required. Repeated supplemental scans at effectively the same angle are deduplicated so they cannot inflate VIL.
 - The lowest reflectivity sweep supplies the output azimuth/range grid. Higher sweeps are sampled at the same horizontal ground range using their own gate spacing and first-gate metadata.
 - Missing, below-threshold, range-folded, out-of-range, and badly separated azimuth samples are skipped. VIL never bridges a missing intermediate tilt; that layer is omitted rather than inventing liquid water across an unconstrained gap.
-- Products are generated when a complete or recovered volume finishes assembling. They update on each newly published volume; they are not incrementally repainted from an incomplete sweep in this first slice.
-- Partial volumes can produce holes or underestimated VIL where upper tilts are unavailable. Echo Tops without an adjacent weaker sample are retained as scan-limited lower bounds. The existing volume-quality status remains visible alongside the product.
+- Products are generated when a complete or recovered volume finishes assembling. They update on each newly published volume. Progressive partial-ray snapshots (500 rays, then every 4000) paint base echo only — ET/VIL are never derived from partials.
+- Partial volumes can produce holes or underestimated VIL where upper tilts are unavailable. Echo Tops without an adjacent weaker sample are retained as scan-limited lower bounds. The existing volume-quality status remains visible alongside the product. Note the echo-seam fix is rendering-only (same-color 1 px gate outlines + neighbor-spacing azimuth tiling): it closes 1 px background corduroy but never fills true data holes.
 
 ## Architecture
 

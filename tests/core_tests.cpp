@@ -10,6 +10,7 @@
 #include "core/glm_l2_reader.hpp"
 #include "core/odim_reader.hpp"
 #include "core/radar_lightning_fusion.hpp"
+#include "core/circulation_detector.hpp"
 #include "core/storm_tracker.hpp"
 #include "core/volume_spill.hpp"
 #include "core/derived_products.hpp"
@@ -899,6 +900,181 @@ void testStormTrackerIntensityGate() {
     assert(tracks.front().fixes.size() == 2);
 }
 
+// --- Circulation detector (TVS/meso) synthetic-volume tests ---
+// Geometry: radar KTLX-ish (35.333,-97.278,370m); two rays per tilt at
+// 90/91 deg (1 deg sep); firstGate 10000m, spacing 250m, 200 gates so
+// gates 150-160 sit at ~47-50 km slant where meso/TVS thresholds and
+// 0.5/4.0-deg tilt depth (~3.6 km) both pass. Detection consumes the
+// dealiased float grid directly; encoded velocity fields only need to
+// exist so ray.has(Velocity) is true.
+
+DecodedRay syntheticCoupletRay(const float azimuth, const std::uint8_t elevationNumber,
+                               const float elevationDegrees, const double reflectivityDbz) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    constexpr std::size_t gates = 200;
+    const auto reflIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto velIndex = static_cast<std::size_t>(ProductKind::Velocity);
+    const auto reflEncoded =
+        static_cast<std::uint16_t>(std::lround(reflectivityDbz * 2.0 + 66.0));
+    ray.fields.at(reflIndex).assign(gates, reflEncoded);
+    ray.firstGateByProduct.at(reflIndex) = 10000;
+    ray.gateSpacingByProduct.at(reflIndex) = 250;
+    ray.scaleByProduct.at(reflIndex) = 2.0F;
+    ray.offsetByProduct.at(reflIndex) = 66.0F;
+    ray.fields.at(velIndex).assign(gates, 129); // placeholder; grid carries truth
+    ray.firstGateByProduct.at(velIndex) = 10000;
+    ray.gateSpacingByProduct.at(velIndex) = 250;
+    ray.scaleByProduct.at(velIndex) = 2.0F;
+    ray.offsetByProduct.at(velIndex) = 129.0F;
+    return ray;
+}
+
+std::vector<std::vector<float>> coupletGrid(const DecodedChunk& chunk, const float neg,
+                                            const float pos, const std::size_t firstGate,
+                                            const std::size_t lastGate) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::vector<std::vector<float>> grid(chunk.rays.size());
+    for (std::size_t r = 0; r < chunk.rays.size(); ++r) {
+        grid[r].assign(chunk.rays[r].fields.at(static_cast<std::size_t>(ProductKind::Velocity)).size(),
+                       nan);
+    }
+    // Even ray index = negative side, odd = positive side (pairs at 90/91).
+    for (std::size_t r = 0; r < chunk.rays.size(); ++r) {
+        const float value = (r % 2 == 0) ? neg : pos;
+        for (std::size_t g = firstGate; g <= lastGate && g < grid[r].size(); ++g) {
+            grid[r][g] = value;
+        }
+    }
+    return grid;
+}
+
+DecodedChunk twoTiltCoupletChunk(const double reflDbz, const float lowElev = 0.5F,
+                                 const float highElev = 4.0F, const float azA = 90.0F,
+                                 const float azB = 91.0F) {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    // Filler ray at 200 deg breaks the wraparound pair: with only two rays
+    // the 91->90 wrap gap is 1 deg so the detector treats it as adjacent
+    // and double-counts. A distant third ray forces both non-couplet pairs
+    // past the 5-deg adjacency cap, leaving exactly one couplet per tilt.
+    chunk.rays.push_back(syntheticCoupletRay(azA, 1, lowElev, reflDbz));
+    chunk.rays.push_back(syntheticCoupletRay(azB, 1, lowElev, reflDbz));
+    chunk.rays.push_back(syntheticCoupletRay(200.0F, 1, lowElev, 10.0));
+    chunk.rays.push_back(syntheticCoupletRay(azA, 2, highElev, reflDbz));
+    chunk.rays.push_back(syntheticCoupletRay(azB, 2, highElev, reflDbz));
+    chunk.rays.push_back(syntheticCoupletRay(200.0F, 2, highElev, 10.0));
+    return chunk;
+}
+
+void testCirculationMesocyclonePositive() {
+    auto chunk = twoTiltCoupletChunk(45.0);
+    // deltaV 20: above meso gate (~13.2 at 53 km) but below TVS gate (~29.3).
+    // Gates 168-178 sit at ~52-54.5 km slant where the 0.5/4.0-deg tilt
+    // pair gives ~3.2 km depth (meso needs 3000 m).
+    auto grid = coupletGrid(chunk, -10.0F, 10.0F, 168, 178);
+    const auto dets = detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {});
+    assert(dets.size() == 1);
+    assert(dets.front().kind == CirculationKind::Mesocyclone);
+    assert(dets.front().tiltCount == 2);
+    assert(dets.front().depthMeters >= 3000.0);
+    assert(std::abs(dets.front().maxDeltaVelocityMetersPerSecond - 20.0) < 0.01);
+}
+
+void testCirculationTvsClassification() {
+    // TVS-strength compact couplet -> TornadoVortex.
+    auto chunk = twoTiltCoupletChunk(50.0);
+    auto grid = coupletGrid(chunk, -30.0F, 30.0F, 168, 178); // deltaV 60
+    auto dets = detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {});
+    assert(dets.size() == 1);
+    assert(dets.front().kind == CirculationKind::TornadoVortex);
+    assert(dets.front().diameterKm <= 3.0);
+    // Same strength but 4-deg separation -> diameter >3 km -> meso only.
+    auto wide = twoTiltCoupletChunk(50.0, 0.5F, 4.0F, 90.0F, 94.0F);
+    auto wideGrid = coupletGrid(wide, -30.0F, 30.0F, 168, 178);
+    dets = detectCirculations(wide, wideGrid, 35.333, -97.278, 370.0, {});
+    assert(dets.size() == 1);
+    assert(dets.front().kind == CirculationKind::Mesocyclone);
+    assert(dets.front().diameterKm > 3.0);
+}
+
+void testCirculationReflectivityVeto() {
+    // Strong couplet in echo-free air must fail closed.
+    auto clear = twoTiltCoupletChunk(-3.0);
+    auto grid = coupletGrid(clear, -30.0F, 30.0F, 150, 160);
+    assert(detectCirculations(clear, grid, 35.333, -97.278, 370.0, {}).empty());
+    // Missing reflectivity moment entirely -> also empty.
+    auto missing = twoTiltCoupletChunk(45.0);
+    for (auto& ray : missing.rays) {
+        ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).clear();
+    }
+    auto missingGrid = coupletGrid(missing, -30.0F, 30.0F, 150, 160);
+    assert(detectCirculations(missing, missingGrid, 35.333, -97.278, 370.0, {}).empty());
+}
+
+void testCirculationSingleTiltVeto() {
+    // Vertical continuity requires 2+ tilts.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticCoupletRay(90.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(91.0F, 1, 0.5F, 50.0));
+    auto grid = coupletGrid(chunk, -30.0F, 30.0F, 150, 160);
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+}
+
+void testCirculationDealiasAndWeakVeto() {
+    // Folded/missing gate (NaN) on one side kills the couplet.
+    auto chunk = twoTiltCoupletChunk(50.0);
+    auto grid = coupletGrid(chunk, -30.0F, 30.0F, 150, 160);
+    for (auto& row : grid) {
+        for (std::size_t g = 150; g <= 160; ++g) row[g] = std::numeric_limits<float>::quiet_NaN();
+    }
+    // Restore only the negative side; positive side stays NaN.
+    for (std::size_t r = 0; r < grid.size(); r += 2) {
+        for (std::size_t g = 150; g <= 160; ++g) grid[r][g] = -30.0F;
+    }
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+    // Weak couplet below the range-dependent meso gate (10+0.06*~48 = ~12.9).
+    auto weak = twoTiltCoupletChunk(50.0);
+    auto weakGrid = coupletGrid(weak, -6.0F, 6.0F, 150, 160); // deltaV 12
+    assert(detectCirculations(weak, weakGrid, 35.333, -97.278, 370.0, {}).empty());
+    // Single-gate speckle never forms a run (minRunGates 2).
+    auto speck = twoTiltCoupletChunk(50.0);
+    auto speckGrid = coupletGrid(speck, -30.0F, 30.0F, 155, 155);
+    assert(detectCirculations(speck, speckGrid, 35.333, -97.278, 370.0, {}).empty());
+}
+
+void testCirculationShallowVeto() {
+    // TVS-strength but 0.5/1.0-deg tilts at ~30 km slant -> depth ~260 m.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticCoupletRay(90.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(91.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(90.0F, 2, 1.0F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(91.0F, 2, 1.0F, 50.0));
+    auto grid = coupletGrid(chunk, -30.0F, 30.0F, 80, 90); // slant ~30-32 km
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+}
+
+void testCirculationMisalignedAndGapVeto() {
+    // Upper-tilt couplet displaced far in azimuth -> two size-1 columns.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticCoupletRay(90.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(91.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(100.0F, 2, 4.0F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(101.0F, 2, 4.0F, 50.0));
+    auto grid = coupletGrid(chunk, -30.0F, 30.0F, 150, 160);
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+    // 6-deg pair separation exceeds the 5-deg adjacency cap -> skipped.
+    auto wide = twoTiltCoupletChunk(50.0, 0.5F, 4.0F, 90.0F, 96.0F);
+    auto wideGrid = coupletGrid(wide, -30.0F, 30.0F, 150, 160);
+    assert(detectCirculations(wide, wideGrid, 35.333, -97.278, 370.0, {}).empty());
+}
+
 
 
 void testDecodedRayLegacyGeometryMaxGates() {
@@ -987,6 +1163,13 @@ int main() {
     testStormTrackerMotionPrediction();
     testStormTrackerSplitParent();
     testStormTrackerIntensityGate();
+    testCirculationMesocyclonePositive();
+    testCirculationTvsClassification();
+    testCirculationReflectivityVeto();
+    testCirculationSingleTiltVeto();
+    testCirculationDealiasAndWeakVeto();
+    testCirculationShallowVeto();
+    testCirculationMisalignedAndGapVeto();
     testDecodedRayLegacyGeometryMaxGates();
     std::cout << "core tests passed\n";
 }

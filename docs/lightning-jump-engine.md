@@ -1,6 +1,6 @@
 # Lightning-Jump Engine — Design Spec
 
-Status: production (M1–M5 complete; netCDF required for production builds per P0.1)
+Status: production (M1–M5 complete; netCDF required for production builds per P0.1. M4 extended: independent shear overlay, TVS/meso layer, per-storm StormTracker tracks with GateMaxTrail)
 Owner: miki
 Started: 2026-07-20
 
@@ -15,14 +15,16 @@ forecasters have issued warnings primarily on jumps. The reference implementatio
 is that implementation, built into CappedWeather.
 
 Goal: real-time CONUS lightning-jump detection with sigma-level intensity, overlaid
-on the radar map, later fused with Level II mesocyclone/azimuthal-shear analysis.
+on the radar map and fused with Level II mesocyclone/azimuthal-shear analysis
+(`extractRadarStormFeatures` + `associateLightningWithRadar`, plus independent
+shear/TVS layers and per-storm `StormTracker` tracks).
 
 ## Algorithm (Lightning Jump Algorithm, LJA)
 
 References: Schultz et al. 2009/2011; Chronis et al. 2015 (Wea. Forecasting 30,
 23–37); GOES-R GLM operational LJA.
 
-Per storm region (phase 1: lat/lon grid cell; later: tracked storm cell):
+Per storm region (lat/lon grid cell plus tracked `StormTracker` cells):
 
 1. **Flash rate** FR(t) = total flashes per minute, binned at `rateResolution`
    (default 60 s).
@@ -87,7 +89,7 @@ Dependency: netCDF-C (vcpkg `netcdf-c`, or system). Guarded by
   `docs/validation-2025-05-16.md` (62% POD, 8 min median lead on the 2025-05-16
   outbreak, zero tuning). Note: netCDF-C via a local conda env / vcpkg.
 - **M3** — live S3 poller in app; jump cells on the map with sigma-level colors. ✅ 2026-07-23 (`GlmSource` S3 poller, `radar_map_canvas` jump overlay, GLM intelligence inspector).
-- **M4** — Level II fusion: jump ↔ mesocyclone/az-shear correlation view. ✅ `radar_lightning_fusion` correlates jumps with NEXRAD reflectivity objects; surfaced in the GLM intelligence panel.
+- **M4** — Level II fusion: jump ↔ mesocyclone/az-shear correlation view. ✅ `radar_lightning_fusion` correlates jumps with NEXRAD reflectivity objects; surfaced in the GLM intelligence panel plus map layers `Rotation / shear` (`shearCheck_`), `TVS / meso markers` (`tvsCheck_`), and per-storm `StormTracker` trails.
 - **M5** — verification harness: archived outbreak days, jump lead time vs NWS
   warnings (IEM archive), POD/FAR stats. Tune `minFlashRate` + window from data. ✅ `data/verification/results/m5-report.md` (POD 0.65–0.76, FAR 0.69–0.81, CSI 0.18–0.26 on 2025-05-16 midwest + 2025-05-18 kansas cases, 397 warnings).
 
@@ -95,8 +97,10 @@ Dependency: netCDF-C (vcpkg `netcdf-c`, or system). Guarded by
 
 - GLM covers the Americas — fine for NEXRAD CONUS fusion, useless for Europe.
   (EU side later: MTG LI, first data expected ~2026, or ground networks.)
-- Grid-based (no storm tracking) jumps can smear across fast-moving cells; M4
-  mitigates with radar-feature association. Accepted for phase 1.
+- Grid-based jumps can smear across fast-moving cells; mitigated by radar-feature
+  association plus the per-storm `StormTracker` (Hungarian + motion prediction),
+  per-track `GateMaxTrail` maxima, and `persistCirculations` time continuity.
+  Residual fast-cell smear only.
 - GLM flash clustering is done upstream by the LCFA algorithm — we trust
   `flash_id`, we do NOT re-cluster events into flashes ourselves.
 - 20 s file cadence vs 60 s rate bins: fine, flashes accumulate.

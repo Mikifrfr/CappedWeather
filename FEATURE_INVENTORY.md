@@ -18,7 +18,7 @@ Defined in `core/product.hpp` (`ProductKind` enum) and `core/product.cpp` (`prod
 | 4 | `CorrelationCoefficient` | CC | Correlation Coefficient | — | 0–1 |
 | 5 | `DifferentialPhase` | PHI | Differential Phase | deg | 0–360 |
 
-- The product combo (`productCombo_` in `MainWindow::buildUi()`, line 489–496) is populated from `productDescriptors()`.
+- The product combo (`productCombo_` in `MainWindow::buildUi()`) is populated from `productDescriptors()`. Panel chips show the operational abbreviation (REF, VEL, SW, ZDR, RHOHV, PHIDP, ET18, VIL); the full name + unit is spelled out in `activeProductLabel_` above the grid and in each chip's tooltip (`productChipTooltip()` = name + `productExplainer()` word-wrapped by `wrapTooltipText()`). `productShortBlurb()` feeds the command-palette entries.
 - Each decoded ray has eight field slots (`DecodedRay::fields` in `level2_decoder.hpp`): six populated directly by Message 31 moments and two populated by the derived-volume pass.
 - TDWR volumes *automatically* disable unavailable dual-polarization products (Reflectivity, Velocity, Spectrum Width only — via `updateProductAvailability()` at line 1352–1372).
 
@@ -135,7 +135,7 @@ In Playback Dock (lines 701–736):
 - **Play/Pause** toggle (`playButton_`): looping animation at configurable speed.
 - **LIVE** toggle (`liveButton_`): `followLatest` mode — always shows newest frame. Green accent when active (#6fbf5a, line 386).
 - **Frame slider** (`frameSlider_`): scrubbing through history. Tooltip shows frame position, datetime, volume completeness.
-- **Speed combo** (`speedCombo_`): 1× (1000ms), 2× (500ms), 4× (250ms). Default 2×.
+- **Speed combo** (`speedCombo_`): 0.5×, 1×, 2× (default), 4×, 8×, 16×. Legacy `timeline/speed` indices migrated so existing user prefs keep the same speed.
 
 ### 4.3 History Loading
 - By default, only the latest volume is requested (`requestLatest()`).
@@ -180,20 +180,33 @@ In Playback Dock (lines 701–736):
   - Associates each lightning cell with the nearest radar feature within 45 km.
 - `RadarStormFeature`: id, lat/lon, max reflectivity, velocity span, azimuthal shear rate, area, rotating flag.
 - Rendered as small markers connected to lightning cells.
+- `rebuildLightningFusion()` also drives the independent layers below even with lightning hidden: shear objects, TVS/meso detections (dealiased velocity at the panel Nyquist), and `stormTracker_.update()` per-storm tracks.
 
-### 5.5 Cursor Probe / Sampling
+### 5.5 TVS / Mesocyclone Markers
+- **Toggle**: `tvsCheck_` / `tvsBadge_` layer row ("TVS / meso markers", sub "NSSL-style couplet + depth tracking"), persisted `overlays/tvs` (default on). Badge shows count / `off` / `idle` via `circulationCount()`.
+- **Detector**: `detectCirculations()` in `core/circulation_detector.cpp` — NSSL-style heuristic (NOT an NWS RPG port): gate-to-gate couplets on dealiased velocity, range-dependent delta-V gates (meso 10.0 + 0.06/km, TVS 25.0 + 0.08/km), 20 dBZ reflectivity guard, vertical association across 2+ tilts within 5 km, TVS needs ≤3.0 km diameter and ≥2500 m depth (meso ≥3000 m). Capped at 24 detections, sorted by delta-V.
+- **Time continuity**: `persistCirculations()` (8 km match, 2 hits to show, 2 misses to drop, 24-track cap) — only tracks seen in 2+ volumes reach `circulations_`, so single-volume flicker never draws.
+- **Rendering**: `paintCirculationMarkers()` — red triangle = TVS, orange diamond = meso, labeled `TVS/MESO <delta-V> m/s | <depth> km deep` at zoom ≥ 5; legend chip `▲ TVS n · ◆ MESO n`.
+- Honest limits: guidance only, never warnings; no hail sizing yet. Synthetic-volume core tests cover clear-air, single-tilt, NaN/folded, weak/speckle, shallow, misaligned, and azimuth-gap vetoes.
+
+### 5.6 Rotation / Shear, Storm Trails, Smoothing
+- **Rotation / shear** (`shearCheck_` / `shearBadge_`, persisted `overlays/shear`): `paintShearOverlay()` renders `extractRadarStormFeatures()` objects independent of lightning — pink double-ring + `ROT dBZ | shear s^-1` at zoom ≥ 6, gray dot for strong non-rotating ≥ 50 dBZ cores at zoom ≥ 7.
+- **Storm trails** (`trailCheck_`, persisted `overlays/trail`): `StormTracker` (cost-based + motion prediction + Hungarian assignment) matches features across volumes; every storm draws its own fading line with `#id` + 5-min motion vector at zoom ≥ 6, longest track keeps dots + `trail dBZ` + top-3 +10/+20/+30 min extrapolation; per-track running gate maxima (`GateMaxTrail`).
+- **Smooth echo (display only)** (`smoothingCheck_`, persisted `view/smoothing`, default off): expands azimuth half-width ×1.35 so adjacent gates overlap; no data smoothing or value interpolation.
+
+### 5.7 Cursor Probe / Sampling
 - `RadarMapCanvas::updateProbe()` (called on mouse move): shows value, range (km), azimuth (deg), elevation tilt number at cursor position.
 - `probeText_` displayed by `paintProbe()` in the corner of each panel.
 - **Below-threshold visibility**: `belowThresholdCheck_` toggles rendering of gates below the product's minimum valid value.
 - Range-folded gates (encoded value 1) are specifically excluded.
 
-### 5.6 Measure Tool
+### 5.8 Measure Tool
 - `measureButton_` (checkable), sets `measureMode_` on active panel.
 - Two-click gesture: click start point, click end point.
 - `paintMeasurement()` draws a line with distance (km/mi) and bearing (deg) labels.
 - Uses great-circle math from `core/radar_geometry.hpp` (`rangeAndBearing()`).
 
-### 5.7 Cross-Section
+### 5.9 Cross-Section
 - `crossSectionButton_` (checkable), sets `crossSectionMode_` on active panel.
 - Same two-point gesture as measure. On completion, emits `crossSectionRequested`.
 - Opens a `QDialog` containing `CrossSectionWidget` (980×620 px).
@@ -236,37 +249,41 @@ In Playback Dock (lines 701–736):
 ## 7. Settings / Customization
 
 ### 7.1 Settings Dialog
-`MainWindow::showSettingsDialog()` (lines 1513–1661), 21 settings fields:
+`MainWindow::showSettingsDialog()`, grouped Display / Chase / Timeline / Network / Lightning / Map-cache / Alerts:
 
 | Category | Setting | Key | Default | Range |
 |----------|---------|-----|---------|-------|
+| **Display** | Interface text scale (live) | `ui/fontScale` | 100% | 80–150% |
+| | Theme | `ui/theme` | — | Classic / Squall |
 | **Chase** | Enabled | `chase/enabled` | false | — |
 | | Latitude | `chase/latitude` | 35.0 | ±90° |
 | | Longitude | `chase/longitude` | -97.0 | ±180° |
-| **Timeline** | Frames kept | `timeline/maximumFrames` | 12 | 2–24 |
-| | Volumes loaded | `timeline/historyVolumes` | 8 | 2–12 |
+| **Timeline** | Frames kept (live) | `timeline/maximumFrames` | 12 | 2–24 |
+| | Volumes loaded (live) | `timeline/historyVolumes` | 8 | 2–12 |
 | **Network** | Contact | `network/contact` | "" | text |
-| | Parallel chunks | `network/parallelChunks` | 6 | 1–12 |
-| | Timeout | `network/timeoutSeconds` | 30s | 5–120s |
-| | Retries | `network/retries` | 2 | 0–5 |
-| | Backoff | `network/retryBackoffMs` | 250ms | 100–5000ms |
-| | Radar refresh | `network/radarRefreshSeconds` | 60s | 30–600s |
-| | Overlay refresh | `network/overlayRefreshSeconds` | 60s | 30–600s |
-| **Lightning** | Refresh | `lightning/refreshSeconds` | 20s | 10–300s |
+| | Parallel chunks (live) | `network/parallelChunks` | 6 | 1–12 |
+| | Timeout (live) | `network/timeoutSeconds` | 30s | 5–120s |
+| | Retries (live) | `network/retries` | 2 | 0–5 |
+| | Backoff (live) | `network/retryBackoffMs` | 250ms | 100–5000ms |
+| | Radar refresh (live) | `network/radarRefreshSeconds` | 60s | 30–600s |
+| | Overlay refresh (live) | `network/overlayRefreshSeconds` | 60s | 30–600s |
+| **Lightning** | Refresh (live) | `lightning/refreshSeconds` | 20s | 10–300s |
 | | Backfill | `lightning/backfillMinutes` | 18min | 13–60min |
 | | Cell size | `lightning/cellSizeDeg` | 0.25° | 0.05–1.0° |
 | | Min flash rate | `lightning/minFlashRate` | 12 fpm | 1–100 |
 | | Jump sigma | `lightning/sigmaThreshold` | 2.0σ | 1.0–10.0 |
 | | Sigma window | `lightning/sigmaWindowMinutes` | 10min | 5–30min |
-| **Cache** | Memory cache | `cache/memoryMbPerPanel` | 32MB | 8–256MB |
-| | Disk cache | `cache/diskMbPerPanel` | 64MB | 16–1024MB |
+| **Cache** | Memory cache (restart) | `cache/memoryMbPerPanel` | 32MB | 8–256MB |
+| | Disk cache (restart) | `cache/diskMbPerPanel` | 64MB | 16–1024MB |
 | **Panels** | Synchronize nav | `panels/synchronizeNavigation` | true | — |
+| **Alerts** | Minimum severity | `alerts/minSeverity` | Severe | Minor–Extreme |
+| | (plus sound/notification toggles, geo filter, event allowlist, sigma threshold, suppression window, custom sound) | `alerts/*` | — | — |
 
 ### 7.2 Persisted State (QSettings)
-Saved in `MainWindow::saveSettings()` (lines 1469–1511):
+Saved in `MainWindow::saveSettings()`:
 - Window geometry + dock state + control dock width.
 - Per-panel: product, tilt, velocity mode, nyquist, storm direction, storm speed, radar ID.
-- Global: product index, palette, radar opacity, below-threshold, warning filter, all overlay toggles, custom palette stops.
+- Global: product index, palette, radar opacity, below-threshold, warning filter, all overlay toggles (`overlays/shear`, `overlays/tvs`, `overlays/trail`, `view/smoothing` included), custom palette stops, bookmarks per radar.
 
 ### 7.3 Palettes
 `PaletteKind` enum (4 modes, in `RadarMapCanvas`):
@@ -296,6 +313,7 @@ Velocity controls enabled only when product is Velocity (`updateVelocityControls
 - Cache keyed by: zoom level + center position + chunk content generation.
 - Zoom transitions: old cache is scaled on-screen until rebuild completes (`invalidateOverlay(true)` with `preserveForZoomTransition` flag).
 - README claims: "Gate geometry is color-batched and rasterized into a cached overlay image off the UI thread."
+- Echo seams: gate polygons carry a same-color 1 px outline (not `NoPen`), closing 1 px background corduroy; azimuth half-widths tile from actual neighbor spacing (clamped [0.5×, 2×] the coded half-width, ×1.35 when display smoothing is on), so super-res dropout fills while real data gaps stay dark.
 
 ### 8.2 Weather Overlay Caching
 - Separate `weatherOverlayImage_` cache with its own generation counter (`weatherOverlayImageGeneration_`).
@@ -361,11 +379,12 @@ This is the most significant conditional feature in the codebase.
 ### 9.2 TODO.md Status
 
 **Active (in-progress)**:
-- **Lightning-jump engine**: TODO says "pretty much complete, should be marked done." The code supports this claim: `LightningJumpDetector` (full 2σ algorithm with DFRDT, sigma window, minimum rate threshold), `FlashRateGrid` (spatial binning), `GlmSource` (live ingestion), `extractRadarStormFeatures` + `associateLightningWithRadar` (fusion), and full UI integration (checkbox toggles, rendering, info cards). All appear fully implemented and active.
+- **Lightning-jump engine**: TODO marks it done (`[x]`). The code supports this claim: `LightningJumpDetector` (full 2σ algorithm with DFRDT, sigma window, minimum rate threshold), `FlashRateGrid` (spatial binning), `GlmSource` (live ingestion), `extractRadarStormFeatures` + `associateLightningWithRadar` (fusion), and full UI integration (checkbox toggles, rendering, info cards). M4 extended with independent shear overlay, TVS/meso layer, per-storm `StormTracker` tracks, and per-track `GateMaxTrail`.
+- **NEXRAD algorithm markers**: TVS/meso first slice done (see §5.5); hail/MEHS + RPG-fidelity remains the open follow-on.
 
 **Backlog (not built)**:
 1. **GPU volume rendering** — "ray-marched 3D dual-pol volumes at interactive framerates." Purely speculative, no code exists.
-2. **Storm-scale severe nowcasting** — "0–60 min nowcast of mesocyclone tracks / azimuthal shear." Purely speculative, no code exists.
+2. **Storm-scale severe nowcasting** — motion-based track prediction/extrapolation exists (`StormTracker` velocity + top-3 +10/+20/+30 min); ML 0–60 min warn-on-forecast is still speculative, no code exists.
 
 ### 9.3 Stubs and Conditional Code
 - No `TODO`, `FIXME`, `HACK`, or `stub` comments found in source code (search confirmed).
@@ -388,7 +407,7 @@ This is the most significant conditional feature in the codebase.
 | TDWR dual-pol auto-disable | ✓ Confirmed: `updateProductAvailability()` disables unavailable products |
 | Searchable radar + favorites + recents | ✓ Confirmed: `stationCombo_` with completer, `favoriteButton_`, `recentRadarIds_` |
 | Cursor probe with value/range/azimuth/tilt | ✓ Confirmed: `updateProbe()`, `paintProbe()` |
-| Up to 8 recent volumes, live-follow, looping playback, 1x/2x/4x speeds | ✓ Confirmed: `RadarSession::history`, `speedCombo_`, `followLatest`, `animationTimer_` |
+| Up to 8 recent volumes, live-follow, looping playback, 0.5x–16x speeds | ✓ Confirmed: `RadarSession::history`, `speedCombo_` (0.5×/1×/2×/4×/8×/16×), `followLatest`, `animationTimer_` |
 | Non-blocking chunk progress, retry/cancel, per-chunk retries, partial-volume recovery | ✓ Confirmed: `NexradSource` with queued objects, retries, backoff |
 | NWS warnings with polygon+hole geometry, zone resolution | ✓ Confirmed: `WeatherOverlaySource` with `parseAlerts()`, `parseZone()` |
 | SPC tornado/hail/wind reports with 12Z convective-day handling | ✓ Confirmed: `StormReportKind`, `parseStormReports()` with convective date |
@@ -400,7 +419,8 @@ This is the most significant conditional feature in the codebase.
 | Shared decoded frames across panels | ✓ Confirmed: `std::shared_ptr<const DecodedChunk>` |
 | Dock-based layout, dark theme, Esri basemap | ✓ Confirmed: dock widgets, QSS, tile store |
 | Lightning-jump engine (GOES GLM) | ✓ Confirmed: full LJA implementation — *but requires netCDF-C at build time* |
-| Lightning-radar fusion | ✓ Confirmed: `extractRadarStormFeatures()` + `associateLightningWithRadar()` |
+| Lightning-radar fusion | ✓ Confirmed: `extractRadarStormFeatures()` + `associateLightningWithRadar()`; `rebuildLightningFusion()` also drives independent shear/TVS/tracker layers with lightning hidden |
+| TVS / mesocyclone markers | ✓ Added in v0.7.0: `core/circulation_detector` (NSSL-style couplet + depth + time persistence) with Layers toggle, badge, and synthetic-volume tests. Guidance only, never warnings |
 | Parse diagnostics + randomized malformed-input tests | ✓ Confirmed: `rejectedMessages`/`rejectedBlocks` tracking, test suite |
 | Persistent settings | ✓ Confirmed: `saveSettings()` covers all 21+ settings |
 | Warning / lightning jump alerts | ✓ Added in P1: `AlertCenter` (`src/app/alert_center.{hpp,cpp}`), sinks `overlaysReady` + `cellsUpdated`, plays sound (custom `.wav` via `QSoundEffect` when `Qt6::Multimedia` is available, system beep otherwise) and shows a tray balloon. NWS id + cell key dedupe with a configurable suppression window. |
