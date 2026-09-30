@@ -153,4 +153,4 @@ The viewer exposes the decoded native moment fields and elevation tilts present 
 - Secondary text (captions, group headers, layer sub-labels, the station-picker placeholder) clears 4.5:1 against the dock background, and disabled controls keep a visible border rather than fading to ~1.1:1.
 - The status bar elides its three-part summary instead of hard-cutting, with the full text on hover; on-map HUD text carries a dark halo so labels stay legible over bright echo.
 - Both themes style the same widget set, so switching themes never leaves a native-looking control in a themed dialog. The settings dialog scrolls, keeping OK/Cancel reachable at larger text sizes.
-- Full card keyboard focus and a font-scale preference remain open items (see `TODO.md`).
+- Full card keyboard focus remains an open item; the font-scale preference is implemented (Settings → Display → Interface text scale, see `TODO.md`).

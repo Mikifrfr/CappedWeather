@@ -3,6 +3,7 @@
 #include "core/level2_decoder.hpp"
 
 #include <cstddef>
+#include <optional>
 
 namespace cappedweather {
 
@@ -12,7 +13,20 @@ struct DerivedProductSummary {
     std::size_t echoTopGateCount = 0;
     std::size_t vilGateCount = 0;
     std::size_t echoTopLowerBoundGateCount = 0;
+    // Gates where both VIL and echo top were valid enough to form VILD.
+    std::size_t vilDensityGateCount = 0;
+    // Maximum VILD seen in this pass (kg/m^3). 0 when no gate qualified.
+    double maxVilDensityKgPerCubicMeter = 0.0;
 };
+
+// Vertically integrated liquid density (VILD): VIL spread over the echo-top
+// column thickness. Pure calculation, no ProductKind involved.
+// Returns nullopt for non-finite inputs or non-positive thickness.
+[[nodiscard]] std::optional<double> vilDensityKgPerCubicMeter(
+    double vilKgPerSquareMeter, double layerThicknessMeters);
+// Convenience form using absolute heights (MSL meters).
+[[nodiscard]] std::optional<double> vilDensityKgPerCubicMeter(
+    double vilKgPerSquareMeter, double echoTopMeters, double baseMeters);
 
 // Materializes volume-derived 2D fields onto the lowest reflectivity sweep.
 // Echo tops use the 18 dBZ threshold and are encoded in kft MSL. VIL uses

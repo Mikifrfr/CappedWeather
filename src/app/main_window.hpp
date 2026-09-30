@@ -2,6 +2,7 @@
 
 #include "core/level2_decoder.hpp"
 #include "app/alert_center.hpp"
+#include "app/session_store.hpp"
 #include "app/theme.hpp"
 #include "app/weather_overlay_source.hpp"
 
@@ -174,7 +175,11 @@ private:
     void openArchiveFolder();
     void openAwsArchive();
     void prepareArchiveCase(int requestedFrames);
-    struct RadarSession;
+    // Session types live in session_store.hpp so history/spill logic is
+    // testable without a QMainWindow. Aliases keep MainWindow::RadarFrame /
+    // MainWindow::RadarSession valid at all existing call sites.
+    using RadarSession = cappedweather::RadarSession;
+    using RadarFrame = cappedweather::RadarFrame;
     std::shared_ptr<RadarSession> sessionFor(const QString& radarId, bool create = true);
     std::shared_ptr<RadarSession> activeSession() const;
     int panelIndex(const RadarMapCanvas* map) const;
@@ -182,47 +187,11 @@ private:
     // Spilled-frame access: returns the resident chunk, faulting back from
     // disk on a scrub hit (and re-enforcing the RAM budget afterwards).
     // Null only when the frame is missing or its spill is unreadable.
+    // Delegates to session_store::{sessionFrameChunk,enforceSessionSpillBudget}.
     std::shared_ptr<DecodedChunk> frameChunk(RadarSession& session, std::size_t index);
     // Keeps the newest maximumHistoryFrames_ volumes resident, spills older
     // ones to disk (up to kSpilledKeepVolumes), drops the rest entirely.
     void enforceSpillBudget(RadarSession& session, int excludeIndex = -1);
-
-    struct RadarFrame {
-        QString volumeId;
-        std::shared_ptr<DecodedChunk> chunk;
-        QDateTime dataTime;
-        int chunkCount = 0;
-        int failedChunks = 0;
-        // Spill-to-disk: empty chunk + non-empty path means the frame lives
-        // on disk and faults back in when scrubbed to. Invariant: exactly
-        // one of chunk / spilledPath is set for a live frame.
-        QString spilledPath;
-    };
-
-    struct RadarSession {
-        QString radarId;
-        QString pendingVolumeId;
-        DecodedChunk pendingVolume;
-        int pendingChunkCount = 0;
-        int pendingFailedChunks = 0;
-        int pendingDecodeTasks = 0;
-        int pendingDecodedChunks = 0;
-        std::size_t pendingPartialRays = 0; // rays at the last progressive publish
-        bool pendingVolumeNetworkReady = false;
-        QSet<QString> derivingVolumeIds;
-        QString pendingReadyVolumeId;
-        int pendingReadyChunkCount = 0;
-        int pendingReadyFailedChunks = 0;
-        QDateTime pendingReadyReceivedAt;
-        std::vector<RadarFrame> history;
-        int frameIndex = -1;
-        QSet<QString> bookmarks; // volumeIds starred on the filmstrip
-        bool followLatest = true;
-        bool requestActive = false;
-        bool historyRequested = false;
-        bool historyLoadStarted = false;
-        bool playWhenHistoryReady = false;
-    };
 
     RadarListModel* model_ = nullptr;
     RadarMapCanvas* map_ = nullptr;

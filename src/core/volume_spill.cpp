@@ -1,5 +1,6 @@
 #include "core/volume_spill.hpp"
 
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -13,28 +14,43 @@ constexpr std::uint32_t kMagic = 0x43574456; // "CWDV"
 constexpr std::uint16_t kVersion = 1;
 
 template <typename T>
+void toLeBytes(const T value, std::byte* out) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::memcpy(out, &value, sizeof(T));
+    if constexpr (std::endian::native == std::endian::big) {
+        for (std::size_t i = 0; i < sizeof(T) / 2; ++i)
+            std::swap(out[i], out[sizeof(T) - 1 - i]);
+    }
+}
+
+template <typename T>
 void appendLe(std::vector<std::byte>& out, const T value) {
     static_assert(std::is_trivially_copyable_v<T>);
     std::byte bytes[sizeof(T)];
-    std::memcpy(bytes, &value, sizeof(T));
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    for (std::size_t i = 0; i < sizeof(T) / 2; ++i)
-        std::swap(bytes[i], bytes[sizeof(T) - 1 - i]);
-#endif
+    toLeBytes(value, bytes);
     out.insert(out.end(), bytes, bytes + sizeof(T));
+}
+
+template <typename T>
+bool writeLe(std::ofstream& file, const T value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::byte bytes[sizeof(T)];
+    toLeBytes(value, bytes);
+    file.write(reinterpret_cast<const char*>(bytes), sizeof(T));
+    return static_cast<bool>(file);
 }
 
 template <typename T>
 bool readLe(const std::byte*& cursor, const std::byte* end, T& value) {
     static_assert(std::is_trivially_copyable_v<T>);
     if (cursor + sizeof(T) > end) return false;
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    std::byte flipped[sizeof(T)];
-    for (std::size_t i = 0; i < sizeof(T); ++i) flipped[i] = cursor[sizeof(T) - 1 - i];
-    std::memcpy(&value, flipped, sizeof(T));
-#else
-    std::memcpy(&value, cursor, sizeof(T));
-#endif
+    if constexpr (std::endian::native == std::endian::big) {
+        std::byte flipped[sizeof(T)];
+        for (std::size_t i = 0; i < sizeof(T); ++i) flipped[i] = cursor[sizeof(T) - 1 - i];
+        std::memcpy(&value, flipped, sizeof(T));
+    } else {
+        std::memcpy(&value, cursor, sizeof(T));
+    }
     cursor += sizeof(T);
     return true;
 }
@@ -49,42 +65,54 @@ bool readBytes(const std::byte*& cursor, const std::byte* end, char* out, std::s
 } // namespace
 
 bool spillVolume(const DecodedChunk& chunk, const std::string& path) {
-    std::vector<std::byte> out;
-    out.reserve(chunk.rays.size() * 2048);
-    appendLe(out, kMagic);
-    appendLe(out, kVersion);
-    appendLe(out, static_cast<std::uint16_t>(kProductCount));
-    appendLe(out, static_cast<std::uint64_t>(chunk.radarId.size()));
-    out.insert(out.end(), reinterpret_cast<const std::byte*>(chunk.radarId.data()),
-               reinterpret_cast<const std::byte*>(chunk.radarId.data() + chunk.radarId.size()));
-    appendLe(out, static_cast<std::uint64_t>(chunk.messageCount));
-    appendLe(out, static_cast<std::uint64_t>(chunk.rejectedMessages));
-    appendLe(out, static_cast<std::uint64_t>(chunk.rejectedBlocks));
-    appendLe(out, static_cast<std::uint64_t>(chunk.rays.size()));
-    for (const auto& ray : chunk.rays) {
-        appendLe(out, ray.azimuthDegrees);
-        appendLe(out, ray.azimuthResolutionDegrees);
-        appendLe(out, ray.elevationNumber);
-        appendLe(out, ray.elevationDegrees);
-        appendLe(out, ray.gateCount);
-        appendLe(out, ray.firstGateMeters);
-        appendLe(out, ray.gateSpacingMeters);
-        for (std::size_t product = 0; product < kProductCount; ++product) {
-            const auto& gates = ray.fields[product];
-            appendLe(out, static_cast<std::uint64_t>(gates.size()));
-            if (!gates.empty()) {
-                const auto* raw = reinterpret_cast<const std::byte*>(gates.data());
-                out.insert(out.end(), raw, raw + gates.size() * sizeof(std::uint16_t));
-            }
-            appendLe(out, ray.firstGateByProduct[product]);
-            appendLe(out, ray.gateSpacingByProduct[product]);
-            appendLe(out, ray.scaleByProduct[product]);
-            appendLe(out, ray.offsetByProduct[product]);
-        }
-    }
+    // Stream directly to disk instead of building a full in-memory copy:
+    // a volume-sized buffer plus the vector peak was ~2x RAM per spill.
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) return false;
-    file.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    if (!writeLe(file, kMagic)) return false;
+    if (!writeLe(file, kVersion)) return false;
+    if (!writeLe(file, static_cast<std::uint16_t>(kProductCount))) return false;
+    if (!writeLe(file, static_cast<std::uint64_t>(chunk.radarId.size()))) return false;
+    if (!chunk.radarId.empty()) {
+        file.write(chunk.radarId.data(), static_cast<std::streamsize>(chunk.radarId.size()));
+        if (!file) return false;
+    }
+    if (!writeLe(file, static_cast<std::uint64_t>(chunk.messageCount))) return false;
+    if (!writeLe(file, static_cast<std::uint64_t>(chunk.rejectedMessages))) return false;
+    if (!writeLe(file, static_cast<std::uint64_t>(chunk.rejectedBlocks))) return false;
+    if (!writeLe(file, static_cast<std::uint64_t>(chunk.rays.size()))) return false;
+    for (const auto& ray : chunk.rays) {
+        if (!writeLe(file, ray.azimuthDegrees)) return false;
+        if (!writeLe(file, ray.azimuthResolutionDegrees)) return false;
+        if (!writeLe(file, ray.elevationNumber)) return false;
+        if (!writeLe(file, ray.elevationDegrees)) return false;
+        if (!writeLe(file, ray.gateCount)) return false;
+        if (!writeLe(file, ray.firstGateMeters)) return false;
+        if (!writeLe(file, ray.gateSpacingMeters)) return false;
+        for (std::size_t product = 0; product < kProductCount; ++product) {
+            const auto& gates = ray.fields[product];
+            if (!writeLe(file, static_cast<std::uint64_t>(gates.size()))) return false;
+            if (!gates.empty()) {
+                // Gate payload is native LE uint16; convert on big-endian hosts.
+                if constexpr (std::endian::native == std::endian::big) {
+                    for (const auto gate : gates) {
+                        std::byte bytes[sizeof(gate)];
+                        toLeBytes(gate, bytes);
+                        file.write(reinterpret_cast<const char*>(bytes), sizeof(gate));
+                        if (!file) return false;
+                    }
+                } else {
+                    file.write(reinterpret_cast<const char*>(gates.data()),
+                               static_cast<std::streamsize>(gates.size() * sizeof(std::uint16_t)));
+                    if (!file) return false;
+                }
+            }
+            if (!writeLe(file, ray.firstGateByProduct[product])) return false;
+            if (!writeLe(file, ray.gateSpacingByProduct[product])) return false;
+            if (!writeLe(file, ray.scaleByProduct[product])) return false;
+            if (!writeLe(file, ray.offsetByProduct[product])) return false;
+        }
+    }
     file.close();
     return static_cast<bool>(file);
 }
@@ -133,6 +161,11 @@ std::shared_ptr<DecodedChunk> loadSpilledVolume(const std::string& path) {
                 const std::size_t bytes = static_cast<std::size_t>(gateSize) * sizeof(std::uint16_t);
                 if (cursor + bytes > end) return nullptr;
                 std::memcpy(ray.fields[product].data(), cursor, bytes);
+                if constexpr (std::endian::native == std::endian::big) {
+                    for (auto& gate : ray.fields[product]) {
+                        gate = static_cast<std::uint16_t>((gate << 8) | (gate >> 8));
+                    }
+                }
                 cursor += bytes;
             }
             if (!readLe(cursor, end, ray.firstGateByProduct[product]) ||

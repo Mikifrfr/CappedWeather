@@ -171,11 +171,13 @@ bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) 
     const auto rays = static_cast<std::size_t>(nrays);
     const auto gates = static_cast<std::size_t>(nbins);
     // Find the dataN group carrying the requested quantity.
+    // Note: data groups are not guaranteed contiguous (data1+data3 with no
+    // data2 happens in the wild), so a missing group is skipped, not a stop.
     for (int dataIndex = 1; dataIndex <= 8; ++dataIndex) {
         char groupName[16];
         snprintf(groupName, sizeof(groupName), "data%d", dataIndex);
         H5Handle dataGroup = openGroup(dataset, groupName);
-        if (!dataGroup.valid()) break;
+        if (!dataGroup.valid()) continue;
         H5Handle what = openGroup(dataGroup.id, "what");
         if (!what.valid()) continue;
         std::string quantity;
@@ -408,9 +410,8 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
                     if (sweep.rangeScaleM > 0.0) {
                         source = std::llround((slant - sweepFirst) / sweep.rangeScaleM);
                     }
-                    double relative = azimuth - velocityStart;
-                    while (relative < 0.0) relative += 360.0;
-                    while (relative >= 360.0) relative -= 360.0;
+                    double relative = std::fmod(azimuth - velocityStart, 360.0);
+                    if (relative < 0.0) relative += 360.0;
                     const auto velocityRay = static_cast<std::size_t>(std::llround(relative / velocityResolution)) %
                                              sweep.rayCount;
                     if (source < 0 || source >= static_cast<long long>(sweep.gateCount)) {

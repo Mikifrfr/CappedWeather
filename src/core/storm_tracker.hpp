@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <deque>
+#include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace cappedweather {
@@ -26,6 +28,49 @@ struct StormTrack {
     std::deque<StormTrackFix> fixes;
     int misses = 0;
 };
+
+// Per-track running maximum reflectivity location ("max trail").
+// Header-only helper for analysis depth: keeps the strongest gate seen per
+// track id so trails survive centroid wobble. Pure core type, no Qt.
+struct GateMaxTrail {
+    double latitudeDeg = 0.0;
+    double longitudeDeg = 0.0;
+    double maxDbz = -std::numeric_limits<double>::infinity();
+    double epochSeconds = 0.0;
+};
+
+// Keeps the running max for one track id. Inserts on first sight; otherwise
+// replaces only when dbz strictly exceeds the stored max. Non-finite dbz or
+// non-positive epochs are ignored. Returns true when the trail was created
+// or improved.
+inline bool updateGateMaxTrail(std::unordered_map<int, GateMaxTrail>& trails, int trackId,
+                               double latitudeDeg, double longitudeDeg, double maxDbz,
+                               double epochSeconds) {
+    if (!(maxDbz == maxDbz) || !(epochSeconds > 0.0)) return false;
+    const auto it = trails.find(trackId);
+    if (it == trails.end()) {
+        trails.emplace(trackId, GateMaxTrail{latitudeDeg, longitudeDeg, maxDbz, epochSeconds});
+        return true;
+    }
+    if (maxDbz > it->second.maxDbz) {
+        it->second = GateMaxTrail{latitudeDeg, longitudeDeg, maxDbz, epochSeconds};
+        return true;
+    }
+    return false;
+}
+
+// Fix-shaped convenience overload (unit-test hook).
+inline bool updateGateMaxTrail(std::unordered_map<int, GateMaxTrail>& trails, int trackId,
+                               const StormTrackFix& fix) {
+    return updateGateMaxTrail(trails, trackId, fix.latitudeDeg, fix.longitudeDeg,
+                              fix.maximumReflectivityDbz, fix.epochSeconds);
+}
+
+// Fold a whole track's fixes into the trail map; keeps the per-id maxima.
+inline void updateGateMaxTrails(std::unordered_map<int, GateMaxTrail>& trails,
+                                const StormTrack& track) {
+    for (const auto& fix : track.fixes) updateGateMaxTrail(trails, track.id, fix);
+}
 
 class StormTracker {
 public:

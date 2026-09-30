@@ -30,6 +30,10 @@ struct ProductDescriptor {
 
 const ProductDescriptor& productDescriptor(ProductKind kind);
 const std::vector<ProductDescriptor>& productDescriptors();
+// Non-throwing lookup for hot paths / settings restore: null when the kind
+// is out of range (e.g. persisted int from an older build). Prefer this over
+// productDescriptor() unless a missing descriptor is a programming error.
+const ProductDescriptor* tryProductDescriptor(ProductKind kind) noexcept;
 constexpr bool isDerivedProduct(const ProductKind kind) {
     return kind == ProductKind::EchoTop || kind == ProductKind::VerticallyIntegratedLiquid;
 }

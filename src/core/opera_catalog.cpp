@@ -1,4 +1,5 @@
 #include "core/radar_catalog.hpp"
+#include "core/parse_utils.hpp"
 
 #include <sstream>
 
@@ -171,11 +172,14 @@ CHWEI|Weissfluhgiptel, Switzerland|OPERA|5700.0|46.8350|9.7945|opera|chwei|CH
         std::optional<double> parsedLatitude;
         std::optional<double> parsedLongitude;
         if (!latitude.empty() && !longitude.empty()) {
-            parsedLatitude = std::stod(latitude);
-            parsedLongitude = std::stod(longitude);
+            parsedLatitude = parseDoubleSafe(latitude);
+            parsedLongitude = parseDoubleSafe(longitude);
+            if (!parsedLatitude.has_value() || !parsedLongitude.has_value()) continue;
         }
+        const auto elevation = parseDoubleSafe(elevationMeters);
+        if (!elevation.has_value()) continue;
         RadarSite site{std::move(id), std::move(name), std::move(owner), parsedLatitude,
-                       parsedLongitude, std::stod(elevationMeters)};
+                       parsedLongitude, *elevation};
         site.dataSource = std::move(dataSource);
         site.odimCode = std::move(odimCode);
         site.countryCode = std::move(countryCode);

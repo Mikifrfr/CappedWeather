@@ -13,6 +13,7 @@ void StormTracker::clear() {
     tracks_.clear();
     haveTime_ = false;
     lastEpochSeconds_ = 0.0;
+    nextId_ = 1;
 }
 
 const std::vector<StormTrack>& StormTracker::update(
@@ -63,6 +64,9 @@ const std::vector<StormTrack>& StormTracker::update(
             claimed[static_cast<std::size_t>(best)] = true;
             StormTrack continued = std::move(tracks_[static_cast<std::size_t>(best)]);
             continued.fixes.push_back(fix);
+            // Bound per-track history: long sessions would otherwise grow the
+            // deque without limit. 64 fixes is hours of volumes at WSR-88D cadence.
+            while (continued.fixes.size() > 64) continued.fixes.pop_front();
             continued.misses = 0;
             next.push_back(std::move(continued));
         } else if (static_cast<int>(next.size()) < maxTracks_) {

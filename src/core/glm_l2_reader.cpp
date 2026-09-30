@@ -1,6 +1,7 @@
 #include "core/glm_l2_reader.hpp"
 
 #include <cstdio>
+#include <mutex>
 
 #ifdef CAPPEDWEATHER_HAS_NETCDF
 #include <netcdf.h>
@@ -39,16 +40,22 @@ std::optional<std::int64_t> parseGlmLcfaStartTime(const std::string& fileName) {
         const std::string token = fileName.substr(pos, next == std::string::npos ? next : next - pos);
         if (token.size() == 15 && token[0] == 's' &&
             token.find_first_not_of("0123456789", 1) == std::string::npos) {
-            const int year = std::stoi(token.substr(1, 4));
-            const int doy = std::stoi(token.substr(5, 3));
-            const int hour = std::stoi(token.substr(8, 2));
-            const int minute = std::stoi(token.substr(10, 2));
-            const int second = std::stoi(token.substr(12, 2));
-            if (doy < 1 || doy > 366 || hour > 23 || minute > 59 || second > 60) {
+            // Digits-only checked above, so stoi cannot throw; guard anyway
+            // against future format drift.
+            try {
+                const int year = std::stoi(token.substr(1, 4));
+                const int doy = std::stoi(token.substr(5, 3));
+                const int hour = std::stoi(token.substr(8, 2));
+                const int minute = std::stoi(token.substr(10, 2));
+                const int second = std::stoi(token.substr(12, 2));
+                if (doy < 1 || doy > 366 || hour > 23 || minute > 59 || second > 60) {
+                    return std::nullopt;
+                }
+                const std::int64_t days = daysFromCivil(year, 1, 1) + (doy - 1);
+                return days * 86400 + hour * 3600 + minute * 60 + second;
+            } catch (...) {
                 return std::nullopt;
             }
-            const std::int64_t days = daysFromCivil(year, 1, 1) + (doy - 1);
-            return days * 86400 + hour * 3600 + minute * 60 + second;
         }
         if (next == std::string::npos) {
             break;
@@ -96,6 +103,8 @@ bool readVarScaled(const int ncid, const char* name, const std::size_t count,
     }
     const double rawFill = hasFill ? fillValue : 0.0;
     for (double& v : out) {
+        // Exact compare is intentional: _FillValue sentinels are small integers
+        // exactly representable as doubles, not computed floats.
         if (hasFill && v == rawFill) {
             v = fillValue; // keep raw sentinel for the caller to filter
             continue;
@@ -110,6 +119,11 @@ bool readVarScaled(const int ncid, const char* name, const std::size_t count,
 
 std::optional<std::vector<LightningFlash>> readGlmL2Lcfa(const std::string& path) {
 #ifdef CAPPEDWEATHER_HAS_NETCDF
+    // netCDF builds vary in thread safety (same reason odim_reader serializes
+    // HDF5). GLM currently decodes on a 1-thread pool, but guard the core
+    // reader itself so a future pool widening cannot corrupt library state.
+    static std::mutex glmNetcdfMutex;
+    const std::lock_guard<std::mutex> lock(glmNetcdfMutex);
     int ncid = -1;
     if (nc_open(path.c_str(), NC_NOWRITE, &ncid) != NC_NOERR) {
         return std::nullopt;
@@ -142,7 +156,10 @@ std::optional<std::vector<LightningFlash>> readGlmL2Lcfa(const std::string& path
             std::vector<LightningFlash> flashes;
             flashes.reserve(flashCount);
             std::vector<int> ids(flashCount, 0);
-            nc_get_var_int(ncid, flashIdVar, ids.data());
+            if (nc_get_var_int(ncid, flashIdVar, ids.data()) != NC_NOERR) {
+                nc_close(ncid);
+                return std::nullopt;
+            }
             for (std::size_t i = 0; i < flashCount; ++i) {
                 if (lat[i] == fillLat || lon[i] == fillLon || timeOffset[i] == fillT) {
                     continue; // sentinel / missing geometry

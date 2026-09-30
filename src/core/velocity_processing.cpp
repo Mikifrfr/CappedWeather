@@ -53,6 +53,8 @@ ProcessedVelocity processVelocity(const DecodedChunk& chunk,
         for (std::size_t orderedIndex = 1; orderedIndex < order.size(); ++orderedIndex) {
             const auto previousIndex = order[orderedIndex - 1];
             const auto currentIndex = order[orderedIndex];
+            // Intentional: 0/360 wrap neighbours are not joined; this is display
+            // unfolding only, not for nowcast, so the north seam stays unfolded.
             if (chunk.rays[previousIndex].elevationNumber != chunk.rays[currentIndex].elevationNumber) continue;
             auto& current = result[currentIndex];
             const auto& previous = result[previousIndex];

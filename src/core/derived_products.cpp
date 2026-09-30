@@ -211,6 +211,23 @@ std::optional<double> vilKilogramsPerSquareMeter(const std::vector<VerticalSampl
 
 } // namespace
 
+// Pure VILD helper (unit-test hook): VIL [kg/m^2] / thickness [m] -> [kg/m^3].
+std::optional<double> vilDensityKgPerCubicMeter(const double vilKgPerSquareMeter,
+                                                const double layerThicknessMeters) {
+    if (!std::isfinite(vilKgPerSquareMeter) || !std::isfinite(layerThicknessMeters))
+        return std::nullopt;
+    if (vilKgPerSquareMeter < 0.0 || layerThicknessMeters <= 0.0) return std::nullopt;
+    const double density = vilKgPerSquareMeter / layerThicknessMeters;
+    return std::isfinite(density) ? std::optional<double>(density) : std::nullopt;
+}
+
+std::optional<double> vilDensityKgPerCubicMeter(const double vilKgPerSquareMeter,
+                                                const double echoTopMeters,
+                                                const double baseMeters) {
+    if (!std::isfinite(echoTopMeters) || !std::isfinite(baseMeters)) return std::nullopt;
+    return vilDensityKgPerCubicMeter(vilKgPerSquareMeter, echoTopMeters - baseMeters);
+}
+
 // Cheap pre-check before paying for a deep copy + derive: true when the
 // chunk holds reflectivity on at least two distinct elevation numbers.
 // Mirrors the <2 tilts early-out inside appendDerivedProducts.
@@ -300,16 +317,32 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
             }
             if (samples.empty()) continue;
 
+            std::optional<double> echoTopHeightMeters;
             if (const auto echoTop = echoTopMeters(samples)) {
                 echoTops[gate] = encodeDerived(echoTop->first / kMetersPerKft);
                 if (echoTops[gate] > 1) {
                     ++summary.echoTopGateCount;
                     if (echoTop->second) ++summary.echoTopLowerBoundGateCount;
+                    echoTopHeightMeters = echoTop->first;
                 }
             }
+            std::optional<double> vilValue;
             if (const auto vil = vilKilogramsPerSquareMeter(samples)) {
                 vilValues[gate] = encodeDerived(*vil);
-                if (vilValues[gate] > 1) ++summary.vilGateCount;
+                if (vilValues[gate] > 1) {
+                    ++summary.vilGateCount;
+                    vilValue = *vil;
+                }
+            }
+            // VILD diagnostic only: no new product field is materialized.
+            if (echoTopHeightMeters && vilValue) {
+                const double baseHeightMeters = samples.front().heightMslMeters;
+                if (const auto density = vilDensityKgPerCubicMeter(
+                        *vilValue, *echoTopHeightMeters, baseHeightMeters)) {
+                    ++summary.vilDensityGateCount;
+                    summary.maxVilDensityKgPerCubicMeter =
+                        std::max(summary.maxVilDensityKgPerCubicMeter, *density);
+                }
             }
         }
 

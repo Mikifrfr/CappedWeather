@@ -38,6 +38,8 @@ double cellAreaKm2(const double latitudeDeg, const double gridSizeDeg) {
 std::vector<RadarStormFeature> extractRadarStormFeatures(
     const DecodedChunk& chunk, const double radarLatitudeDeg, const double radarLongitudeDeg,
     const RadarFeatureConfig config) {
+    // Display-only approximation: reflectivity and velocity are mixed on the
+    // single lowest elevation carrying either product (altitudes may differ).
     if (chunk.rays.empty() || config.gridSizeDeg <= 0.0) return {};
 
     std::uint8_t lowestElevation = std::numeric_limits<std::uint8_t>::max();

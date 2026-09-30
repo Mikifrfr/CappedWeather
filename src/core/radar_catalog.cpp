@@ -1,4 +1,5 @@
 #include "core/radar_catalog.hpp"
+#include "core/parse_utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -241,11 +242,13 @@ TTUL|Tulsa|TDWR|823|36.0710|-95.8270
         std::optional<double> parsedLongitude;
         if (std::getline(fields, latitude, '|') && std::getline(fields, longitude) &&
             !latitude.empty() && !longitude.empty()) {
-            parsedLatitude = std::stod(latitude);
-            parsedLongitude = std::stod(longitude);
+            parsedLatitude = parseDoubleSafe(latitude);
+            parsedLongitude = parseDoubleSafe(longitude);
         }
+        const auto elevation = parseDoubleSafe(elevationFeet);
+        if (!elevation.has_value()) continue;
         sites.push_back({std::move(id), std::move(name), std::move(owner), parsedLatitude, parsedLongitude,
-                         std::stod(elevationFeet) * 0.3048});
+                         *elevation * 0.3048});
     }
 
     // Real WSR-88D coordinates retained for a useful offline map while the

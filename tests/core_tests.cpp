@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -811,6 +812,98 @@ void testOdimReader() {
     assert(!readOdimPvol(std::span(bytes).first(100), "nohur", &error).has_value());
 }
 
+void testSlantRangeVerticalBeam() {
+    const double slant = slantRangeForSurfaceDistance(10000.0, 90.0);
+    assert(std::isfinite(slant));
+    assert(slant > 9000.0 && slant < 11000.0);
+}
+
+void testLightningJumpSanitizedAndFarFuturePoll() {
+    LightningJumpConfig zero;
+    zero.rateResolutionSec = 0.0;
+    assert(zero.sanitized().rateResolutionSec == 60.0);
+    LightningJumpConfig negative;
+    negative.rateResolutionSec = -5.0;
+    assert(negative.sanitized().rateResolutionSec == 60.0);
+
+    const std::int64_t t0 = 1784556000;
+    LightningJumpDetector detector;
+    detector.addFlash(static_cast<double>(t0));
+    detector.addFlash(static_cast<double>(t0 + 1));
+    const std::int64_t farFuture = t0 + static_cast<std::int64_t>(10) * 365 * 24 * 3600;
+    const auto events = detector.poll(farFuture);
+    assert(events.size() < 2000);
+}
+
+void testStormTrackerClearAndFixCap() {
+    StormTracker tracker;
+    auto tracks = tracker.update({syntheticFeature(35.0, -97.0, 60.0, true)}, 1000.0);
+    assert(!tracks.empty());
+    tracker.clear();
+    tracks = tracker.update({syntheticFeature(35.0, -97.0, 60.0, true)}, 2000.0);
+    assert(tracks.size() == 1);
+    assert(tracks.front().id == 1);
+
+    StormTracker capped;
+    for (int i = 0; i < 100; ++i) {
+        capped.update({syntheticFeature(35.0, -97.0, 50.0, false)}, 1000.0 + i * 60.0);
+    }
+    assert(!capped.tracks().empty());
+    assert(capped.tracks().front().fixes.size() <= 64);
+}
+
+void testDecodedRayLegacyGeometryMaxGates() {
+    // Wide product first, narrow second: legacy gateCount must be the max,
+    // not the last block parsed.
+    constexpr std::size_t radialLength = 140;
+    constexpr std::size_t wideOffset = 72;
+    constexpr std::size_t narrowOffset = 105;
+    std::vector<std::byte> raw(radialLength);
+    for (std::size_t index = 0; index < 4; ++index) {
+        raw[index] = static_cast<std::byte>(static_cast<unsigned char>("KTLX"[index]));
+    }
+    writeBigEndian16(raw, 18, static_cast<std::uint16_t>(radialLength));
+    writeBigEndian32(raw, 12, std::bit_cast<std::uint32_t>(90.0F));
+    raw[20] = static_cast<std::byte>(1);
+    raw[22] = static_cast<std::byte>(1);
+    writeBigEndian32(raw, 24, std::bit_cast<std::uint32_t>(0.5F));
+    writeBigEndian16(raw, 30, 2);
+    writeBigEndian32(raw, 32, static_cast<std::uint32_t>(wideOffset));
+    writeBigEndian32(raw, 36, static_cast<std::uint32_t>(narrowOffset));
+
+    raw[wideOffset] = static_cast<std::byte>('D');
+    raw[wideOffset + 1] = static_cast<std::byte>('R');
+    raw[wideOffset + 2] = static_cast<std::byte>('E');
+    raw[wideOffset + 3] = static_cast<std::byte>('F');
+    writeBigEndian16(raw, wideOffset + 8, 5);
+    writeBigEndian16(raw, wideOffset + 10, static_cast<std::uint16_t>(static_cast<std::int16_t>(0)));
+    writeBigEndian16(raw, wideOffset + 12, 1000);
+    raw[wideOffset + 19] = static_cast<std::byte>(8);
+    writeBigEndian32(raw, wideOffset + 20, std::bit_cast<std::uint32_t>(2.0F));
+    writeBigEndian32(raw, wideOffset + 24, std::bit_cast<std::uint32_t>(66.0F));
+    for (std::size_t gate = 0; gate < 5; ++gate) {
+        raw[wideOffset + 28 + gate] = static_cast<std::byte>(66);
+    }
+
+    raw[narrowOffset] = static_cast<std::byte>('D');
+    raw[narrowOffset + 1] = static_cast<std::byte>('V');
+    raw[narrowOffset + 2] = static_cast<std::byte>('E');
+    raw[narrowOffset + 3] = static_cast<std::byte>('L');
+    writeBigEndian16(raw, narrowOffset + 8, 3);
+    writeBigEndian16(raw, narrowOffset + 10, static_cast<std::uint16_t>(static_cast<std::int16_t>(0)));
+    writeBigEndian16(raw, narrowOffset + 12, 250);
+    raw[narrowOffset + 19] = static_cast<std::byte>(8);
+    writeBigEndian32(raw, narrowOffset + 20, std::bit_cast<std::uint32_t>(2.0F));
+    writeBigEndian32(raw, narrowOffset + 24, std::bit_cast<std::uint32_t>(129.0F));
+    for (std::size_t gate = 0; gate < 3; ++gate) {
+        raw[narrowOffset + 28 + gate] = static_cast<std::byte>(129);
+    }
+
+    const auto decoded = decodeMessage31Chunk(raw, "KTLX");
+    assert(decoded.rays.size() == 1);
+    assert(decoded.rays.front().gateCount == 5);
+}
+
 int main() {
     testProducts();
     testDerivedProducts();
@@ -839,5 +932,9 @@ int main() {
     testGlmReaderBuildContract();
     testOdimReader();
     testRadarLightningFusion();
+    testSlantRangeVerticalBeam();
+    testLightningJumpSanitizedAndFarFuturePoll();
+    testStormTrackerClearAndFixCap();
+    testDecodedRayLegacyGeometryMaxGates();
     std::cout << "core tests passed\n";
 }

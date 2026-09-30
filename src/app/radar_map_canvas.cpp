@@ -1421,6 +1421,8 @@ bool RadarMapCanvas::weatherOverlayCacheCoversView() const {
 void RadarMapCanvas::rebuildWeatherOverlay() {
     if (weatherOverlayBuildPending_ || width() <= 0 || height() <= 0 || weatherOverlayCacheCoversView())
         return;
+    // Early-out present: skip raster work (and by-value polygon/report copies)
+    // when both warning and report layers are hidden or have no data.
     // Nothing to rasterize. Bail before the by-value captures below, which copy
     // the full warning polygons and report vectors on the GUI thread - during a
     // drag-pan that is once per mouse-move frame, and it happened even with
@@ -3161,6 +3163,8 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
     update();
 }
 
+// TODO: future extraction point — move radar sweep rasterization out of the
+// canvas into a RadarRasterizer (offscreen tile + sweep compositor) without moving code yet.
 void RadarMapCanvas::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.fillRect(rect(), QColor(18, 24, 28));

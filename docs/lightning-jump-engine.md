@@ -85,9 +85,7 @@ Dependency: netCDF-C (vcpkg `netcdf-c`, or system). Guarded by
 - **M2** — GLM L2 reader + local-file replay tool (feed archived files from disk,
   validate flash extraction vs known case days). ✅ 2026-07-20 — see
   `docs/validation-2025-05-16.md` (62% POD, 8 min median lead on the 2025-05-16
-  outbreak, zero tuning). Note: netCDF-C via micromamba env
-  (`C:\Users\brawl\mamba-envs\netcdf`), vcpkg broken on this machine (Polish-locale
-  vswhere crash). ← NOW: M3
+  outbreak, zero tuning). Note: netCDF-C via a local conda env / vcpkg.
 - **M3** — live S3 poller in app; jump cells on the map with sigma-level colors. ✅ 2026-07-23 (`GlmSource` S3 poller, `radar_map_canvas` jump overlay, GLM intelligence inspector).
 - **M4** — Level II fusion: jump ↔ mesocyclone/az-shear correlation view. ✅ `radar_lightning_fusion` correlates jumps with NEXRAD reflectivity objects; surfaced in the GLM intelligence panel.
 - **M5** — verification harness: archived outbreak days, jump lead time vs NWS

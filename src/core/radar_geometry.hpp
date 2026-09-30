@@ -35,7 +35,7 @@ std::optional<std::size_t> gateIndexForSlantRange(double slantRangeMeters,
 // Shared lat/lon grid-cell key: packs (x, y) into a single int64 so flash-rate
 // grids, GLM overlays, and radar/lightning fusion agree on identity.
 inline std::int64_t gridCellKey(const int cellX, const int cellY) {
-    return (static_cast<std::int64_t>(cellX) << 32) ^
+    return (static_cast<std::int64_t>(cellX) << 32) |
            (static_cast<std::int64_t>(cellY) & 0xFFFFFFFFLL);
 }
 

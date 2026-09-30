@@ -9,11 +9,27 @@
 namespace cappedweather {
 
 struct LightningJumpConfig {
-    double rateResolutionSec = 60.0;    // flash-rate bin size
+    double rateResolutionSec = 60.0;    // flash-rate bin size, must be > 0
     double sigmaWindowSec = 600.0;      // trailing sigma window (10 min; M5 tuned)
     double jumpSigmaThreshold = 2.0;    // classic 2-sigma jump threshold
     double minFlashRatePerMin = 12.0;   // noise floor (M5 tuned); suppresses weak-cell noise
     int minSigmaSamples = 5;            // min trailing DFRDT samples for a valid sigma
+
+    // Clamp to sane bounds so a bad settings value can never divide by zero
+    // or invert the sigma window. Returns the sanitized copy.
+    LightningJumpConfig sanitized() const {
+        LightningJumpConfig out = *this;
+        if (!(out.rateResolutionSec > 0.0) || !(out.rateResolutionSec < 3600.0))
+            out.rateResolutionSec = 60.0;
+        if (!(out.sigmaWindowSec >= out.rateResolutionSec))
+            out.sigmaWindowSec = out.rateResolutionSec * 10.0;
+        if (out.sigmaWindowSec > 7200.0) out.sigmaWindowSec = 7200.0;
+        if (out.minSigmaSamples < 1) out.minSigmaSamples = 1;
+        if (out.minSigmaSamples > 100) out.minSigmaSamples = 100;
+        if (!(out.jumpSigmaThreshold > 0.0)) out.jumpSigmaThreshold = 2.0;
+        if (!(out.minFlashRatePerMin >= 0.0)) out.minFlashRatePerMin = 0.0;
+        return out;
+    }
 };
 
 // Lightning Jump Algorithm (LJA) detector for ONE flash-rate time series

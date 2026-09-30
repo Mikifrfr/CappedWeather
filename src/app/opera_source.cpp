@@ -16,6 +16,9 @@
 #include <algorithm>
 #include <cmath>
 #include <span>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace cappedweather {
 
@@ -28,17 +31,21 @@ constexpr char kBucket[] = "openradar-24h";
 constexpr char kUserAgentSuffix[] = " OPERA ODIM client";
 
 QString findOdimSite(const QString& radarId, QString* odimCode, QString* countryCode) {
-    // Cheap linear scan over the OPERA sites, cached after first use.
     static const std::vector<RadarSite> sites = RadarCatalog::operaSites();
+    // O(1) id -> site cache built once on first use (function-local static
+    // init is thread-safe); avoids a linear scan per requestLatest/requestRecent.
+    static const auto byId = [&]() {
+        std::unordered_map<std::string, const RadarSite*> index;
+        index.reserve(sites.size() * 2);
+        for (const auto& site : sites) index.emplace(site.id, &site);
+        return index;
+    }();
     const std::string wanted = radarId.toUpper().toStdString();
-    for (const auto& site : sites) {
-        if (site.id == wanted) {
-            if (odimCode != nullptr) *odimCode = QString::fromStdString(site.odimCode);
-            if (countryCode != nullptr) *countryCode = QString::fromStdString(site.countryCode);
-            return QString::fromStdString(site.id);
-        }
-    }
-    return {};
+    const auto found = byId.find(wanted);
+    if (found == byId.end()) return {};
+    if (odimCode != nullptr) *odimCode = QString::fromStdString(found->second->odimCode);
+    if (countryCode != nullptr) *countryCode = QString::fromStdString(found->second->countryCode);
+    return QString::fromStdString(found->second->id);
 }
 
 } // namespace
@@ -290,6 +297,9 @@ void OperaSource::cancel(const QString& radarId) {
     pendingBacklog_.remove(radarId);
     pendingScanVolumes_.remove(radarId);
     activeScanGroups_.remove(radarId);
+    // No leak: abort() still emits finished, which routes to deleteLater via
+    // the finished lambda in the constructor (erased entries hit its else
+    // branch; retained entries hit finishListing/finishObject's deleteLater).
     for (auto it = listingRequests_.begin(); it != listingRequests_.end();) {
         if (it.value().radarId == radarId) {
             auto* reply = it.key();

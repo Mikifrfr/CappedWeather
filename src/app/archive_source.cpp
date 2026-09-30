@@ -166,6 +166,11 @@ void ArchiveSource::listingFinished(QNetworkReply* reply) {
 }
 
 void ArchiveSource::beginDownloads(const std::shared_ptr<Job>& job) {
+    // Background-prefetch hook (future, no logic yet): a prefetch Job built
+    // from SessionPrefetcher::pickSpillIndexes() neighbours would enter here
+    // via job->queued with a tight maximumVolumes cap, sharing pump() so
+    // explicit user requests keep priority and finishIfDone() accounting stays
+    // unchanged. Spill-file warming itself needs no network and stays out.
     auto objects = selectArchiveObjects(std::move(job->listed), job->startUtc, job->endUtc,
                                         job->maximumVolumes);
     if (objects.isEmpty()) {
@@ -181,6 +186,10 @@ void ArchiveSource::beginDownloads(const std::shared_ptr<Job>& job) {
 }
 
 void ArchiveSource::pump(const std::shared_ptr<Job>& job) {
+    // Background-prefetch hook (future, no logic yet): keep this as the single
+    // concurrency gate (archiveParallelDownloads() + kMaximumArchiveBytes) so a
+    // future low-priority prefetch lane throttles here instead of opening a
+    // second download path. Decode still fans out to processingPool_ below.
     while (!job->cancelled && job->activeDownloads < archiveParallelDownloads() && !job->queued.isEmpty()) {
         const auto object = job->queued.dequeue();
         auto* reply =

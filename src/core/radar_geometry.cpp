@@ -65,10 +65,20 @@ BeamGeometry standardBeamGeometry(const double slantRangeMeters, const double el
 }
 
 double slantRangeForSurfaceDistance(const double surfaceDistanceMeters, const double elevationDegrees) {
+    if (!std::isfinite(surfaceDistanceMeters) || !std::isfinite(elevationDegrees)) return 0.0;
     const auto target = std::max(0.0, surfaceDistanceMeters);
+    if (target <= 0.0) return 0.0;
+    // A near-vertical beam never accumulates surface distance: the search
+    // below would double `upper` forever. Clamp to a direct geometric answer.
+    const double elevationRad = elevationDegrees * kPi / 180.0;
+    if (std::abs(std::cos(elevationRad)) < 1e-6) return target / std::max(1e-6, std::sin(elevationRad));
     auto lower = 0.0;
     auto upper = std::max(1000.0, target * 1.25 + 10000.0);
-    while (standardBeamGeometry(upper, elevationDegrees).surfaceDistanceMeters < target) upper *= 2.0;
+    int doublings = 0;
+    while (standardBeamGeometry(upper, elevationDegrees).surfaceDistanceMeters < target) {
+        if (++doublings > 64 || !std::isfinite(upper) || upper > 20e6) return upper;
+        upper *= 2.0;
+    }
     for (int iteration = 0; iteration < 36; ++iteration) {
         const auto middle = (lower + upper) * 0.5;
         if (standardBeamGeometry(middle, elevationDegrees).surfaceDistanceMeters < target) lower = middle;

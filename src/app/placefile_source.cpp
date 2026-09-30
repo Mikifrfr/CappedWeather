@@ -124,6 +124,8 @@ void PlacefileSource::setContext(const double latitude, const double longitude) 
 }
 
 void PlacefileSource::clear() {
+    // No leak: abort() still emits finished, which finish() always ends with
+    // deleteLater (missing entries hit its early-out branch, like archive_source).
     for (auto& [key, entry] : entries_) {
         Q_UNUSED(key);
         if (entry->reply) entry->reply->abort();

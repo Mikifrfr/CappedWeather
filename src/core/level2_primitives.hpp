@@ -16,6 +16,9 @@ struct Quantization {
     std::uint8_t missing;
 };
 
+// Generic 8-bit moment decoder (tested directly). Message 31 uses the
+// product-specific nativeValue() overloads below instead; both paths agree on
+// 0/1 == missing/below-threshold.
 std::optional<double> decodeByte(std::uint8_t encoded, Quantization quantization);
 
 } // namespace cappedweather

@@ -5,13 +5,15 @@
 namespace cappedweather {
 
 LightningJumpDetector::LightningJumpDetector(LightningJumpConfig config)
-    : config_(config) {}
+    : config_(config.sanitized()) {}
 
 std::int64_t LightningJumpDetector::binIndex(const double timeEpochSec) const {
+    if (!(timeEpochSec >= 0.0) || !std::isfinite(timeEpochSec)) return 0;
     return static_cast<std::int64_t>(std::floor(timeEpochSec / config_.rateResolutionSec));
 }
 
 void LightningJumpDetector::addFlash(const double timeEpochSec) {
+    if (!std::isfinite(timeEpochSec) || timeEpochSec < 0.0) return;
     binCounts_[binIndex(timeEpochSec)] += 1;
 }
 
@@ -101,7 +103,29 @@ std::vector<JumpEvent> LightningJumpDetector::poll(const std::int64_t nowEpochSe
         hasProcessedBin_ = true;
     }
 
+    // A clock jump or months-long gap must not spin millions of zero bins.
+    // Fast-forward: keep only the trailing sigma window so a gap still
+    // decays into cessation without the CPU/memory churn.
+    const std::int64_t windowBins =
+        static_cast<std::int64_t>(config_.sigmaWindowSec / config_.rateResolutionSec) + 2;
+    const std::int64_t maxCatchUpBins = std::max<std::int64_t>(windowBins + 10, 1024);
+    if (currentBin - nextBinToProcess_ > maxCatchUpBins) {
+        const std::int64_t retainedFrom = currentBin - windowBins;
+        // Drop stale pending bins; seed a zero baseline at the window edge.
+        for (auto it = binCounts_.begin(); it != binCounts_.end();) {
+            if (it->first < retainedFrom)
+                it = binCounts_.erase(it);
+            else
+                ++it;
+        }
+        history_.clear();
+        jumpActive_ = false;
+        nextBinToProcess_ = retainedFrom;
+    }
+
+    std::int64_t processed = 0;
     while (nextBinToProcess_ < currentBin) {
+        if (++processed > maxCatchUpBins) break;  // hard stop, see fast-forward above
         int count = 0;
         if (const auto it = binCounts_.find(nextBinToProcess_); it != binCounts_.end()) {
             count = it->second;

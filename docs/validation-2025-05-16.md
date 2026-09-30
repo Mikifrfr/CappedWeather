@@ -39,7 +39,7 @@ Ground truth: SPC convective-day tornado reports (`250516_rpts.csv`, UTC), 57 re
 
 ```bat
 glm_replay data/glm/20250516            # writes event log
-python validate_jumps.py                # matches vs SPC reports
+python tools/m5_verify.py               # matches vs SPC reports
 ```
-Scripts: `download_glm.py`, `validate_jumps.py` (kimi workspace; promote into
-`tools/` if we keep the harness for M5).
+Scripts: `download_glm.py`, `tools/m5_verify.py` (promoted into
+`tools/` as the M5 verification harness).

@@ -17,6 +17,9 @@ struct DecodedRay {
     float azimuthResolutionDegrees = 1.0F;
     std::uint8_t elevationNumber = 0;
     float elevationDegrees = 0.0F;
+    // Deprecated legacy geometry: kept as the widest product's geometry for
+    // old readers. New code must use firstGateByProduct/gateSpacingByProduct,
+    // which are correct per product when moments differ in range tables.
     std::uint16_t gateCount = 0;
     std::int16_t firstGateMeters = 0;
     std::uint16_t gateSpacingMeters = 0;

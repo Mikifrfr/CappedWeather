@@ -25,6 +25,9 @@ Recheck with tools/check_opera_availability.py before regenerating.
 """
 import csv
 import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # National networks with zero objects under YYYY/MM/DD/CC/ on 2026-09-06
 # (today + yesterday, PVOL and SCAN). GR/ES/PT/UK/RS/HU/SK/IL/LV/MD.
@@ -119,6 +122,9 @@ def num(x, d=0.0):
 
 
 def main():
+    if len(sys.argv) != 2:
+        print("Usage: python tools/generate_opera_sites.py <OPERA_RADARS.csv>", file=sys.stderr)
+        raise SystemExit(2)
     rows = list(csv.DictReader(open(sys.argv[1], encoding='utf-8-sig')))
     out = []
     seen = set()
@@ -144,11 +150,12 @@ def main():
                    % (code.upper(), loc, h, float(r['Latitude']),
                       float(r['Longitude']), code, cc))
         seen.add(code)
-    with open('src/core/opera_catalog.cpp', 'w', encoding='utf-8', newline='\n') as f:
+    with open(REPO_ROOT / 'src/core/opera_catalog.cpp', 'w', encoding='utf-8', newline='\n') as f:
         f.write(HEADER)
         f.write('\n'.join(out) + '\n')
         f.write(FOOTER)
     print('opera sites:', len(out))
 
 
-main()
+if __name__ == '__main__':
+    main()

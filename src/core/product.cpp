@@ -18,12 +18,17 @@ const std::vector<ProductDescriptor> kProducts{
 }
 
 const ProductDescriptor& productDescriptor(const ProductKind kind) {
+    if (const auto* found = tryProductDescriptor(kind)) return *found;
+    throw std::invalid_argument("unknown NEXRAD product kind");
+}
+
+const ProductDescriptor* tryProductDescriptor(const ProductKind kind) noexcept {
     for (const auto& product : kProducts) {
         if (product.kind == kind) {
-            return product;
+            return &product;
         }
     }
-    throw std::invalid_argument("unknown NEXRAD product kind");
+    return nullptr;
 }
 
 const std::vector<ProductDescriptor>& productDescriptors() {

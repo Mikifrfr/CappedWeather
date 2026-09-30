@@ -6,6 +6,7 @@
 #include "app/http_client.hpp"
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
+#include "app/session_store.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/placefile_source.hpp"
 #include "app/archive_source.hpp"
@@ -135,27 +136,7 @@ bool placefileUrlContainsCredentials(const QUrl& url) {    if (!url.userName().i
     });
 }
 
-// Spill-to-disk file layout: <CacheLocation>/volumes/<radarId>/<safeVolumeId>.cwdv.
-// Volume ids come from S3 keys and timestamps, so anything outside alnum +
-// "-_." is flattened before touching the filesystem.
-QString spillFilePath(const QString& radarId, const QString& volumeId) {
-    QString safe;
-    safe.reserve(volumeId.size());
-    for (const auto ch : volumeId) {
-        safe.push_back(ch.isLetterOrNumber() || ch == QLatin1Char('-') || ch == QLatin1Char('_') ||
-                               ch == QLatin1Char('.')
-                           ? ch
-                           : QLatin1Char('_'));
-    }
-    if (safe.isEmpty()) safe = QStringLiteral("volume");
-    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
-           QStringLiteral("/volumes/") + radarId + QLatin1Char('/') + safe +
-           QStringLiteral(".cwdv");
-}
-
-// Spilled tail length beyond the RAM window: 8 volumes ≈ 130-250 MB on disk
-// worst case, bounded and LRU-dropped from the front.
-constexpr int kSpilledKeepVolumes = 8;
+// Session history/spill moved to session_store.{hpp,cpp}; see MainWindow::frameChunk delegates below.
 
 // Chip dot colors mirror the offtrack sidebar mockup.
 QColor productChipColor(const ProductKind kind) {
@@ -2242,57 +2223,12 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
 
 std::shared_ptr<DecodedChunk> MainWindow::frameChunk(RadarSession& session,
                                                       const std::size_t index) {
-    if (index >= session.history.size()) return nullptr;
-    auto& frame = session.history[index];
-    if (frame.chunk) return frame.chunk;
-    // Scrub hit on a spilled frame: fault back in synchronously (tens of
-    // ms for a volume-sized read) and re-enforce the budget so RAM stays
-    // bounded. Unreadable spill (version bump, disk error) reads as a
-    // missing frame; the path is cleared so we stop retrying it.
-    if (frame.spilledPath.isEmpty()) return nullptr;
-    auto loaded = loadSpilledVolume(frame.spilledPath.toStdString());
-    if (!loaded) {
-        QFile::remove(frame.spilledPath);
-        frame.spilledPath.clear();
-        return nullptr;
-    }
-    frame.chunk = std::move(loaded);
-    enforceSpillBudget(session, static_cast<int>(index));
-    return frame.chunk;
+    return sessionFrameChunk(session, index, maximumHistoryFrames_);
 }
 
 void MainWindow::enforceSpillBudget(RadarSession& session,
                                     const int excludeIndex) {
-    const auto ramWindow = static_cast<std::size_t>(std::max(2, maximumHistoryFrames_));
-    // Oldest resident frames beyond the RAM window spill to disk instead of
-    // being dropped. A failed spill (disk full) keeps the frame resident
-    // and stops: growing RAM beats losing the volume.
-    for (;;) {
-        std::size_t resident = 0;
-        int oldestResident = -1;
-        for (std::size_t i = 0; i < session.history.size(); ++i) {
-            if (session.history[i].chunk) {
-                ++resident;
-                if (oldestResident < 0 && static_cast<int>(i) != excludeIndex)
-                    oldestResident = static_cast<int>(i);
-            }
-        }
-        if (resident <= ramWindow || oldestResident < 0) break;
-        auto& frame = session.history[static_cast<std::size_t>(oldestResident)];
-        const auto path = spillFilePath(session.radarId, frame.volumeId);
-        QDir().mkpath(QFileInfo(path).absolutePath());
-        if (!spillVolume(*frame.chunk, path.toStdString())) break;
-        frame.chunk.reset();
-        frame.spilledPath = path;
-    }
-    // Total window: RAM frames plus the spilled tail. Anything older is
-    // deleted from disk and forgotten.
-    while (session.history.size() > ramWindow + static_cast<std::size_t>(kSpilledKeepVolumes)) {
-        auto& front = session.history.front();
-        if (!front.spilledPath.isEmpty()) QFile::remove(front.spilledPath);
-        session.history.erase(session.history.begin());
-        // frameIndex is recomputed from the selected volume id by the caller.
-    }
+    enforceSessionSpillBudget(session, maximumHistoryFrames_, excludeIndex);
 }
 
 void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volumeId,
@@ -2574,6 +2510,36 @@ void MainWindow::showFrame(const int index) {
         const auto panelChunk = frameChunk(*panelSession, static_cast<std::size_t>(selected));
         if (!panelChunk) continue;
         const auto& panelFrame = panelSession->history.at(static_cast<std::size_t>(selected));
+        // Per-panel availability: in mixed US+EU layouts each panel has its own
+        // radar, so a product valid on one panel (e.g. ZDR on NEXRAD) can be
+        // missing on another (OPERA single-pol). Fall back per panel instead of
+        // leaving it blank; the global chips stay active-panel-scoped.
+        const auto panelHas = [&panelChunk](ProductKind kind) {
+            return std::any_of(panelChunk->rays.cbegin(), panelChunk->rays.cend(),
+                               [kind](const DecodedRay& ray) { return ray.has(kind); });
+        };
+        if (!panelHas(panel->product())) {
+            ProductKind fallback = ProductKind::Reflectivity;
+            if (!panelHas(fallback)) {
+                bool found = false;
+                for (const auto& descriptor : productDescriptors()) {
+                    if (panelHas(descriptor.kind)) {
+                        fallback = descriptor.kind;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) fallback = panel->product();  // empty volume: keep, don't churn
+            }
+            if (fallback != panel->product()) {
+                panel->setProduct(fallback);
+                if (panel == map_ && productCombo_) {
+                    const QSignalBlocker comboBlocker(productCombo_);
+                    const auto comboIndex = productCombo_->findData(static_cast<int>(fallback));
+                    if (comboIndex >= 0) productCombo_->setCurrentIndex(comboIndex);
+                }
+            }
+        }
         panel->setDecodedChunk(panelChunk, panelFrame.dataTime);
         panel->setVolumeQuality(std::max(0, panelFrame.chunkCount - panelFrame.failedChunks),
                                 panelFrame.chunkCount, panelFrame.failedChunks,
@@ -2631,6 +2597,11 @@ void MainWindow::updateProductAvailability() {
         const auto currentItem = itemModel->item(productCombo_->currentIndex());
         if (!currentItem || !currentItem->isEnabled()) productCombo_->setCurrentIndex(firstAvailable);
     }
+    // The chips are the primary product UI (two-column grid); they mirror the
+    // combo model but only refresh on currentIndexChanged. Without this, going
+    // OPERA (dual-pol disabled) -> NEXRAD leaves VEL/ZDR/etc chips disabled
+    // when the index itself doesn't change (e.g. stays on REF).
+    syncProductChips();
 }
 
 void MainWindow::advanceFrame() {
@@ -2668,6 +2639,8 @@ void MainWindow::stopAnimation() {
     playButton_->setText(QStringLiteral("Play"));
 }
 
+// TODO: future extraction point — move QSettings persistence here into a
+// SessionStore (load/save session, bookmarks, UI state) without moving code yet.
 void MainWindow::restoreSettings() {
     QSettings settings;
     maximumHistoryFrames_ = std::clamp(settings.value(QStringLiteral("timeline/maximumFrames"), 12).toInt(),

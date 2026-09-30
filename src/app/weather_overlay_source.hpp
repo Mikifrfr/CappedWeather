@@ -107,9 +107,21 @@ public:
                                                                  QString* error = nullptr);
 
 public slots:
+    // Offline last-known-good: refresh() never clears published state up
+    // front. Report sets, warnings_, and the Meteoalarm per-country
+    // area/hazard sets plus detail/tile caches all survive until a success
+    // replaces them wholesale (see refresh()/requestFinished()), so an
+    // offline round keeps the previous overlays on screen and only flips
+    // statusChanged() to "partial". ETag/If-Modified-Since revalidation plus
+    // the 304-cached-body path in requestFinished() serves the same goal.
     void refresh();
 
 signals:
+    // Offline last-known-good emission: overlaysReady() always carries the
+    // most recent consistent snapshot (stale warnings_ + whatever report sets
+    // succeeded), even when the alerts request or its parse fails — see
+    // publishIfComplete(). Consumers must treat this as usable offline data,
+    // not an error clear; failures are reported via statusChanged() only.
     void overlaysReady(QVector<WeatherWarning> warnings, QVector<StormReport> reports,
                        QDateTime receivedAt);
     void statusChanged(QString status);
@@ -160,6 +172,9 @@ private:
 
     QNetworkAccessManager network_;
     QHash<QNetworkReply*, RequestContext> requests_;
+    // Offline last-known-good store for NWS alerts: replaced wholesale only
+    // on a successful parse (see requestFinished()); a failed round leaves
+    // the previous warnings_ in place so the map never blanks while offline.
     QVector<WeatherWarning> warnings_;
     // Meteoalarm state. Regional responses replace their own per-country sets
     // wholesale (last-known-good survives per-feed failures); details and
@@ -198,9 +213,17 @@ private:
     QSet<QString> meteoPendingTiles_;
     QDateTime meteoReferenceDate_;
     QVector<StormReport> reports_;
+    // Offline last-known-good store for SPC reports: each of the 6
+    // (today/yesterday x tornado/hail/wind) sets is replaced wholesale only
+    // on its own success; a failed fetch keeps that set's previous contents
+    // and publishOverlaySnapshot() re-emits the merged 24 h view unchanged.
     std::array<QVector<StormReport>, 6> reportSets_;
     QHash<QString, QVector<int>> zoneWarningIndexes_;
     QHash<QString, QVector<WarningPolygon>> zoneCache_;
+    // Offline/304 cache: responseBodies_ holds the last good body per URL so
+    // a 304 revalidation can republish without network bytes; responseEtags_/
+    // responseLastModified_ feed the conditional headers set in request().
+    // Zone geometry is excluded from revalidation and cached separately above.
     QHash<QUrl, QByteArray> responseBodies_;
     QHash<QUrl, QByteArray> responseEtags_;
     QHash<QUrl, QByteArray> responseLastModified_;

@@ -139,6 +139,7 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
         }
 
         bool hasField = false;
+        std::size_t legacyBestGates = 0;
         for (std::size_t block = 0; block < *blockCount; ++block) {
             const auto pointer = readBigEndian32(bytes, pos + 32 + block * 4);
             if (!pointer.has_value() || *pointer > *radialLength - kDataHeaderSize) {
@@ -174,9 +175,15 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
                 continue;
             }
 
-            ray.gateCount = std::max(ray.gateCount, *gates);
-            ray.firstGateMeters = firstGate;
-            ray.gateSpacingMeters = *spacing;
+            // Legacy single-geometry fields are deprecated: products can differ
+            // in first-gate/spacing. Keep the geometry of the widest product so
+            // legacy readers get the superset, not the last block parsed.
+            if (*gates > legacyBestGates) {
+                legacyBestGates = *gates;
+                ray.gateCount = *gates;
+                ray.firstGateMeters = firstGate;
+                ray.gateSpacingMeters = *spacing;
+            }
             auto& field = ray.fields.at(productIndex(*kind));
             ray.firstGateByProduct.at(productIndex(*kind)) = firstGate;
             ray.gateSpacingByProduct.at(productIndex(*kind)) = *spacing;

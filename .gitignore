@@ -8,6 +8,13 @@
 /CappedWeather-*.msi
 *.user
 *.suo
+dist/
+vcpkg_installed/
+.vscode/
+*.gcda
+*.gcno
+coverage/
+.env
 
 /data/glm/
 /data/verification/results/

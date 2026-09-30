@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(CappedWeather VERSION 0.6.0 LANGUAGES CXX)
+project(CappedWeather VERSION 0.6.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -180,6 +180,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/radar_map_canvas.hpp
             src/app/s3_listing.cpp
             src/app/s3_listing.hpp
+            src/app/session_store.cpp
+            src/app/session_store.hpp
             src/app/theme.cpp
             src/app/theme.hpp
             src/app/command_palette.cpp
@@ -318,6 +320,11 @@ if(CAPPEDWEATHER_BUILD_APP)
     endif()
 endif()
 
+if(NOT WIN32)
+    install(FILES packaging/CappedWeather.desktop DESTINATION share/applications)
+    install(FILES packaging/CappedWeather.png DESTINATION share/icons/hicolor/256x256/apps)
+endif()
+
 set(CPACK_PACKAGE_NAME "CappedWeather")
 set(CPACK_PACKAGE_VENDOR "CappedWeather")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Operational real-time Level II radar viewer")
@@ -334,3 +341,29 @@ else()
     set(CPACK_GENERATOR "TGZ")
 endif()
 include(CPack)
+
+# --- Distribution track: build-tree Windows Qt deploy (appended) ---
+# Lets build/Release/CappedWeather.exe run without manual PATH setup by
+# copying the Qt runtime next to it via windeployqt.
+# Existing install()/CPack rules above are untouched; opt in with:
+#   cmake --build build --target cappedweather_deploy_build_tree --config Release
+if(WIN32 AND Qt6_FOUND)
+    if(TARGET CappedWeather)
+        find_program(CAPPEDWEATHER_WINDEPLOYQT_EXE windeployqt.exe
+            HINTS
+                "${CAPPEDWEATHER_QT_ROOT}/bin"
+                "$ENV{CMAKE_PREFIX_PATH}/bin"
+                "C:/Qt/6.8.3/msvc2022_64/bin"
+        )
+        if(CAPPEDWEATHER_WINDEPLOYQT_EXE)
+            add_custom_target(cappedweather_deploy_build_tree
+                COMMAND "${CAPPEDWEATHER_WINDEPLOYQT_EXE}" --release --no-translations "$<TARGET_FILE:CappedWeather>"
+                DEPENDS CappedWeather
+                COMMENT "Running windeployqt on the build-tree CappedWeather.exe"
+                VERBATIM
+            )
+        else()
+            message(STATUS "windeployqt.exe not found: cappedweather_deploy_build_tree target skipped")
+        endif()
+    endif()
+endif()
