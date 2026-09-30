@@ -1711,8 +1711,6 @@ void RadarMapCanvas::rebuildOverlay() {
                 maximumRangeMeters,
                 static_cast<double>(firstGateMeters) +
                     std::max(0.0, static_cast<double>(values.size()) - 0.5) * gateSpacingMeters);
-            const auto halfAzimuth = std::clamp(
-                static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
             const auto halfRange = static_cast<double>(gateSpacingMeters) * 0.5;
             for (std::size_t gate = 0; gate < values.size(); ++gate) {
                 std::optional<double> value;
@@ -1744,10 +1742,16 @@ void RadarMapCanvas::rebuildOverlay() {
                     return destinationPoint({baseLatitude, baseLongitude}, azimuth,
                                             beam.surfaceDistanceMeters);
                 };
-                const auto lowerAzimuth = static_cast<double>(ray.azimuthDegrees) - halfAzimuth *
-                    (smoothDisplay ? 1.35 : 1.0);
-                const auto upperAzimuth = static_cast<double>(ray.azimuthDegrees) + halfAzimuth *
-                    (smoothDisplay ? 1.35 : 1.0);
+                const AzSpan& span = azSpans[rayIndex];
+                const double resHalf = std::clamp(
+                    static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
+                const double spanFactor = smoothDisplay ? 1.35 : 1.0;
+                const auto lowerAzimuth =
+                    span.valid ? span.lower
+                               : static_cast<double>(ray.azimuthDegrees) - resHalf * spanFactor;
+                const auto upperAzimuth =
+                    span.valid ? span.upper
+                               : static_cast<double>(ray.azimuthDegrees) + resHalf * spanFactor;
                 const std::array coordinates{
                     coordinateAt(lowerRange, lowerAzimuth), coordinateAt(upperRange, lowerAzimuth),
                     coordinateAt(upperRange, upperAzimuth), coordinateAt(lowerRange, upperAzimuth),
@@ -1768,11 +1772,16 @@ void RadarMapCanvas::rebuildOverlay() {
         overlayImage.fill(Qt::transparent);
         const auto overlayCenterWorld = worldPointAt(centerCoordinate.y(), centerCoordinate.x());
         QPainter overlayPainter(&overlayImage);
-        overlayPainter.setPen(Qt::NoPen);
         overlayPainter.translate(overlayLogicalSize.width() / 2.0 - overlayCenterWorld.x(),
                                  overlayLogicalSize.height() / 2.0 - overlayCenterWorld.y());
         for (auto it = paths.cbegin(); it != paths.cend(); ++it) {
-            overlayPainter.setBrush(QColor::fromRgba(it.key()));
+            // Same-color 1px outline, not NoPen: adjacent gate quads share exact
+            // mathematical edges but rasterize independently, so NoPen leaves
+            // 1px background seams (azimuthal corduroy). The outline closes them
+            // deterministically regardless of color-group draw order.
+            const QColor color = QColor::fromRgba(it.key());
+            overlayPainter.setBrush(color);
+            overlayPainter.setPen(QPen(color, 1.0, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
             overlayPainter.drawPath(it.value());
         }
         overlayPainter.end();
@@ -1786,6 +1795,55 @@ void RadarMapCanvas::rebuildOverlay() {
             if (generation == guard->overlayGeneration_ && targetZoom == guard->zoom_) {
                 guard->overlayImage_ = std::move(overlayImage);
                 guard->overlayImageLogicalSize_ = overlayLogicalSize;
+        // Azimuth tiling from ACTUAL neighbor spacing, not just the resolution
+        // code. Where ray spacing outgrows the coded resolution (super-res
+        // dropout at far range, mixed sweeps), width-from-code leaves
+        // ray-wide background corduroy. Tile by azimuth midpoints, clamped to
+        // [0.5x, 2x] the coded half-width: regular data renders exactly as
+        // before, mismatched zones fill, and real data gaps stay honestly
+        // dark instead of being smeared shut.
+        struct AzSpan {
+            double lower = 0.0;
+            double upper = 0.0;
+            bool valid = false;
+        };
+        std::vector<AzSpan> azSpans(chunk->rays.size());
+        {
+            std::vector<std::pair<double, std::size_t>> order;
+            order.reserve(chunk->rays.size());
+            for (std::size_t rayIndex = 0; rayIndex < chunk->rays.size(); ++rayIndex) {
+                const auto& ray = chunk->rays[rayIndex];
+                if (elevation && ray.elevationNumber != *elevation) continue;
+                if (!ray.has(product)) continue;
+                auto az = std::fmod(static_cast<double>(ray.azimuthDegrees), 360.0);
+                if (az < 0.0) az += 360.0;
+                order.emplace_back(az, rayIndex);
+            }
+            std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+                return a.first < b.first;
+            });
+            const std::size_t count = order.size();
+            for (std::size_t pos = 0; pos < count; ++pos) {
+                const auto [centerAz, rayIndex] = order[pos];
+                const auto& ray = chunk->rays[rayIndex];
+                const double resHalf = std::clamp(
+                    static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
+                double halfLo = resHalf;
+                double halfHi = resHalf;
+                if (count > 1) {
+                    double prevAz = order[(pos + count - 1) % count].first;
+                    double nextAz = order[(pos + 1) % count].first;
+                    double distPrev = centerAz - prevAz;
+                    if (distPrev <= 0.0) distPrev += 360.0;
+                    double distNext = nextAz - centerAz;
+                    if (distNext <= 0.0) distNext += 360.0;
+                    halfLo = std::clamp(distPrev * 0.5, resHalf * 0.5, resHalf * 2.0);
+                    halfHi = std::clamp(distNext * 0.5, resHalf * 0.5, resHalf * 2.0);
+                }
+                const double factor = smoothDisplay ? 1.35 : 1.0;
+                azSpans[rayIndex] = {centerAz - halfLo * factor, centerAz + halfHi * factor, true};
+            }
+        }
                 guard->overlayImageCenterWorld_ = overlayCenterWorld;
                 guard->maximumRangeMeters_ = maximumRangeMeters > 0.0
                                                   ? maximumRangeMeters
