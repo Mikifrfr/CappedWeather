@@ -10,10 +10,13 @@
 
 namespace cappedweather {
 
-// Per-storm tracks across volumes. The old single-centroid trail followed
-// the global maximum, so the max jumping between cells read as absurd
-// motion. The tracker instead keeps one history per storm, matched by
-// proximity between volumes, with short coasting when a volume misses.
+// Per-storm tracks across volumes. Cost-based assignment with motion
+// prediction: each track predicts its position at the new epoch from its
+// estimated velocity, candidates are gated around the prediction, and a
+// global Hungarian assignment minimizes distance + intensity/area penalties.
+// Splits seed a new track carrying the parent id; merges coast the loser.
+// Timeline scrubbing (older-or-equal epochs) is ignored so it can never
+// corrupt the tracks.
 struct StormTrackFix {
     double latitudeDeg = 0.0;
     double longitudeDeg = 0.0;
@@ -27,6 +30,14 @@ struct StormTrack {
     int id = 0;
     std::deque<StormTrackFix> fixes;
     int misses = 0;
+    // Motion state (deg/sec, estimated from recent fixes, smoothed).
+    double velocityLatDegPerSec = 0.0;
+    double velocityLonDegPerSec = 0.0;
+    // Split origin: 0 when born standalone, else the parent track id.
+    int parentId = 0;
+    // Lifetime stats for quality/confidence display.
+    int hits = 0;
+    int ageVolumes = 0;
 };
 
 // Per-track running maximum reflectivity location ("max trail").
@@ -83,6 +94,11 @@ public:
                                           double epochSeconds);
     const std::vector<StormTrack>& tracks() const { return tracks_; }
     void clear();
+
+    // Predicted position of a track at a future (or present) epoch from its
+    // estimated velocity. Falls back to the tail fix when < 2 fixes.
+    static void predictPosition(const StormTrack& track, double epochSeconds, double& latOut,
+                                double& lonOut);
 
 private:
     std::vector<StormTrack> tracks_;

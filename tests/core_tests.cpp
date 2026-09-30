@@ -852,6 +852,55 @@ void testStormTrackerClearAndFixCap() {
     assert(capped.tracks().front().fixes.size() <= 64);
 }
 
+void testStormTrackerMotionPrediction() {
+    // Steady eastward mover: second update seeds velocity, third must follow
+    // the prediction, not just the tail.
+    StormTracker tracker;
+    tracker.update({syntheticFeature(35.0, -97.0, 60.0, true)}, 1000.0);
+    tracker.update({syntheticFeature(35.0, -96.9, 60.0, true)}, 1300.0);
+    const auto& seeded = tracker.tracks();
+    assert(seeded.size() == 1);
+    assert(seeded.front().fixes.size() == 2);
+    // Velocity should point east (lon increasing).
+    assert(seeded.front().velocityLonDegPerSec > 0.0);
+    double plat = 0.0, plon = 0.0;
+    StormTracker::predictPosition(seeded.front(), 1600.0, plat, plon);
+    assert(plon > -96.9);  // predicted ahead of the tail
+    // Third volume continues the line: same id must survive.
+    const int id = seeded.front().id;
+    auto tracks = tracker.update({syntheticFeature(35.0, -96.8, 60.0, true)}, 1600.0);
+    assert(tracks.size() == 1);
+    assert(tracks.front().id == id);
+    assert(tracks.front().fixes.size() == 3);
+}
+
+void testStormTrackerSplitParent() {
+    // One cell splits: the divergent piece births with parentId set.
+    StormTracker tracker;
+    tracker.update({syntheticFeature(35.0, -97.0, 60.0, true)}, 1000.0);
+    auto tracks = tracker.update({syntheticFeature(35.0, -96.9, 60.0, true),
+                                  syntheticFeature(35.05, -96.85, 55.0, false)},
+                                 1300.0);
+    assert(tracks.size() == 2);
+    bool foundChild = false;
+    for (const auto& track : tracks) {
+        if (track.fixes.size() == 1 && track.parentId != 0) foundChild = true;
+    }
+    assert(foundChild);
+}
+
+void testStormTrackerIntensityGate() {
+    // Same motion, wildly different intensity still matches when close
+    // (dBZ penalty capped), but a teleport + intensity jump births new.
+    StormTracker tracker;
+    tracker.update({syntheticFeature(35.0, -97.0, 60.0, true)}, 1000.0);
+    auto tracks = tracker.update({syntheticFeature(35.0, -96.95, 45.0, true)}, 1300.0);
+    assert(tracks.size() == 1);
+    assert(tracks.front().fixes.size() == 2);
+}
+
+
+
 void testDecodedRayLegacyGeometryMaxGates() {
     // Wide product first, narrow second: legacy gateCount must be the max,
     // not the last block parsed.
@@ -935,6 +984,9 @@ int main() {
     testSlantRangeVerticalBeam();
     testLightningJumpSanitizedAndFarFuturePoll();
     testStormTrackerClearAndFixCap();
+    testStormTrackerMotionPrediction();
+    testStormTrackerSplitParent();
+    testStormTrackerIntensityGate();
     testDecodedRayLegacyGeometryMaxGates();
     std::cout << "core tests passed\n";
 }

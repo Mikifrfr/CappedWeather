@@ -2139,22 +2139,24 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
     if (tracks.empty()) return;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
-    // Primary track = longest history (tie: strongest latest fix). It keeps
-    // the full dot + label + extrapolation treatment; every other storm
-    // draws as a thin history line so multi-cell days read at a glance.
-    const StormTrack* primary = nullptr;
+    // Ranked tracks by history length (tie: strongest latest fix). The longest
+    // keeps the full dot + label treatment; the top 3 get +10/+20/+30
+    // extrapolation; every other storm draws as a thin history line with its
+    // track id so multi-cell days read at a glance.
+    std::vector<const StormTrack*> ranked;
+    ranked.reserve(tracks.size());
     for (const auto& track : tracks) {
-        if (track.fixes.size() < 2) continue;
-        if (!primary || track.fixes.size() > primary->fixes.size() ||
-            (track.fixes.size() == primary->fixes.size() &&
-             track.fixes.back().maximumReflectivityDbz >
-                 primary->fixes.back().maximumReflectivityDbz))
-            primary = &track;
+        if (track.fixes.size() >= 2) ranked.push_back(&track);
     }
-    for (const auto& track : tracks) {
-        if (track.fixes.size() < 2 || &track == primary) continue;
+    std::sort(ranked.begin(), ranked.end(), [](const StormTrack* a, const StormTrack* b) {
+        if (a->fixes.size() != b->fixes.size()) return a->fixes.size() > b->fixes.size();
+        return a->fixes.back().maximumReflectivityDbz > b->fixes.back().maximumReflectivityDbz;
+    });
+    const StormTrack* primary = ranked.empty() ? nullptr : ranked.front();
+    for (const auto* track : ranked) {
+        if (track == primary) continue;
         QPolygonF line;
-        for (const auto& fix : track.fixes) line << screenPoint(fix.latitudeDeg, fix.longitudeDeg);
+        for (const auto& fix : track->fixes) line << screenPoint(fix.latitudeDeg, fix.longitudeDeg);
         painter.setPen(QPen(QColor(255, 209, 122, 90), 1.5, Qt::SolidLine, Qt::RoundCap,
                             Qt::RoundJoin));
         painter.setBrush(Qt::NoBrush);
@@ -2185,24 +2187,32 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
         if (i + 1 == fixes.size() && zoom_ >= 6) {
             painter.setPen(QColor(255, 235, 200));
             painter.setFont(hudFont(7, QFont::DemiBold));
-            painter.drawText(QRectF(p.x() + 9, p.y() - 20, 120, 16),
+            painter.drawText(QRectF(p.x() + 9, p.y() - 20, 140, 16),
                              Qt::AlignLeft | Qt::AlignVCenter,
-                             QStringLiteral("trail %1 dBZ").arg(fix.maximumReflectivityDbz, 0, 'f', 0));
+                             QStringLiteral("#%1 trail %2 dBZ")
+                                 .arg(primary->id)
+                                 .arg(fix.maximumReflectivityDbz, 0, 'f', 0));
         }
     }
-    // Extrapolated motion from a least-squares fit over the newest fixes of
-    // the primary track (+10/+20/+30 min). Dead reckoning, not a forecast.
-    // Three gates keep a centroid jump from becoming a cross-state arrow:
-    // enough fixes with a real time span, a plausible storm speed, and a
-    // hard cap on the drawn length.
-    if (zoom_ >= 6 && fixes.size() >= 3) {
-        const auto window = std::min<std::size_t>(5, fixes.size());
-        const auto& newest = fixes.back();
-        double sumT = 0.0, sumTT = 0.0, sumLat = 0.0, sumLon = 0.0, sumTLat = 0.0, sumTLon = 0.0;
-        int fitted = 0;
-        const StormTrackFix* oldest = nullptr;
-        for (std::size_t i = fixes.size() - window; i < fixes.size(); ++i) {
-            const auto& fix = fixes[i];
+    // Extrapolated motion for the top-3 ranked tracks (+10/+20/+30 min).
+    // Least-squares fit over each track's newest fixes; dead reckoning, not a
+    // forecast. Three gates keep a centroid jump from becoming a cross-state
+    // arrow: enough fixes with a real time span, a plausible storm speed, and
+    // a hard cap on the drawn length.
+    if (zoom_ >= 6) {
+        int extrapolated = 0;
+        for (const auto* track : ranked) {
+            if (extrapolated >= 3) break;
+            const auto& tfixes = track->fixes;
+            if (tfixes.size() < 3) continue;
+            const auto window = std::min<std::size_t>(5, tfixes.size());
+            const auto& newest = tfixes.back();
+            double sumT = 0.0, sumTT = 0.0, sumLat = 0.0, sumLon = 0.0, sumTLat = 0.0,
+                   sumTLon = 0.0;
+            int fitted = 0;
+            const StormTrackFix* oldest = nullptr;
+            for (std::size_t i = tfixes.size() - window; i < tfixes.size(); ++i) {
+                const auto& fix = tfixes[i];
             // Seconds before the newest fix (<= 0), so the fit is anchored at now.
             const auto dt = fix.epochSeconds - newest.epochSeconds;
             sumT += dt;
@@ -2231,8 +2241,8 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
             if (windowSpeed >= 1.0 && windowSpeed <= 35.0) {
                 // Gate 3: never draw past 120 km from the current core.
                 constexpr double kExtrapolationCapMeters = 120000.0;
-                QPolygonF extrapolated;
-                extrapolated << screenPoint(newest.latitudeDeg, newest.longitudeDeg);
+                QPolygonF path;
+                path << screenPoint(newest.latitudeDeg, newest.longitudeDeg);
                 for (int step = 1; step <= 3; ++step) {
                     const auto seconds = step * 600.0;
                     const auto lat =
@@ -2241,16 +2251,19 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
                     if (haversineMeters(newest.latitudeDeg, newest.longitudeDeg, lat, lon) >
                         kExtrapolationCapMeters)
                         break;
-                    extrapolated << screenPoint(lat, lon);
+                    path << screenPoint(lat, lon);
                 }
-                if (extrapolated.size() >= 2) {
+                if (path.size() >= 2) {
+                    // Dim non-primary tracks so the longest stays dominant.
+                    const bool isPrimary = (track == primary);
+                    const int alpha = isPrimary ? 160 : 110;
                     painter.setPen(
-                        QPen(QColor(255, 209, 122, 160), 1.5, Qt::DashLine, Qt::RoundCap));
+                        QPen(QColor(255, 209, 122, alpha), 1.5, Qt::DashLine, Qt::RoundCap));
                     painter.setBrush(Qt::NoBrush);
-                    painter.drawPolyline(extrapolated);
+                    painter.drawPolyline(path);
                     painter.setFont(hudFont(7));
-                    for (int step = 1; step < extrapolated.size(); ++step) {
-                        const auto point = extrapolated.at(step);
+                    for (int step = 1; step < path.size(); ++step) {
+                        const auto point = path.at(step);
                         if (!rect().adjusted(-30, -30, 30, 30).contains(point.toPoint())) continue;
                         painter.setPen(QPen(QColor(255, 209, 122, 190), 1.5));
                         painter.setBrush(Qt::NoBrush);
@@ -2343,6 +2356,29 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
     }
 
     if ((shearVisible_ && !radarFeatures_.empty()) || (stormTrailVisible_ && hasStormTracks())) {
+        // Track id + motion vector for every storm at usable zooms.
+        if (zoom_ >= 6) {
+            const auto& newest = track->fixes.back();
+            const auto p = screenPoint(newest.latitudeDeg, newest.longitudeDeg);
+            if (rect().adjusted(-30, -30, 30, 30).contains(p.toPoint())) {
+                painter.setPen(QColor(255, 235, 200, 160));
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                painter.drawText(QRectF(p.x() + 9, p.y() - 20, 80, 16),
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 QStringLiteral("#%1").arg(track->id));
+                // 5-min motion vector from the tracker's velocity estimate.
+                const double vLat = track->velocityLatDegPerSec;
+                const double vLon = track->velocityLonDegPerSec;
+                const double vMag = std::hypot(vLat * 111000.0, vLon * 111000.0);
+                if (vMag >= 1.0 && vMag <= 60.0) {
+                    const auto tip = screenPoint(newest.latitudeDeg + vLat * 300.0,
+                                                 newest.longitudeDeg + vLon * 300.0);
+                    painter.setPen(QPen(QColor(255, 209, 122, 140), 1.5, Qt::SolidLine,
+                                        Qt::RoundCap));
+                    painter.drawLine(p, tip);
+                }
+            }
+        }
         const QRectF analysisPanel(12, 96, 258, 20);
         painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
         painter.setBrush(QColor(8, 15, 19, 205));
@@ -2444,9 +2480,11 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         const auto bodyStart = isWarning ? 3 : 1;
         const auto body = parts.mid(bodyStart).join(QLatin1Char('\n')).trimmed();
 
+                    ++extrapolated;
         auto accent = isWarning ? nwsAlertStyle(title).color : QColor("#80d3ff");
         if (pinnedInfoKind_ == PinnedInfoKind::Lightning && pinnedLightningCell_) {
             const auto selected = std::find_if(
+        }  // for track : ranked
                 lightningCells_.cbegin(), lightningCells_.cend(), [this](const auto& cell) {
                     return cell.cellX == pinnedLightningCell_->first &&
                            cell.cellY == pinnedLightningCell_->second;
