@@ -271,6 +271,8 @@ private:
     QLabel* fusionBadge_ = nullptr;
     QCheckBox* shearCheck_ = nullptr;
     QLabel* shearBadge_ = nullptr;
+    QCheckBox* tvsCheck_ = nullptr;
+    QLabel* tvsBadge_ = nullptr;
     QCheckBox* trailCheck_ = nullptr;
     QCheckBox* smoothingCheck_ = nullptr;
     QLabel* scanDiagnosticsLabel_ = nullptr;

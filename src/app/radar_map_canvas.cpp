@@ -565,6 +565,9 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         invalidateOverlay();
         invalidateLightningFusion();
         stormTracker_.clear();
+        // Fresh radar, fresh storms: persistence must not carry markers over.
+        circulationTracks_.clear();
+        circulations_.clear();
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -670,6 +673,16 @@ void RadarMapCanvas::setShearVisible(const bool visible) {
     update();
 }
 
+void RadarMapCanvas::setTvsVisible(const bool visible) {
+    if (tvsVisible_ == visible) return;
+    tvsVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::circulationCount() const {
+    return static_cast<int>(circulations_.size());
+}
+
 void RadarMapCanvas::setStormTrailVisible(const bool visible) {
     if (stormTrailVisible_ == visible) return;
     stormTrailVisible_ = visible;
@@ -730,20 +743,37 @@ void RadarMapCanvas::rebuildLightningFusion() {
     const auto cells = lightningCells_;
     const auto latitude = *site->latitude;
     const auto longitude = *site->longitude;
+    const auto antennaElevM = site->antennaElevationMeters;
+    const auto nyquist = velocityOptions_.nyquistVelocityMetersPerSecond;
     const QPointer<RadarMapCanvas> guard(this);
-    QThreadPool::globalInstance()->start([guard, generation, chunk, cells, latitude, longitude] {
-        auto features = extractRadarStormFeatures(*chunk, latitude, longitude);
-        auto associations = associateLightningWithRadar(cells, features);
-        if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, generation, features = std::move(features),
-                                          associations = std::move(associations)]() mutable {
+    QThreadPool::globalInstance()->start(
+        [guard, generation, chunk, cells, latitude, longitude, antennaElevM, nyquist] {
+            auto features = extractRadarStormFeatures(*chunk, latitude, longitude);
+            auto associations = associateLightningWithRadar(cells, features);
+            // TVS / meso detection on dealiased velocity at the panel nyquist.
+            // Independent of the display product: markers must survive while
+            // the user looks at reflectivity.
+            VelocityProcessingOptions detectOptions;
+            detectOptions.mode = VelocityProcessingMode::Dealiased;
+            detectOptions.nyquistVelocityMetersPerSecond = nyquist;
+            auto dealiased = sharedProcessedVelocity(chunk, detectOptions);
+            auto circulations = dealiased ? detectCirculations(*chunk, *dealiased, latitude,
+                                                               longitude, antennaElevM)
+                                          : std::vector<CirculationDetection>{};
             if (!guard) return;
-            guard->lightningFusionBuildPending_ = false;
-            if (generation == guard->lightningFusionGeneration_) {
-                guard->radarFeatures_ = std::move(features);
-                guard->lightningAssociations_ = std::move(associations);
-                guard->lightningFusionComputedGeneration_ = generation;
-                guard->refreshPinnedLightningInfo();
+            QMetaObject::invokeMethod(
+                guard,
+                [guard, generation, features = std::move(features),
+                 associations = std::move(associations),
+                 circulations = std::move(circulations)]() mutable {
+                    if (!guard) return;
+                    guard->lightningFusionBuildPending_ = false;
+                    if (generation == guard->lightningFusionGeneration_) {
+                        guard->radarFeatures_ = std::move(features);
+                        guard->lightningAssociations_ = std::move(associations);
+                        guard->persistCirculations(std::move(circulations));
+                        guard->lightningFusionComputedGeneration_ = generation;
+                        guard->refreshPinnedLightningInfo();
                 // Per-storm tracks: fold the whole feature set into the
                 // tracker (newest volume only — the tracker itself ignores
                 // older-or-equal updates, so timeline scrubbing can never
@@ -756,6 +786,61 @@ void RadarMapCanvas::rebuildLightningFusion() {
             }
             guard->update();
         }, Qt::QueuedConnection);
+    });
+}
+
+void RadarMapCanvas::persistCirculations(std::vector<CirculationDetection> fresh) {
+    // Time continuity: a detection must repeat across volumes before it draws
+    // (kMinHitsToShow), so single-volume dealiasing glitches never become a
+    // TVS marker. Matches are nearest-within-gate; kinds may evolve MESO->TVS
+    // as the couplet intensifies.
+    constexpr double kMatchKm = 8.0;
+    constexpr int kMinHitsToShow = 2;
+    constexpr int kMaxMisses = 2;
+    constexpr std::size_t kMaxTracks = 24;
+    std::vector<char> used(fresh.size(), false);
+    for (auto& track : circulationTracks_) {
+        double best = -1.0;
+        double bestDist = 0.0;
+        for (std::size_t i = 0; i < fresh.size(); ++i) {
+            if (used[i]) continue;
+            const double dist =
+                haversineMeters(track.detection.latitudeDeg, track.detection.longitudeDeg,
+                                fresh[i].latitudeDeg, fresh[i].longitudeDeg);
+            if (dist / 1000.0 <= kMatchKm && (best < 0.0 || dist < bestDist)) {
+                best = static_cast<double>(i);
+                bestDist = dist;
+            }
+        }
+        if (best >= 0.0) {
+            track.detection = std::move(fresh[static_cast<std::size_t>(best)]);
+            track.hits += 1;
+            track.misses = 0;
+            used[static_cast<std::size_t>(best)] = true;
+        } else {
+            track.misses += 1;
+        }
+    }
+    std::erase_if(circulationTracks_,
+                  [](const PersistedCirculation& track) { return track.misses > kMaxMisses; });
+    for (std::size_t i = 0; i < fresh.size(); ++i) {
+        if (!used[i]) circulationTracks_.push_back({std::move(fresh[i]), 1, 0});
+    }
+    while (circulationTracks_.size() > kMaxTracks) {
+        const auto victim =
+            std::min_element(circulationTracks_.begin(), circulationTracks_.end(),
+                             [](const PersistedCirculation& a, const PersistedCirculation& b) {
+                                 if (a.hits != b.hits) return a.hits < b.hits;
+                                 return a.misses > b.misses;
+                             });
+        circulationTracks_.erase(victim);
+    }
+    circulations_.clear();
+    for (const auto& track : circulationTracks_) {
+        if (track.hits >= kMinHitsToShow) circulations_.push_back(track.detection);
+    }
+    std::sort(circulations_.begin(), circulations_.end(), [](const auto& a, const auto& b) {
+        return a.maxDeltaVelocityMetersPerSecond > b.maxDeltaVelocityMetersPerSecond;
     });
 }
 
@@ -996,6 +1081,9 @@ void RadarMapCanvas::setVelocityProcessing(VelocityProcessingOptions options) {
     options.stormMotionSpeedMetersPerSecond = std::clamp(options.stormMotionSpeedMetersPerSecond, 0.0, 80.0);
     velocityOptions_ = options;
     refreshVelocityProcessing();
+    // Circulation detection keys off dealiased velocity at the panel nyquist,
+    // so a nyquist change must recompute markers too.
+    invalidateLightningFusion();
     invalidateOverlay();
     update();
 }
@@ -1698,6 +1786,55 @@ void RadarMapCanvas::rebuildOverlay() {
             return QPointF((longitude + 180.0) / 360.0 * world,
                            (0.5 - std::log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * kPi)) * world);
         };
+        // Azimuth tiling from ACTUAL neighbor spacing, not just the resolution
+        // code. Where ray spacing outgrows the coded resolution (super-res
+        // dropout at far range, mixed sweeps), width-from-code leaves
+        // ray-wide background corduroy. Tile by azimuth midpoints, clamped to
+        // [0.5x, 2x] the coded half-width: regular data renders exactly as
+        // before, mismatched zones fill, and real data gaps stay honestly
+        // dark instead of being smeared shut.
+        struct AzSpan {
+            double lower = 0.0;
+            double upper = 0.0;
+            bool valid = false;
+        };
+        std::vector<AzSpan> azSpans(chunk->rays.size());
+        {
+            std::vector<std::pair<double, std::size_t>> order;
+            order.reserve(chunk->rays.size());
+            for (std::size_t rayIndex = 0; rayIndex < chunk->rays.size(); ++rayIndex) {
+                const auto& ray = chunk->rays[rayIndex];
+                if (elevation && ray.elevationNumber != *elevation) continue;
+                if (!ray.has(product)) continue;
+                auto az = std::fmod(static_cast<double>(ray.azimuthDegrees), 360.0);
+                if (az < 0.0) az += 360.0;
+                order.emplace_back(az, rayIndex);
+            }
+            std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+                return a.first < b.first;
+            });
+            const std::size_t count = order.size();
+            for (std::size_t pos = 0; pos < count; ++pos) {
+                const auto [centerAz, rayIndex] = order[pos];
+                const auto& ray = chunk->rays[rayIndex];
+                const double resHalf = std::clamp(
+                    static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
+                double halfLo = resHalf;
+                double halfHi = resHalf;
+                if (count > 1) {
+                    double prevAz = order[(pos + count - 1) % count].first;
+                    double nextAz = order[(pos + 1) % count].first;
+                    double distPrev = centerAz - prevAz;
+                    if (distPrev <= 0.0) distPrev += 360.0;
+                    double distNext = nextAz - centerAz;
+                    if (distNext <= 0.0) distNext += 360.0;
+                    halfLo = std::clamp(distPrev * 0.5, resHalf * 0.5, resHalf * 2.0);
+                    halfHi = std::clamp(distNext * 0.5, resHalf * 0.5, resHalf * 2.0);
+                }
+                const double factor = smoothDisplay ? 1.35 : 1.0;
+                azSpans[rayIndex] = {centerAz - halfLo * factor, centerAz + halfHi * factor, true};
+            }
+        }
         for (std::size_t rayIndex = 0; rayIndex < chunk->rays.size(); ++rayIndex) {
             const auto& ray = chunk->rays[rayIndex];
             if (elevation && ray.elevationNumber != *elevation) continue;
@@ -1795,55 +1932,6 @@ void RadarMapCanvas::rebuildOverlay() {
             if (generation == guard->overlayGeneration_ && targetZoom == guard->zoom_) {
                 guard->overlayImage_ = std::move(overlayImage);
                 guard->overlayImageLogicalSize_ = overlayLogicalSize;
-        // Azimuth tiling from ACTUAL neighbor spacing, not just the resolution
-        // code. Where ray spacing outgrows the coded resolution (super-res
-        // dropout at far range, mixed sweeps), width-from-code leaves
-        // ray-wide background corduroy. Tile by azimuth midpoints, clamped to
-        // [0.5x, 2x] the coded half-width: regular data renders exactly as
-        // before, mismatched zones fill, and real data gaps stay honestly
-        // dark instead of being smeared shut.
-        struct AzSpan {
-            double lower = 0.0;
-            double upper = 0.0;
-            bool valid = false;
-        };
-        std::vector<AzSpan> azSpans(chunk->rays.size());
-        {
-            std::vector<std::pair<double, std::size_t>> order;
-            order.reserve(chunk->rays.size());
-            for (std::size_t rayIndex = 0; rayIndex < chunk->rays.size(); ++rayIndex) {
-                const auto& ray = chunk->rays[rayIndex];
-                if (elevation && ray.elevationNumber != *elevation) continue;
-                if (!ray.has(product)) continue;
-                auto az = std::fmod(static_cast<double>(ray.azimuthDegrees), 360.0);
-                if (az < 0.0) az += 360.0;
-                order.emplace_back(az, rayIndex);
-            }
-            std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
-                return a.first < b.first;
-            });
-            const std::size_t count = order.size();
-            for (std::size_t pos = 0; pos < count; ++pos) {
-                const auto [centerAz, rayIndex] = order[pos];
-                const auto& ray = chunk->rays[rayIndex];
-                const double resHalf = std::clamp(
-                    static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
-                double halfLo = resHalf;
-                double halfHi = resHalf;
-                if (count > 1) {
-                    double prevAz = order[(pos + count - 1) % count].first;
-                    double nextAz = order[(pos + 1) % count].first;
-                    double distPrev = centerAz - prevAz;
-                    if (distPrev <= 0.0) distPrev += 360.0;
-                    double distNext = nextAz - centerAz;
-                    if (distNext <= 0.0) distNext += 360.0;
-                    halfLo = std::clamp(distPrev * 0.5, resHalf * 0.5, resHalf * 2.0);
-                    halfHi = std::clamp(distNext * 0.5, resHalf * 0.5, resHalf * 2.0);
-                }
-                const double factor = smoothDisplay ? 1.35 : 1.0;
-                azSpans[rayIndex] = {centerAz - halfLo * factor, centerAz + halfHi * factor, true};
-            }
-        }
                 guard->overlayImageCenterWorld_ = overlayCenterWorld;
                 guard->maximumRangeMeters_ = maximumRangeMeters > 0.0
                                                   ? maximumRangeMeters
@@ -2063,6 +2151,7 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
 
     paintStormTrail(painter);
     paintShearOverlay(painter);
+    paintCirculationMarkers(painter);
 
     if (!lightningVisible_) return;
 
@@ -2191,6 +2280,43 @@ void RadarMapCanvas::paintShearOverlay(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintCirculationMarkers(QPainter& painter) {
+    if (!tvsVisible_ || circulations_.empty()) return;
+    // GR2-style algorithm layer: TVS = red triangle, mesocyclone = orange
+    // diamond, each labeled with delta-V and depth. Markers draw at any zoom;
+    // labels need zoom 5+. Only time-persisted detections reach this list.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& det : circulations_) {
+        const auto point = screenPoint(det.latitudeDeg, det.longitudeDeg);
+        if (!rect().adjusted(-60, -60, 60, 60).contains(point.toPoint())) continue;
+        const bool tvs = det.kind == CirculationKind::TornadoVortex;
+        const QColor c = tvs ? QColor(255, 45, 45) : QColor(255, 150, 30);
+        QPolygonF marker;
+        if (tvs) {
+            marker << point + QPointF(0.0, -11.0) << point + QPointF(-9.0, 7.0)
+                   << point + QPointF(9.0, 7.0);
+        } else {
+            marker << point + QPointF(0.0, -9.0) << point + QPointF(9.0, 0.0)
+                   << point + QPointF(0.0, 9.0) << point + QPointF(-9.0, 0.0);
+        }
+        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 70));
+        painter.setPen(QPen(c, 2.5));
+        painter.drawPolygon(marker);
+        if (zoom_ >= 5) {
+            painter.setPen(tvs ? QColor(255, 200, 200) : QColor(255, 220, 180));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(
+                QRectF(point.x() + 13, point.y() - 20, 200, 36), Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("%1 %2 m/s | %3 km deep")
+                    .arg(tvs ? QStringLiteral("TVS") : QStringLiteral("MESO"))
+                    .arg(det.maxDeltaVelocityMetersPerSecond, 0, 'f', 0)
+                    .arg(det.depthMeters / 1000.0, 0, 'f', 1));
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintStormTrail(QPainter& painter) {
     if (!stormTrailVisible_) return;
     const auto& tracks = stormTracker_.tracks();
@@ -2219,6 +2345,29 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
                             Qt::RoundJoin));
         painter.setBrush(Qt::NoBrush);
         painter.drawPolyline(line);
+        // Track id + motion vector for every storm at usable zooms.
+        if (zoom_ >= 6) {
+            const auto& newest = track->fixes.back();
+            const auto p = screenPoint(newest.latitudeDeg, newest.longitudeDeg);
+            if (rect().adjusted(-30, -30, 30, 30).contains(p.toPoint())) {
+                painter.setPen(QColor(255, 235, 200, 160));
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                painter.drawText(QRectF(p.x() + 9, p.y() - 20, 80, 16),
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 QStringLiteral("#%1").arg(track->id));
+                // 5-min motion vector from the tracker's velocity estimate.
+                const double vLat = track->velocityLatDegPerSec;
+                const double vLon = track->velocityLonDegPerSec;
+                const double vMag = std::hypot(vLat * 111000.0, vLon * 111000.0);
+                if (vMag >= 1.0 && vMag <= 60.0) {
+                    const auto tip = screenPoint(newest.latitudeDeg + vLat * 300.0,
+                                                 newest.longitudeDeg + vLon * 300.0);
+                    painter.setPen(QPen(QColor(255, 209, 122, 140), 1.5, Qt::SolidLine,
+                                        Qt::RoundCap));
+                    painter.drawLine(p, tip);
+                }
+            }
+        }
     }
     if (!primary) {
         painter.restore();
@@ -2331,9 +2480,11 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
                                          Qt::AlignLeft | Qt::AlignVCenter,
                                          QStringLiteral("+%1").arg(step * 10));
                     }
+                    ++extrapolated;
                 }
             }
         }
+        }  // for track : ranked
     }
     painter.restore();
 }
@@ -2414,29 +2565,6 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
     }
 
     if ((shearVisible_ && !radarFeatures_.empty()) || (stormTrailVisible_ && hasStormTracks())) {
-        // Track id + motion vector for every storm at usable zooms.
-        if (zoom_ >= 6) {
-            const auto& newest = track->fixes.back();
-            const auto p = screenPoint(newest.latitudeDeg, newest.longitudeDeg);
-            if (rect().adjusted(-30, -30, 30, 30).contains(p.toPoint())) {
-                painter.setPen(QColor(255, 235, 200, 160));
-                painter.setFont(hudFont(7, QFont::DemiBold));
-                painter.drawText(QRectF(p.x() + 9, p.y() - 20, 80, 16),
-                                 Qt::AlignLeft | Qt::AlignVCenter,
-                                 QStringLiteral("#%1").arg(track->id));
-                // 5-min motion vector from the tracker's velocity estimate.
-                const double vLat = track->velocityLatDegPerSec;
-                const double vLon = track->velocityLonDegPerSec;
-                const double vMag = std::hypot(vLat * 111000.0, vLon * 111000.0);
-                if (vMag >= 1.0 && vMag <= 60.0) {
-                    const auto tip = screenPoint(newest.latitudeDeg + vLat * 300.0,
-                                                 newest.longitudeDeg + vLon * 300.0);
-                    painter.setPen(QPen(QColor(255, 209, 122, 140), 1.5, Qt::SolidLine,
-                                        Qt::RoundCap));
-                    painter.drawLine(p, tip);
-                }
-            }
-        }
         const QRectF analysisPanel(12, 96, 258, 20);
         painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
         painter.setBrush(QColor(8, 15, 19, 205));
@@ -2454,6 +2582,21 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             painter.drawText(QRectF(x, 98, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("— storm trail"));
         }
+    }
+    if (tvsVisible_ && !circulations_.empty()) {
+        int tvs = 0;
+        for (const auto& det : circulations_) {
+            if (det.kind == CirculationKind::TornadoVortex) ++tvs;
+        }
+        const int meso = static_cast<int>(circulations_.size()) - tvs;
+        const QRectF tvsPanel(12, 118, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
+        painter.setBrush(QColor(8, 15, 19, 205));
+        painter.drawRoundedRect(tvsPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(QColor(255, 45, 45));
+        painter.drawText(QRectF(20, 120, 120, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("▲ TVS %1 · ◆ MESO %2").arg(tvs).arg(meso));
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -2538,11 +2681,9 @@ void RadarMapCanvas::paintProbe(QPainter& painter) {
         const auto bodyStart = isWarning ? 3 : 1;
         const auto body = parts.mid(bodyStart).join(QLatin1Char('\n')).trimmed();
 
-                    ++extrapolated;
         auto accent = isWarning ? nwsAlertStyle(title).color : QColor("#80d3ff");
         if (pinnedInfoKind_ == PinnedInfoKind::Lightning && pinnedLightningCell_) {
             const auto selected = std::find_if(
-        }  // for track : ranked
                 lightningCells_.cbegin(), lightningCells_.cend(), [this](const auto& cell) {
                     return cell.cellX == pinnedLightningCell_->first &&
                            cell.cellY == pinnedLightningCell_->second;

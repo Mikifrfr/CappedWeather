@@ -182,36 +182,115 @@ QIcon productChipIcon(const ProductKind kind) {
     return QIcon(pixmap);
 }
 
-// One-line operator guidance shown on product chip hover.
+// Greedy word wrap for hover text. Plain-text tooltips never wrap on their
+// own, which renders as one screen-wide strip; rich-text wrapping is
+// DPI-dependent, so break manually at word boundaries instead.
+QString wrapTooltipText(const QString& text, const int columns = 88) {
+    QString out;
+    const auto paragraphs = text.split('\n');
+    for (int p = 0; p < paragraphs.size(); ++p) {
+        int count = 0;
+        for (const auto& word : paragraphs.at(p).split(' ', Qt::SkipEmptyParts)) {
+            if (count > 0 && count + word.size() + 1 > columns) {
+                out += '\n';
+                count = 0;
+            } else if (count > 0) {
+                out += ' ';
+                count += 1;
+            }
+            out += word;
+            count += word.size();
+        }
+        if (p + 1 < paragraphs.size()) out += '\n';
+    }
+    return out;
+}
+
+// One-line "what it is" per product, for tight spaces (palette detail).
+QString productShortBlurb(const ProductKind kind) {
+    switch (kind) {
+        case ProductKind::Reflectivity:
+            return QStringLiteral("Precipitation intensity and size");
+        case ProductKind::Velocity:
+            return QStringLiteral("Motion toward or away from the radar");
+        case ProductKind::SpectrumWidth:
+            return QStringLiteral("Velocity spread inside one gate");
+        case ProductKind::DifferentialReflectivity:
+            return QStringLiteral("Target shape: flat rain vs tumbling hail");
+        case ProductKind::CorrelationCoefficient:
+            return QStringLiteral("Target uniformity; low means a mix or debris");
+        case ProductKind::DifferentialPhase:
+            return QStringLiteral("Phase shift along the beam (heavy rain tracer)");
+        case ProductKind::EchoTop:
+            return QStringLiteral("Highest 18 dBZ altitude: updraft strength");
+        case ProductKind::VerticallyIntegratedLiquid:
+            return QStringLiteral("Column liquid: hail and downburst potential");
+    }
+    return {};
+}
+
+// Full hover explainer per product: what it measures, how to read it, and
+// the thresholds that matter. Chips show only abbreviations, so this tooltip
+// (plus the palette detail and the spelled-out label) is where the product
+// gets explained.
+QString productExplainer(const ProductKind kind) {
+    switch (kind) {
+        case ProductKind::Reflectivity:
+            return QStringLiteral(
+                "Returned power: precipitation intensity and size. Higher means heavier "
+                "rain, hail, or debris. Rough scale: under 20 dBZ light, 35+ moderate, "
+                "50+ severe, 60+ likely hail. A bright core inside weak echo can be debris.");
+        case ProductKind::Velocity:
+            return QStringLiteral(
+                "Motion directly toward (cool colors) or away (warm) from the radar: "
+                "only the radial component, never the full wind. Tight red/green "
+                "couplets mark rotation. Values wrap past the Nyquist velocity, "
+                "use Dealiased or storm-relative mode to unwrap.");
+        case ProductKind::SpectrumWidth:
+            return QStringLiteral(
+                "Spread of velocities inside one gate. High values mean turbulence, "
+                "strong shear, or debris: tornadic debris shows very high width "
+                "collocated with low correlation coefficient.");
+        case ProductKind::DifferentialReflectivity:
+            return QStringLiteral(
+                "Horizontal vs vertical return: big flat raindrops read high, tumbling "
+                "hail and debris read near zero. Separates rain from hail and debris, "
+                "and doubles as a calibration check in light rain.");
+        case ProductKind::CorrelationCoefficient:
+            return QStringLiteral(
+                "How uniform the targets in a gate are, 0 to 1. Below about 0.9 means "
+                "a mix: debris, melting hail, clutter, or biology. Low values inside "
+                "high reflectivity are the classic debris-ball signature.");
+        case ProductKind::DifferentialPhase:
+            return QStringLiteral(
+                "Accumulated phase shift along the beam. Only the downrange gradient "
+                "matters: a steep rise tracks heavy rain. Absolute values carry no "
+                "direct meaning.");
+        case ProductKind::EchoTop:
+            return QStringLiteral(
+                "Highest altitude of the 18 dBZ echo: updraft strength at a glance. "
+                "Above about 35 kft means a vigorous updraft. Derived from the volume, "
+                "not measured directly.");
+        case ProductKind::VerticallyIntegratedLiquid:
+            return QStringLiteral(
+                "Radar-estimated liquid in the column. High values flag hail and "
+                "downburst potential, but hail contaminates the estimate (capped at "
+                "56 dBZ). Derived from the volume, not measured directly.");
+    }
+    return {};
+}
+
+// Chip hover text: full name plus the explainer. Chips show only the
+// standard operational abbreviation (REF, VEL, ZDR, ...), which is what
+// every operator already reads on a NWS display and which fits a
+// two-column grid — so the tooltip is where the product gets explained.
 QString productChipTooltip(const ProductKind kind) {
-    // Chips show the standard operational abbreviation (REF, VEL, ZDR, ...),
-    // which is what every operator already reads on a NWS display and which
-    // fits a two-column grid. Spell the full name and unit out in the tooltip
-    // so nothing is lost.
     const auto& descriptor = productDescriptor(kind);
     const QString head = QStringLiteral("%1 (%2) — %3")
                              .arg(QString::fromUtf8(descriptor.label.data()),
                                   QString::fromUtf8(descriptor.unit.data()),
                                   QString::fromUtf8(descriptor.shortName.data()));
-    switch (kind) {
-        case ProductKind::Reflectivity:
-            return head + QStringLiteral("\nBright cores mean heavy rain, hail, or debris.");
-        case ProductKind::Velocity:
-            return head + QStringLiteral("\nMotion toward or away from the radar. Tight red/green couplets mean rotation.");
-        case ProductKind::SpectrumWidth:
-            return head + QStringLiteral("\nVelocity spread inside one gate. High values mark turbulence and debris.");
-        case ProductKind::DifferentialReflectivity:
-            return head + QStringLiteral("\nHorizontal vs vertical return size. Near zero in hail and debris.");
-        case ProductKind::CorrelationCoefficient:
-            return head + QStringLiteral("\nTarget uniformity. Below 0.9 in debris, melting hail, clutter.");
-        case ProductKind::DifferentialPhase:
-            return head + QStringLiteral("\nPhase shift along the beam. Its gradient tracks heavy rain.");
-        case ProductKind::EchoTop:
-            return head + QStringLiteral("\nDerived: height of the 18 dBZ echo. Above 35 kft means a strong updraft.");
-        case ProductKind::VerticallyIntegratedLiquid:
-            return head + QStringLiteral("\nDerived: column water. High values with hail colors are dangerous.");
-    }
-    return head;
+    return wrapTooltipText(head + QStringLiteral("\n") + productExplainer(kind));
 }
 
 } // namespace
@@ -413,6 +492,10 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(shearCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setShearVisible(visible);
+        refreshLayerBadges();
+    });
+    connect(tvsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setTvsVisible(visible);
         refreshLayerBadges();
     });
     connect(placefilesCheck_, &QCheckBox::toggled, this, [this](const bool visible) {
@@ -1087,6 +1170,11 @@ void MainWindow::buildUi() {
                  QStringLiteral("Azimuthal-shear objects, lightning not required"), shearBadge_,
                  QStringLiteral("shearBadge"), true,
                  QStringLiteral("Thresholded rotation couplets from Level II velocity (pink = rotating)"));
+    makeLayerRow(tvsCheck_, QStringLiteral("TVS / meso markers"),
+                 QStringLiteral("tvsCheck"),
+                 QStringLiteral("NSSL-style couplet + depth tracking"), tvsBadge_,
+                 QStringLiteral("tvsBadge"), true,
+                 QStringLiteral("Tornado-vortex and mesocyclone markers from gate-to-gate couplets with vertical and time continuity (red triangle = TVS, orange diamond = meso)"));
     makeLayerRow(placefilesCheck_, QStringLiteral("GR placefiles"), QStringLiteral("placefilesCheck"),
                  QStringLiteral("Chaser and spotter feeds"), placefilesBadge_,
                  QStringLiteral("placefilesBadge"), true,
@@ -1430,9 +1518,9 @@ void MainWindow::buildUi() {
     presetsCombo_->setToolTip(QStringLiteral("Named panel layout preset (built-in + user-saved)"));
     savePresetButton_ = new QToolButton(controlBody);
     savePresetButton_->setObjectName(QStringLiteral("savePresetButton"));
-    savePresetButton_->setText(QStringLiteral("Save…"));
+    savePresetButton_->setText(QStringLiteral("Save"));
     savePresetButton_->setToolTip(QStringLiteral("Capture the current layout + per-panel products as a new preset"));
-    savePresetButton_->setMinimumWidth(0);
+    savePresetButton_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     presetRow->addWidget(presetsCombo_, 1);
     presetRow->addWidget(savePresetButton_);
     viewGroup->addLayout(presetRow);
@@ -1445,11 +1533,11 @@ void MainWindow::buildUi() {
             });
     connect(savePresetButton_, &QToolButton::clicked, this, &MainWindow::saveCurrentAsPreset);
     rebuildPresetsCombo();
-    auto* panelHint = new QLabel(
-        QStringLiteral("Click a panel to work on it. Product, tilt, and tools follow. "
-                       "Double-click a panel to fill the window."), controlBody);
+    auto* panelHint = new QLabel(QStringLiteral("Click a panel to work on it."), controlBody);
     panelHint->setObjectName(QStringLiteral("groupCaption"));
     panelHint->setWordWrap(true);
+    panelHint->setToolTip(QStringLiteral("Click a panel to work on it. Product, tilt, and tools follow. "
+                                         "Double-click a panel to fill the window."));
     viewGroup->addWidget(panelHint);
     auto* viewButtonsRow = new QHBoxLayout();
     maximizePanelButton_ = new QToolButton(controlBody);
@@ -1457,12 +1545,16 @@ void MainWindow::buildUi() {
     maximizePanelButton_->setText(QStringLiteral("Maximize panel"));
     maximizePanelButton_->setCheckable(true);
     maximizePanelButton_->setToolTip(QStringLiteral("Fill the window with the active panel (double-click also works)"));
+    maximizePanelButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    maximizePanelButton_->setMinimumHeight(28);
     viewButtonsRow->addWidget(maximizePanelButton_, 1);
     dataSaverButton_ = new QToolButton(controlBody);
     dataSaverButton_->setObjectName(QStringLiteral("dataSaverButton"));
     dataSaverButton_->setText(QStringLiteral("Data-saver"));
     dataSaverButton_->setToolTip(QStringLiteral("One-click chase preset: 2 parallel chunks, 4-frame history, "
                                                 "2-minute overlay refresh. For flaky cellular."));
+    dataSaverButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    dataSaverButton_->setMinimumHeight(28);
     viewButtonsRow->addWidget(dataSaverButton_, 1);
     viewGroup->addLayout(viewButtonsRow);
     connect(maximizePanelButton_, &QToolButton::toggled, this, [this](bool) { togglePanelMaximized(); });
@@ -1470,6 +1562,9 @@ void MainWindow::buildUi() {
 
     auto* navigationGrid = new QGridLayout();
     navigationGrid->setSpacing(4);
+    navigationGrid->setColumnStretch(0, 1);
+    navigationGrid->setColumnStretch(1, 1);
+    navigationGrid->setColumnStretch(2, 1);
     int navigationPosition = 0;
     const auto addViewButton = [controlBody, navigationGrid,
                                 &navigationPosition](const QString& text, const QString& tip) {
@@ -1477,14 +1572,15 @@ void MainWindow::buildUi() {
         button->setText(text);
         button->setToolTip(tip);
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        button->setMinimumHeight(28);
         navigationGrid->addWidget(button, navigationPosition / 3, navigationPosition % 3);
         ++navigationPosition;
         return button;
     };
     auto* nationalButton = addViewButton(QStringLiteral("Home"), QStringLiteral("National view"));
     auto* recenterButton = addViewButton(QStringLiteral("Recenter"), QStringLiteral("Center selected radar (R)"));
-    auto* zoomOutButton = addViewButton(QStringLiteral("−"), QStringLiteral("Zoom out (-)"));
-    auto* zoomInButton = addViewButton(QStringLiteral("+"), QStringLiteral("Zoom in (+)"));
+    auto* zoomOutButton = addViewButton(QStringLiteral("Zoom -"), QStringLiteral("Zoom out (-)"));
+    auto* zoomInButton = addViewButton(QStringLiteral("Zoom +"), QStringLiteral("Zoom in (+)"));
     connect(nationalButton, &QToolButton::clicked, this, [this] { map_->showNationalView(); });
     connect(recenterButton, &QToolButton::clicked, this, [this] { map_->recenterSelected(); });
     connect(zoomOutButton, &QToolButton::clicked, this, [this] { map_->zoomOut(); });
@@ -2746,10 +2842,12 @@ void MainWindow::restoreSettings() {
     trailCheck_->setChecked(settings.value(QStringLiteral("overlays/trail"), true).toBool());
     smoothingCheck_->setChecked(settings.value(QStringLiteral("view/smoothing"), false).toBool());
     shearCheck_->setChecked(settings.value(QStringLiteral("overlays/shear"), true).toBool());
+    tvsCheck_->setChecked(settings.value(QStringLiteral("overlays/tvs"), true).toBool());
     for (auto* panel : maps_) {
         panel->setStormTrailVisible(trailCheck_->isChecked());
         panel->setDisplaySmoothing(smoothingCheck_->isChecked());
         panel->setShearVisible(shearCheck_->isChecked());
+        panel->setTvsVisible(tvsCheck_->isChecked());
     }
     if (lightningCheck_->isEnabled())
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
@@ -2796,6 +2894,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/trail"), trailCheck_->isChecked());
     settings.setValue(QStringLiteral("view/smoothing"), smoothingCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/shear"), shearCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/tvs"), tvsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/warnings"), warningsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/reports"), reportsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/tornado"), tornadoCheck_->isChecked());
@@ -3397,8 +3496,10 @@ void MainWindow::showCommandPalette() {
         }
     }
     for (int product = 0; product < productCombo_->count(); ++product) {
+        const auto kind =
+            static_cast<ProductKind>(productCombo_->itemData(product).toInt());
         addEntry(QStringLiteral("Product: %1").arg(productCombo_->itemText(product)),
-                 QStringLiteral("Switch the active panel (1–8)"),
+                 QStringLiteral("%1 — switch the active panel").arg(productShortBlurb(kind)),
                  [this, product] { productCombo_->setCurrentIndex(product); });
     }
     for (int layout = 0; layout < panelLayoutCombo_->count(); ++layout) {
@@ -3546,6 +3647,7 @@ void MainWindow::syncProductChips() {
                 .arg(QString::fromUtf8(descriptor.label.data()),
                      QString::fromUtf8(descriptor.shortName.data()),
                      QString::fromUtf8(descriptor.unit.data())));
+        activeProductLabel_->setToolTip(wrapTooltipText(productExplainer(descriptor.kind)));
     }
 }
 
@@ -3613,6 +3715,11 @@ void MainWindow::refreshLayerBadges() {
         const auto n = map_->radarFeatureCount();
         shearBadge_->setText(!shearCheck_ || !shearCheck_->isChecked() ? QStringLiteral("off")
                             : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
+    if (tvsBadge_) {
+        const auto n = map_->circulationCount();
+        tvsBadge_->setText(!tvsCheck_ || !tvsCheck_->isChecked() ? QStringLiteral("off")
+                          : n > 0 ? QString::number(n) : QStringLiteral("idle"));
     }
     if (scanDiagnosticsLabel_ && map_) {
         const auto text = map_->scanDiagnosticsText();

@@ -43,6 +43,7 @@ option(CAPPEDWEATHER_REQUIRE_HDF5
 include(CTest)
 
 add_library(cappedweather_core STATIC
+    src/core/circulation_detector.cpp
     src/core/derived_products.cpp
     src/core/level2_primitives.cpp
     src/core/level2_decoder.cpp

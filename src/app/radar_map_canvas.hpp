@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/radar_catalog.hpp"
+#include "core/circulation_detector.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 #include "core/velocity_processing.hpp"
@@ -83,6 +84,9 @@ public:
     void setLightningFusionVisible(bool visible);
     void setShearVisible(bool visible);
     [[nodiscard]] bool shearVisible() const { return shearVisible_; }
+    void setTvsVisible(bool visible);
+    [[nodiscard]] bool tvsVisible() const { return tvsVisible_; }
+    [[nodiscard]] int circulationCount() const;
     void setStormTrailVisible(bool visible);
     [[nodiscard]] bool stormTrailVisible() const { return stormTrailVisible_; }
     [[nodiscard]] bool hasStormTracks() const;
@@ -338,6 +342,18 @@ private:
     std::vector<LightningCellSnapshot> lightningCells_;
     std::vector<RadarStormFeature> radarFeatures_;
     std::vector<LightningRadarAssociation> lightningAssociations_;
+    // TVS / mesocyclone markers (GR2-style algorithm layer). Raw per-volume
+    // detections are matched across volumes below; only tracks seen in 2+
+    // volumes reach circulations_ so single-volume flicker never draws.
+    struct PersistedCirculation {
+        CirculationDetection detection;
+        int hits = 0;
+        int misses = 0;
+    };
+    std::vector<PersistedCirculation> circulationTracks_;
+    std::vector<CirculationDetection> circulations_;
+    void paintCirculationMarkers(QPainter& painter);
+    void persistCirculations(std::vector<CirculationDetection> fresh);
     struct CachedWarningPath {
         int warningIndex = -1;
         QColor color;
@@ -401,6 +417,7 @@ private:
     bool lightningVisible_ = true;
     bool lightningFusionVisible_ = true;
     bool shearVisible_ = true;
+    bool tvsVisible_ = true;
     bool stormTrailVisible_ = true;
     bool displaySmoothing_ = false;
     // One history per storm (matched across volumes by proximity), fed from
