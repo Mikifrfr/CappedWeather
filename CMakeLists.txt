@@ -44,6 +44,7 @@ include(CTest)
 
 add_library(cappedweather_core STATIC
     src/core/circulation_detector.cpp
+    src/core/shear_grid.cpp
     src/core/derived_products.cpp
     src/core/level2_primitives.cpp
     src/core/level2_decoder.cpp
@@ -253,6 +254,11 @@ if(CAPPEDWEATHER_BUILD_APP)
         )
         target_link_libraries(cappedweather_live_opera_probe PRIVATE cappedweather_ui)
 
+        qt_add_executable(rotation_replay
+            tools/rotation_replay.cpp
+        )
+        target_link_libraries(rotation_replay PRIVATE cappedweather_ui)
+
         find_package(Qt6 6.4 COMPONENTS Test QUIET)
         if(TARGET Qt6::Test)
             qt_add_executable(cappedweather_ui_tests
@@ -277,6 +283,14 @@ if(CAPPEDWEATHER_BUILD_APP)
                 tests/live_gui_probe.cpp
             )
             target_link_libraries(cappedweather_live_gui_probe PRIVATE cappedweather_ui)
+
+            qt_add_executable(readme_screenshots
+                tools/readme_screenshots.cpp
+            )
+            target_link_libraries(readme_screenshots PRIVATE
+                cappedweather_ui
+                Qt6::Test
+            )
         endif()
 
         set_target_properties(CappedWeather PROPERTIES
@@ -326,11 +340,20 @@ if(NOT WIN32)
     install(FILES packaging/CappedWeather.png DESTINATION share/icons/hicolor/256x256/apps)
 endif()
 
+# AGPL-3.0-or-later: ship the license text inside every package (CPack shows
+# CPACK_RESOURCE_FILE_LICENSE in installer UI but does not pack the file).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION .)
+endif()
+
 set(CPACK_PACKAGE_NAME "CappedWeather")
-set(CPACK_PACKAGE_VENDOR "CappedWeather")
+set(CPACK_PACKAGE_VENDOR "Mikifrfr")
+set(CPACK_PACKAGE_CONTACT "Mikifrfr@users.noreply.github.com")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Operational real-time Level II radar viewer")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_FILE_NAME "CappedWeather-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_PACKAGE_LICENSE "AGPL-3.0-or-later")
 if(WIN32)
     set(CPACK_GENERATOR "ZIP;NSIS")
     set(CPACK_NSIS_PACKAGE_NAME "CappedWeather")

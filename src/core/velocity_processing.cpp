@@ -28,13 +28,33 @@ ProcessedVelocity processVelocity(const DecodedChunk& chunk,
         auto& values = result[rayIndex];
         values.assign(encodedValues.size(), missing);
         double previous = missing;
+        const double interval = options.nyquistVelocityMetersPerSecond * 2.0;
+        const double nyquist = options.nyquistVelocityMetersPerSecond;
         for (std::size_t gate = 0; gate < encodedValues.size(); ++gate) {
             const auto native = nativeValue(encodedValues[gate], ray.scaleByProduct.at(velocityIndex),
                                             ray.offsetByProduct.at(velocityIndex));
             if (!native) continue;
-            auto value = *native;
-            if (options.mode != VelocityProcessingMode::Native && std::isfinite(previous)) {
-                value = closestFold(value, previous, options.nyquistVelocityMetersPerSecond * 2.0);
+            const double raw = *native;
+            double value = raw;
+            if (options.mode != VelocityProcessingMode::Native && std::isfinite(previous) &&
+                interval > 0.0) {
+                // Conditional unfold: only snap when the gate-to-gate jump
+                // exceeds Nyquist (a true fold jumps ~2*Nyquist). The old code
+                // always snapped, so small noise accumulated into stacked
+                // intervals (4x56 = 224 m/s monsters).
+                if (std::abs(raw - previous) > nyquist) {
+                    value = closestFold(raw, previous, interval);
+                }
+                if (options.maxPhysicalVelocityMetersPerSecond > 0.0 &&
+                    std::abs(value) > options.maxPhysicalVelocityMetersPerSecond &&
+                    std::abs(raw) <= nyquist) {
+                    // Over-unfolded: raw was inside Nyquist but the unfold
+                    // threw it past physical. Fail closed (NaN) so it can
+                    // never become a couplet, and hold previous for the
+                    // next gate instead of propagating the error.
+                    values[gate] = missing;
+                    continue;
+                }
             }
             values[gate] = static_cast<float>(value);
             previous = value;
@@ -59,9 +79,24 @@ ProcessedVelocity processVelocity(const DecodedChunk& chunk,
             auto& current = result[currentIndex];
             const auto& previous = result[previousIndex];
             const auto commonGates = std::min(current.size(), previous.size());
+            const double interval = options.nyquistVelocityMetersPerSecond * 2.0;
+            const double nyquist = options.nyquistVelocityMetersPerSecond;
             for (std::size_t gate = 0; gate < commonGates; ++gate) {
-                current[gate] = static_cast<float>(closestFold(
-                    current[gate], previous[gate], options.nyquistVelocityMetersPerSecond * 2.0));
+                if (!std::isfinite(current[gate]) || !std::isfinite(previous[gate])) continue;
+                // Conditional azimuthal unfold: same Nyquist-gated rule as
+                // radial. Prevents a folded ray from dragging its neighbour
+                // into a stacked fold.
+                if (std::abs(static_cast<double>(current[gate]) -
+                             static_cast<double>(previous[gate])) <= nyquist)
+                    continue;
+                double unfolded = closestFold(current[gate], previous[gate], interval);
+                if (options.maxPhysicalVelocityMetersPerSecond > 0.0 &&
+                    std::abs(unfolded) > options.maxPhysicalVelocityMetersPerSecond &&
+                    std::abs(static_cast<double>(current[gate])) <= nyquist) {
+                    current[gate] = std::numeric_limits<float>::quiet_NaN();
+                    continue;
+                }
+                current[gate] = static_cast<float>(unfolded);
             }
         }
     }

@@ -11,6 +11,7 @@
 #include "core/odim_reader.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "core/circulation_detector.hpp"
+#include "core/shear_grid.hpp"
 #include "core/storm_tracker.hpp"
 #include "core/volume_spill.hpp"
 #include "core/derived_products.hpp"
@@ -705,6 +706,30 @@ void testRadarLightningFusion() {
     assert(std::abs(measured.distanceMeters - expected) < 1.0);
 }
 
+void testRadarLightningFusionSplitCut() {
+    // Real VCP split cuts: reflectivity-only surveillance (#1) below lowest
+    // Doppler (#2). ROT must still fire (regression: old single-elevation code
+    // gave velocitySamples=0 and 0/68 ROT on archive cases).
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    auto r1 = syntheticFusionRay(89.0F, ProductKind::Reflectivity, 156);
+    r1.elevationNumber = 1;
+    auto r2 = syntheticFusionRay(90.0F, ProductKind::Reflectivity, 156);
+    r2.elevationNumber = 1;
+    auto v1 = syntheticFusionRay(89.0F, ProductKind::Velocity, 89);
+    v1.elevationNumber = 2;
+    auto v2 = syntheticFusionRay(91.0F, ProductKind::Velocity, 169);
+    v2.elevationNumber = 2;
+    chunk.rays = {r1, r2, v1, v2};
+    RadarFeatureConfig config;
+    config.gridSizeDeg = 0.02;
+    config.minimumReflectivityCells = 1;
+    config.minimumAzimuthalShearPerSecond = 0.0005;
+    const auto features = extractRadarStormFeatures(chunk, 35.333, -97.278, config);
+    assert(!features.empty());
+    assert(features.front().rotating);
+}
+
 void testGlmL2Keys() {
     assert(glmLcfaPrefix(2026, 201, 14) == "GLM-L2-LCFA/2026/201/14/");
     assert(glmLcfaPrefix(2026, 3, 4) == "GLM-L2-LCFA/2026/003/04/");
@@ -1047,6 +1072,80 @@ void testCirculationDealiasAndWeakVeto() {
     assert(detectCirculations(speck, speckGrid, 35.333, -97.278, 370.0, {}).empty());
 }
 
+void testCirculationOverUnfoldVeto() {
+    // Stacked 2*Nyquist unfolding (e.g. 4x56 = 224 m/s at Nyquist 28) must not
+    // become a detection: gates above maxDeltaV break the run.
+    auto chunk = twoTiltCoupletChunk(50.0);
+    auto grid = coupletGrid(chunk, -112.0F, 112.0F, 168, 178);  // deltaV 224
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+    // Disabled cap recovers the old behavior (test-only, proves the veto did it).
+    CirculationConfig noCap{};
+    noCap.maxDeltaVelocityMetersPerSecond = 0.0;
+    assert(!detectCirculations(chunk, grid, 35.333, -97.278, 370.0, noCap).empty());
+}
+
+void testVelocityConditionalUnfold() {
+    // Small gate-to-gate drift must not accumulate into stacked folds;
+    // true folds (jump > Nyquist) still unfold; over-physical unfolds NaN.
+    DecodedRay ray;
+    ray.azimuthDegrees = 0.0F;
+    const auto index = static_cast<std::size_t>(ProductKind::Velocity);
+    // 4 gates near +10 m/s with scale 2 / offset 129: encoded = v*2+129? No:
+    // nativeValue(enc, scale, offset) = (enc - offset)/scale? Check helper:
+    // use same convention as testVelocityProcessing: 169 -> +20, 89 -> -20.
+    // So +10 -> 149, +12 -> 153.
+    ray.fields.at(index) = {149, 153, 151, 155};
+    ray.scaleByProduct.at(index) = 2.0F;
+    ray.offsetByProduct.at(index) = 129.0F;
+    DecodedChunk chunk{"KTLX", {ray}, 1};
+    const auto out =
+        processVelocity(chunk, {VelocityProcessingMode::Dealiased, 25.0, 0.0, 0.0, 90.0});
+    assert(out[0].size() == 4);
+    for (const auto v : out[0]) assert(std::isfinite(v) && std::abs(v) < 20.0);
+}
+
+void testCirculationSameSign() {
+    // Storm-motion-biased shear (both sides positive) is missed by the classic
+    // opposite-sign gate but caught when sameSignBoost is enabled; disabled by
+    // default since the Moore sweep showed it adds FAR without hits.
+    auto chunk = twoTiltCoupletChunk(45.0);
+    auto grid = coupletGrid(chunk, 6.0F, 30.0F, 168, 178);  // deltaV 24, same sign
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+    CirculationConfig cfg{};
+    cfg.sameSignBoost = 1.8;
+    assert(!detectCirculations(chunk, grid, 35.333, -97.278, 370.0, cfg).empty());
+}
+
+void testCirculationSingleTiltTvsOptIn() {
+    // Single-tilt strong compact couplet: vetoed by default, allowed opt-in.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticCoupletRay(90.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(91.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(200.0F, 1, 0.5F, 10.0));
+    auto grid = coupletGrid(chunk, -30.0F, 30.0F, 150, 160);
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+    CirculationConfig opt{};
+    opt.allowSingleTiltTvs = true;
+    const auto dets = detectCirculations(chunk, grid, 35.333, -97.278, 370.0, opt);
+    assert(!dets.empty());
+    assert(dets.front().kind == CirculationKind::TornadoVortex);
+}
+
+void testShearGridFindsCouplet() {
+    // LLSD shear must fire on the same synthetic couplet the gate-to-gate
+    // detector fires on, and stay quiet on uniform flow.
+    auto chunk = twoTiltCoupletChunk(45.0);
+    auto grid = coupletGrid(chunk, -10.0F, 10.0F, 168, 178);  // deltaV 20
+    ShearGridConfig cfg{};
+    cfg.minShearPerSecond = 0.002;
+    const auto peaks = detectShearPeaks(chunk, grid, 35.333, -97.278, 370.0, cfg);
+    assert(!peaks.empty());
+    assert(peaks.front().equivalentDeltaVMps > 10.0);
+    auto flat = coupletGrid(chunk, 10.0F, 10.0F, 168, 178);  // no shear
+    assert(detectShearPeaks(chunk, flat, 35.333, -97.278, 370.0, cfg).empty());
+}
+
 void testCirculationShallowVeto() {
     // TVS-strength but 0.5/1.0-deg tilts at ~30 km slant -> depth ~260 m.
     DecodedChunk chunk;
@@ -1157,6 +1256,7 @@ int main() {
     testGlmReaderBuildContract();
     testOdimReader();
     testRadarLightningFusion();
+    testRadarLightningFusionSplitCut();
     testSlantRangeVerticalBeam();
     testLightningJumpSanitizedAndFarFuturePoll();
     testStormTrackerClearAndFixCap();
@@ -1168,6 +1268,11 @@ int main() {
     testCirculationReflectivityVeto();
     testCirculationSingleTiltVeto();
     testCirculationDealiasAndWeakVeto();
+    testCirculationOverUnfoldVeto();
+    testVelocityConditionalUnfold();
+    testCirculationSameSign();
+    testCirculationSingleTiltTvsOptIn();
+    testShearGridFindsCouplet();
     testCirculationShallowVeto();
     testCirculationMisalignedAndGapVeto();
     testDecodedRayLegacyGeometryMaxGates();

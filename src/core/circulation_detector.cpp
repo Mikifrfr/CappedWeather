@@ -61,7 +61,7 @@ std::optional<double> reflectivityAt(const DecodedRay& rayA, const DecodedRay& r
 std::vector<CirculationDetection> detectCirculations(
     const DecodedChunk& chunk, const std::vector<std::vector<float>>& dealiasedVelocity,
     const double radarLatitudeDeg, const double radarLongitudeDeg, const double radarElevationMeters,
-    const CirculationConfig config) {
+    const CirculationConfig config, CirculationDiagnostics* diagnostics) {
     const auto velocityIndex = static_cast<std::size_t>(ProductKind::Velocity);
     // Group ray indices by elevation number, each sorted by azimuth.
     std::map<std::uint8_t, std::vector<std::size_t>> tilts;
@@ -128,20 +128,45 @@ std::vector<CirculationDetection> detectCirculations(
             for (std::size_t gate = 0; gate < gateCount; ++gate) {
                 const double v0 = velA[gate];
                 const double v1 = velB[gate];
-                const bool couplet =
-                    std::isfinite(v0) && std::isfinite(v1) &&
-                    ((v0 < -config.minGateVelocityMetersPerSecond &&
-                      v1 > config.minGateVelocityMetersPerSecond) ||
-                     (v0 > config.minGateVelocityMetersPerSecond &&
-                      v1 < -config.minGateVelocityMetersPerSecond));
                 const double slant = static_cast<double>(firstGate) +
                                      static_cast<double>(gate) * spacing;
+                const double rangeKmEarly = slant / 1000.0;
+                const double deltaVEarly =
+                    (std::isfinite(v0) && std::isfinite(v1)) ? std::abs(v1 - v0) : 0.0;
+                // Range-relaxed gate: beam broadening smooths far-field couplets.
+                const double gateThresh = std::max(
+                    2.0, config.minGateVelocityMetersPerSecond -
+                             config.minGateRangeSlope * rangeKmEarly);
+                const bool opposite =
+                    std::isfinite(v0) && std::isfinite(v1) &&
+                    ((v0 < -gateThresh && v1 > gateThresh) ||
+                     (v0 > gateThresh && v1 < -gateThresh));
+                bool sameSign = false;
+                if (!opposite && config.sameSignBoost > 0.0 && std::isfinite(v0) &&
+                    std::isfinite(v1) && ((v0 > 0.0) == (v1 > 0.0)) &&
+                    std::abs(v0) >= config.minSameSignVelocityMetersPerSecond &&
+                    std::abs(v1) >= config.minSameSignVelocityMetersPerSecond) {
+                    // Storm-motion-biased shear: both sides pushed positive
+                    // (or negative) by mean flow. Require a stronger gate so
+                    // gust-front shear lines don't all become mesos.
+                    const double mesoGate = config.mesoBaseDeltaV +
+                                            config.mesoRangeSlope * rangeKmEarly;
+                    sameSign = deltaVEarly >= mesoGate * config.sameSignBoost;
+                }
+                const bool couplet = opposite || sameSign;
                 if (!couplet) {
                     if (inRun && ++gap > config.maxGateGap) flushRun();
                     continue;
                 }
                 gap = 0;
-                const double deltaV = std::abs(v1 - v0);
+                const double deltaV = deltaVEarly;
+                if (config.maxDeltaVelocityMetersPerSecond > 0.0 &&
+                    deltaV > config.maxDeltaVelocityMetersPerSecond) {
+                    // Over-unfolded gate (stacked 2*Nyquist intervals): treat as
+                    // a break, not a couplet, so it cannot become runBestDeltaV.
+                    if (inRun && ++gap > config.maxGateGap) flushRun();
+                    continue;
+                }
                 const auto beam = standardBeamGeometry(std::max(0.0, slant),
                                                        rayA.elevationDegrees);
                 const double azMid = rayA.azimuthDegrees + (rayB.azimuthDegrees > rayA.azimuthDegrees
@@ -210,8 +235,12 @@ std::vector<CirculationDetection> detectCirculations(
     }
 
     std::vector<CirculationDetection> detections;
+    CirculationDiagnostics diag;
+    for (const auto& tilt : perTilt) diag.tiltCoupletCount += static_cast<int>(tilt.couplets.size());
+    diag.columnCount = static_cast<int>(columns.size());
     for (const auto& column : columns) {
-        if (static_cast<int>(column.members.size()) < config.minTilts) continue;
+        const bool single = column.members.size() == 1;
+        if (static_cast<int>(column.members.size()) < config.minTilts && !single) continue;
         const auto* best = &column.members.front();
         double minH = column.members.front().heightMetersAgl;
         double maxH = minH;
@@ -221,6 +250,14 @@ std::vector<CirculationDetection> detectCirculations(
             maxH = std::max(maxH, m.heightMetersAgl);
         }
         const double depth = maxH - minH;
+        if (best->deltaV > diag.bestDeltaV) {
+            diag.bestDeltaV = best->deltaV;
+            diag.bestDepthM = depth;
+        }
+        if (single && !config.allowSingleTiltTvs) {
+            ++diag.singleRejects;
+            continue;
+        }
         const double rangeKm = best->rangeKm;
         const double mesoThresh = config.mesoBaseDeltaV + config.mesoRangeSlope * rangeKm;
         const double tvsThresh = config.tvsBaseDeltaV + config.tvsRangeSlope * rangeKm;
@@ -233,16 +270,35 @@ std::vector<CirculationDetection> detectCirculations(
         det.baseMetersMsl = radarElevationMeters + minH;
         det.topMetersMsl = radarElevationMeters + maxH;
         det.tiltCount = static_cast<int>(column.members.size());
+        if (single) {
+            // One-tilt escape hatch: TVS-strength + compact only. Depth is
+            // unknowable from one tilt, so gate purely on intensity/size.
+            // Reflectivity + run-gate + maxDeltaV gates already passed.
+            if (best->deltaV >= tvsThresh * config.singleTiltTvsBoost &&
+                best->diameterKm <= config.tvsMaxDiameterKm) {
+                det.kind = CirculationKind::TornadoVortex;
+                detections.push_back(det);
+            }
+            continue;
+        }
         if (best->deltaV >= tvsThresh && best->diameterKm <= config.tvsMaxDiameterKm &&
             depth >= config.minDepthTvsMeters) {
             det.kind = CirculationKind::TornadoVortex;
         } else if (best->deltaV >= mesoThresh && depth >= config.minDepthMesoMeters) {
             det.kind = CirculationKind::Mesocyclone;
         } else {
+            // Classify the reject so --diagnose can tell weak vs shallow vs wide.
+            if (best->deltaV < mesoThresh)
+                ++diag.weakRejects;
+            else if (best->deltaV >= tvsThresh && best->diameterKm > config.tvsMaxDiameterKm)
+                ++diag.diameterRejects;
+            else
+                ++diag.depthRejects;
             continue;  // shallow/weak shear is already covered by the shear overlay
         }
         detections.push_back(det);
     }
+    if (diagnostics != nullptr) *diagnostics = diag;
     std::sort(detections.begin(), detections.end(), [](const auto& a, const auto& b) {
         return a.maxDeltaVelocityMetersPerSecond > b.maxDeltaVelocityMetersPerSecond;
     });

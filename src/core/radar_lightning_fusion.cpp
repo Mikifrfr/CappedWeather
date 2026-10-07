@@ -37,34 +37,57 @@ double cellAreaKm2(const double latitudeDeg, const double gridSizeDeg) {
 
 std::vector<RadarStormFeature> extractRadarStormFeatures(
     const DecodedChunk& chunk, const double radarLatitudeDeg, const double radarLongitudeDeg,
-    const RadarFeatureConfig config) {
-    // Display-only approximation: reflectivity and velocity are mixed on the
-    // single lowest elevation carrying either product (altitudes may differ).
+    const RadarFeatureConfig config, const ProcessedVelocity* dealiasedVelocity) {
+    // Split-cut aware: NEXRAD VCPs put reflectivity-only surveillance (#1) below
+    // the lowest Doppler tilt (#2). The old code took the single lowest
+    // elevation carrying either product (#1, no velocity) so velocitySamples
+    // was always 0 and ROT fired 0/68 volumes. Take each product from its own
+    // lowest tilt; both are ~0.5 deg so the geographic mix is sound.
     if (chunk.rays.empty() || config.gridSizeDeg <= 0.0) return {};
 
-    std::uint8_t lowestElevation = std::numeric_limits<std::uint8_t>::max();
+    std::uint8_t lowRefl = std::numeric_limits<std::uint8_t>::max();
+    std::uint8_t lowVel = std::numeric_limits<std::uint8_t>::max();
     for (const auto& ray : chunk.rays) {
-        if (ray.has(ProductKind::Reflectivity) || ray.has(ProductKind::Velocity))
-            lowestElevation = std::min(lowestElevation, ray.elevationNumber);
+        if (ray.has(ProductKind::Reflectivity)) lowRefl = std::min(lowRefl, ray.elevationNumber);
+        if (ray.has(ProductKind::Velocity)) lowVel = std::min(lowVel, ray.elevationNumber);
     }
-    if (lowestElevation == std::numeric_limits<std::uint8_t>::max()) return {};
+    if (lowRefl == std::numeric_limits<std::uint8_t>::max() &&
+        lowVel == std::numeric_limits<std::uint8_t>::max())
+        return {};
 
     std::unordered_map<std::int64_t, GridCell> cells;
     const GeographicCoordinate origin{radarLatitudeDeg, radarLongitudeDeg};
-    for (const auto& ray : chunk.rays) {
-        if (ray.elevationNumber != lowestElevation) continue;
+    for (std::size_t rayIndex = 0; rayIndex < chunk.rays.size(); ++rayIndex) {
+        const auto& ray = chunk.rays[rayIndex];
         for (const auto product : {ProductKind::Reflectivity, ProductKind::Velocity}) {
             if (!ray.has(product)) continue;
+            // Each product comes from its own lowest tilt (split cuts).
+            if (product == ProductKind::Reflectivity && ray.elevationNumber != lowRefl) continue;
+            if (product == ProductKind::Velocity && ray.elevationNumber != lowVel) continue;
             const auto productIndex = static_cast<std::size_t>(product);
-            const auto& values = ray.fields.at(productIndex);
             const auto spacing = ray.gateSpacingByProduct.at(productIndex);
             const auto firstGate = ray.firstGateByProduct.at(productIndex);
             if (spacing == 0) continue;
-            for (std::size_t gate = 0; gate < values.size(); ++gate) {
-                const auto value = nativeValue(values[gate], ray.scaleByProduct.at(productIndex),
-                                               ray.offsetByProduct.at(productIndex));
-                if (!value) continue;
-                if (product == ProductKind::Reflectivity && *value < config.minimumReflectivityDbz)
+            const bool useDealiased =
+                product == ProductKind::Velocity && dealiasedVelocity != nullptr &&
+                rayIndex < dealiasedVelocity->size();
+            const auto& values = ray.fields.at(productIndex);
+            const std::size_t gateCount =
+                useDealiased ? (*dealiasedVelocity)[rayIndex].size() : values.size();
+            for (std::size_t gate = 0; gate < gateCount; ++gate) {
+                double gateValue = 0.0;
+                if (useDealiased) {
+                    const float v = (*dealiasedVelocity)[rayIndex][gate];
+                    if (!std::isfinite(v)) continue;
+                    gateValue = static_cast<double>(v);
+                } else {
+                    if (gate >= values.size()) continue;
+                    const auto value = nativeValue(values[gate], ray.scaleByProduct.at(productIndex),
+                                                   ray.offsetByProduct.at(productIndex));
+                    if (!value) continue;
+                    gateValue = *value;
+                }
+                if (product == ProductKind::Reflectivity && gateValue < config.minimumReflectivityDbz)
                     continue;
                 const double slantRange = gateCenterSlantRange(firstGate, spacing, gate);
                 if (slantRange <= 0.0 || slantRange > 300000.0) continue;
@@ -75,15 +98,15 @@ std::vector<RadarStormFeature> extractRadarStormFeatures(
                 const int y = static_cast<int>(std::floor(coordinate.latitude / config.gridSizeDeg));
                 auto& cell = cells[gridCellKey(x, y)];
                 if (product == ProductKind::Reflectivity) {
-                    const double weight = std::max(1.0, *value - config.minimumReflectivityDbz + 1.0);
+                    const double weight = std::max(1.0, gateValue - config.minimumReflectivityDbz + 1.0);
                     cell.weightedLatitude += coordinate.latitude * weight;
                     cell.weightedLongitude += coordinate.longitude * weight;
                     cell.reflectivityWeight += weight;
-                    cell.maximumReflectivity = std::max(cell.maximumReflectivity, *value);
+                    cell.maximumReflectivity = std::max(cell.maximumReflectivity, gateValue);
                     ++cell.reflectivitySamples;
                 } else {
-                    cell.minimumVelocity = std::min(cell.minimumVelocity, *value);
-                    cell.maximumVelocity = std::max(cell.maximumVelocity, *value);
+                    cell.minimumVelocity = std::min(cell.minimumVelocity, gateValue);
+                    cell.maximumVelocity = std::max(cell.maximumVelocity, gateValue);
                     ++cell.velocitySamples;
                 }
             }
@@ -158,10 +181,13 @@ std::vector<RadarStormFeature> extractRadarStormFeatures(
         feature.areaKm2 = component.size() * cellAreaKm2(feature.latitudeDeg, config.gridSizeDeg);
         if (velocityCells > 0 && std::isfinite(minimumVelocity) && std::isfinite(maximumVelocity)) {
             feature.velocitySpanMetersPerSecond = maximumVelocity - minimumVelocity;
-            const double characteristicMeters = std::max(
-                2000.0, std::sqrt(std::max(1.0, feature.areaKm2)) * 1000.0);
+            // Fixed meso length scale (3 km): the old sqrt(area) scale diluted
+            // shear for large storms (span 20 over 15 km -> 0.0013, never
+            // rotating), which is why ROT fired 0/68 volumes. Rotation is a
+            // local gradient, not storm Span/size.
+            constexpr double kMesoScaleMeters = 3000.0;
             feature.azimuthalShearPerSecond = feature.velocitySpanMetersPerSecond /
-                                               characteristicMeters;
+                                               kMesoScaleMeters;
             feature.rotating = feature.velocitySpanMetersPerSecond >=
                                    config.minimumVelocitySpanMetersPerSecond &&
                                feature.azimuthalShearPerSecond >=

@@ -164,6 +164,7 @@ private:
     void applyDataSaverPreset();
     void setupMenus();
     void showCommandPalette();
+    void showAboutDialog();
     void importCustomPalette();
     void refreshPalettePreview();
     void exportSnapshot();

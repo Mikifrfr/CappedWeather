@@ -1,0 +1,44 @@
+{
+  "description": "Rotation/tornado validation cases for gridded-rotation work. Each case is a radar + UTC window from the public NOAA Archive-II bucket (https://unidata-nexrad-level2.s3.amazonaws.com/). Ground truth is SPC filtered storm reports (yymmdd_rpts.csv) plus IEM archived TOR polygons via tools/fetch_verification_truth.py. Keep windows tight: one supercell evolution each, 12-24 volumes max.",
+  "cases": [
+    {
+      "id": "20211211-kpah-mayfield",
+      "radar": "KPAH",
+      "radar_lat": 37.0683,
+      "radar_lon": -88.7717,
+      "radar_elev_m": 154.2,
+      "window_start": "2021-12-11T01:00:00Z",
+      "window_end": "2021-12-11T05:00:00Z",
+      "max_volumes": 24,
+      "spc_file": "211210_rpts.csv",
+      "convective_date": "2021-12-10",
+      "notes": "Quad-State EF4. Mayfield KY ~02:26Z, Cambridge Shores ~02:58Z. Strong long-track TVS expected near KPAH 60-120 km."
+    },
+    {
+      "id": "20130520-ktlx-moore",
+      "radar": "KTLX",
+      "radar_lat": 35.3331,
+      "radar_lon": -97.2778,
+      "radar_elev_m": 389.0,
+      "window_start": "2013-05-20T19:00:00Z",
+      "window_end": "2013-05-20T21:00:00Z",
+      "max_volumes": 20,
+      "spc_file": "130520_rpts.csv",
+      "convective_date": "2013-05-20",
+      "notes": "Moore OK EF5 19:56-20:35Z. Classic meso-to-TVS evolution, close range (~15-30 km from KTLX), tests depth/diameter gates."
+    },
+    {
+      "id": "20110427-khtx-hackleburg",
+      "radar": "KHTX",
+      "radar_lat": 34.9306,
+      "radar_lon": -86.0822,
+      "radar_elev_m": 566.6,
+      "window_start": "2011-04-27T19:00:00Z",
+      "window_end": "2011-04-27T23:00:00Z",
+      "max_volumes": 24,
+      "spc_file": "110427_rpts.csv",
+      "convective_date": "2011-04-27",
+      "notes": "Super Outbreak. Hackleburg EF5 ~20:15Z, Harvest/Hazel Green later. Multiple tornadoes + null storms in one window; good FAR test."
+    }
+  ]
+}

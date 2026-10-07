@@ -755,15 +755,17 @@ void RadarMapCanvas::rebuildLightningFusion() {
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start(
         [guard, generation, chunk, cells, latitude, longitude, antennaElevM, nyquist] {
-            auto features = extractRadarStormFeatures(*chunk, latitude, longitude);
-            auto associations = associateLightningWithRadar(cells, features);
             // TVS / meso detection on dealiased velocity at the panel nyquist.
             // Independent of the display product: markers must survive while
-            // the user looks at reflectivity.
+            // the user looks at reflectivity. ROT shear objects stay on native
+            // (folded) velocities: dealiased spans hit 60-200 m/s on real
+            // volumes (adjacent rays unfold to different intervals).
             VelocityProcessingOptions detectOptions;
             detectOptions.mode = VelocityProcessingMode::Dealiased;
             detectOptions.nyquistVelocityMetersPerSecond = nyquist;
             auto dealiased = sharedProcessedVelocity(chunk, detectOptions);
+            auto features = extractRadarStormFeatures(*chunk, latitude, longitude);
+            auto associations = associateLightningWithRadar(cells, features);
             auto circulations = dealiased ? detectCirculations(*chunk, *dealiased, latitude,
                                                                longitude, antennaElevM)
                                           : std::vector<CirculationDetection>{};

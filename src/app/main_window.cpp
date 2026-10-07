@@ -3526,6 +3526,8 @@ void MainWindow::setupMenus() {
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->show();
     });
+    auto* aboutAction = helpMenu->addAction(QStringLiteral("About CappedWeather…"));
+    connect(aboutAction, &QAction::triggered, this, &MainWindow::showAboutDialog);
 }
 
 void MainWindow::showCommandPalette() {
@@ -3594,6 +3596,22 @@ void MainWindow::showCommandPalette() {
                 if (index >= 0 && index < static_cast<int>(actions->size())) (*actions)[index]();
             });
     palette->show();
+}
+
+void MainWindow::showAboutDialog() {
+    QMessageBox::about(
+        this, QStringLiteral("About CappedWeather"),
+        QStringLiteral("CappedWeather %1\n"
+                       "Copyright (C) 2026 Mikifrfr\n\n"
+                       "This program is free software: you can redistribute it and/or modify "
+                       "it under the terms of the GNU Affero General Public License as published by "
+                       "the Free Software Foundation, either version 3 of the License, or "
+                       "(at your option) any later version.\n\n"
+                       "This program is distributed in the hope that it will be useful, "
+                       "but WITHOUT ANY WARRANTY.\n\n"
+                       "Source: https://github.com/Mikifrfr/CappedWeather\n"
+                       "License: see LICENSE file.")
+            .arg(QStringLiteral(CAPPEDWEATHER_VERSION)));
 }
 
 void MainWindow::activateMap(RadarMapCanvas* map) {

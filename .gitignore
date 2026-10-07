@@ -18,6 +18,8 @@ coverage/
 
 /data/glm/
 /data/verification/results/
+/data/rotation_cases/*
+!/data/rotation_cases/cases.json
 __pycache__/
 *.py[cod]
 /aqtinstall.log

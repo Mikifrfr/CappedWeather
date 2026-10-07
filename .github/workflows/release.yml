@@ -1,0 +1,98 @@
+name: Release
+
+# Tag-triggered full release builds with all live-data deps (Qt + netCDF-C
+# + HDF5). Push/PR CI stays cheap (stub builds in ci.yml); only tags pay
+# for vcpkg + Qt + linuxdeploy. Produces, per tag v*:
+#   Windows: CappedWeather-<ver>-Windows-AMD64.exe (NSIS) + .zip (portable)
+#   Linux:   CappedWeather-<ver>-Linux-x86_64.tgz (AppDir, run ./AppDir/AppRun)
+# AGPL-3.0-or-later source for any binary is the tag itself.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 6.8.3 (MSVC2022_64 + Multimedia)
+        run: |
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -m qtmultimedia -O C:\Qt
+
+      - name: Install netCDF-C + HDF5 via vcpkg
+        run: |
+          "$env:VCPKG_INSTALLATION_ROOT/vcpkg" install netcdf-c:x64-windows hdf5:x64-windows
+
+      - name: Configure (fail-fast on missing live-data deps)
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package (ZIP + NSIS)
+        run: cpack --config build/CPackConfig.cmake -C Release
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/CappedWeather-*Windows*.exe
+            build/CappedWeather-*Windows*.zip
+          generate_release_notes: true
+
+  linux:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (codecs, GLM/ODIM readers, Qt runtime libs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbz2-dev zlib1g-dev libnetcdf-dev libhdf5-dev \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 curl
+
+      - name: Install Qt 6.8.3 (gcc_64 + Multimedia)
+        run: |
+          pip install aqtinstall
+          aqt install-qt linux desktop 6.8.3 gcc_64 -m qtmultimedia -O "$HOME/Qt"
+          echo "CMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/gcc_64" >> "$GITHUB_ENV"
+          echo "$HOME/Qt/6.8.3/gcc_64/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (fail-fast on missing live-data deps)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test (offscreen)
+        run: ctest --test-dir build --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Assemble AppDir + tarball
+        run: sh packaging/linux-appdir.sh build
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CappedWeather-*Linux*.tgz
+          generate_release_notes: true
