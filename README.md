@@ -102,4 +102,4 @@ the Free Software Foundation, either version 3 of the License, or
 Source for release binaries is available at <https://github.com/Mikifrfr/CappedWeather>.
 
 European OPERA data is CC BY 4.0 EUMETNET (see `docs/europe-sources.md`).
-Basemap (c) Esri, with attribution painted on-canvas.
+Basemap (c) OpenStreetMap contributors and CARTO, with attribution painted on-canvas. A free CARTO key (Settings: Basemap) removes the watermark and is kept in your user settings across updates.

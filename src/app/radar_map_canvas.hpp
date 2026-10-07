@@ -41,15 +41,34 @@ class QContextMenuEvent;
 
 namespace cappedweather {
 
-// Keyless dark basemap: Esri World Dark Gray. The canvas style (base
-// geography) and reference style (roads, boundaries, place labels) are
-// separate XYZ layers; the tile store composites them into one cached image.
-// NOTE: Esri uses z/y/x tile order (y before x), unlike most OSM endpoints.
+// Basemap providers. CARTO Dark is the default: free single-layer XYZ tiles
+// (labels baked in, standard z/x/y order) that take a per-user API key,
+// so a public release never funnels every install through one shared
+// keyless endpoint. Esri World Dark Gray stays as a legacy fallback (base
+// + reference layers, z/y/x order). Custom covers any keyed XYZ template
+// with {z}/{x}/{y}/{s}/{key} placeholders.
+enum class BasemapProvider {
+    CartoDark = 0,
+    CartoLight = 1,
+    EsriDark = 2,
+    Custom = 3,
+};
+BasemapProvider basemapProviderFromInt(int value);
+QString basemapProviderName(BasemapProvider provider);
+// Settings-driven (QSettings basemap/*); what the tile fetcher uses.
+BasemapProvider basemapProviderFromSettings();
+QString basemapApiKeyFromSettings();
 struct BasemapTileUrls {
     QUrl base;
-    QUrl reference;
+    QUrl reference;  // empty when the provider is single-layer (CARTO/custom)
 };
 BasemapTileUrls basemapTileUrls(int zoom, int x, int y);
+BasemapTileUrls basemapTileUrls(int zoom, int x, int y, BasemapProvider provider,
+                                const QString& apiKey, const QString& customTemplate);
+// Painted attribution line for the active provider (CARTO terms require the
+// OSM + CARTO credit to stay visible).
+QString basemapAttribution();
+QString basemapAttribution(BasemapProvider provider, const QString& customAttribution);
 // Interface text scale multiplier for all canvas HUD painters.
 void setHudFontScale(double scale);
 
@@ -164,6 +183,9 @@ public:
     // Extra attribution line (e.g. OPERA CC BY 4.0) painted above the
     // basemap credit when a non-default data source feeds this panel.
     void setSupplementalAttribution(const QString& text);
+    // Drops cached/composited/in-flight shared tiles so a basemap provider
+    // or key change refetches from the new endpoint instead of stale layers.
+    static void clearSharedTileCache();
     QPointF viewCenter() const;
     int viewZoom() const;
     QPoint radarScreenPoint(const QString& radarId) const;

@@ -77,7 +77,7 @@ straight at ODIM polar volumes.
 
 - OPERA data: CC BY 4.0. The app must credit EUMETNET OPERA wherever
   European data renders (map chip + docs + release notes). Same class
-  of requirement as the Esri/OSM attribution already painted on-canvas.
+  of requirement as the CARTO/OSM attribution already painted on-canvas.
 
 ### Explicitly out
 
@@ -147,7 +147,7 @@ pick station, LIVE follow, tilts, products, timeline, cross-sections.
 - Vendor `OPERA_RADARS.csv` → generated `europeSites()` list (script
   run once, output committed; 132 bucket-active sites with id, name, lat/lon,
   ODIM code, country segment). Station picker, favorites, chase, and
-  the Esri basemap all work unchanged (panels are projection-agnostic).
+  the basemap all work unchanged (panels are projection-agnostic).
 - CC BY 4.0 credit: extend the on-canvas attribution chip when the
   active panel shows OPERA data + a line in README/docs.
 - Settings: nothing new except the HDF5 requirement note. No API key

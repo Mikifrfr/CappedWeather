@@ -330,7 +330,7 @@ Velocity controls enabled only when product is Velocity (`updateVelocityControls
 - `velocityGeneration_` / `velocityBuildPending_`: velocity field recomputed only when options or chunk changes.
 
 ### 8.5 Basemap Tiles
-- Uses Esri World Dark Gray base + reference tiles from a tile store (referenced as `tileStore()` in `paintEvent()`), composited per tile into one cached image. No API key; attribution is painted on-canvas.
+- Uses CARTO raster tiles (Dark/Light, keyed per user) with Esri World Dark Gray as a legacy fallback, fetched through a shared tile store (referenced as `tileStore()` in `paintEvent()`), composited per tile into one cached image. CARTO attribution is painted on-canvas.
 - Tiles fetched asynchronously (`requestVisibleTiles()`), rendered as QImages.
 - Bounded memory cache (configurable `cache/memoryMbPerPanel`) and disk cache (`cache/diskMbPerPanel`).
 
@@ -419,7 +419,7 @@ This is the most significant conditional feature in the codebase.
 | PNG snapshots, animated GIF, cross-section CSV | ✓ Confirmed: `exportSnapshot()`, `exportTimelineAnimation()`, `exportCsv()` |
 | Cached color-batched radar geometry off UI thread | ✓ Confirmed: `overlayImage_` cache, `overlayBuildPending_`, thread pool |
 | Shared decoded frames across panels | ✓ Confirmed: `std::shared_ptr<const DecodedChunk>` |
-| Dock-based layout, dark theme, Esri basemap | ✓ Confirmed: dock widgets, QSS, tile store |
+| Dock-based layout, dark theme, CARTO basemap | ✓ Confirmed: dock widgets, QSS, tile store |
 | Lightning-jump engine (GOES GLM) | ✓ Confirmed: full LJA implementation, *but requires netCDF-C at build time* |
 | Lightning-radar fusion | ✓ Confirmed: `extractRadarStormFeatures()` + `associateLightningWithRadar()`; `rebuildLightningFusion()` also drives independent shear/TVS/tracker layers with lightning hidden |
 | TVS / mesocyclone markers | ✓ Added in v0.7.0: `core/circulation_detector` (NSSL-style couplet + depth + time persistence) with Layers toggle, badge, and synthetic-volume tests. Guidance only, never warnings |

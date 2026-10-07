@@ -307,20 +307,113 @@ struct SharedTileStore {
 // (external linkage for tests) and must be defined in cappedweather scope.
 }  // namespace
 
+BasemapProvider basemapProviderFromInt(const int value) {
+    switch (value) {
+    case 1: return BasemapProvider::CartoLight;
+    case 2: return BasemapProvider::EsriDark;
+    case 3: return BasemapProvider::Custom;
+    default: return BasemapProvider::CartoDark;
+    }
+}
+
+QString basemapProviderName(const BasemapProvider provider) {
+    switch (provider) {
+    case BasemapProvider::CartoLight: return QStringLiteral("CARTO Light");
+    case BasemapProvider::EsriDark: return QStringLiteral("Esri Dark Gray (legacy)");
+    case BasemapProvider::Custom: return QStringLiteral("Custom template");
+    case BasemapProvider::CartoDark:
+    default: return QStringLiteral("CARTO Dark");
+    }
+}
+
+BasemapProvider basemapProviderFromSettings() {
+    return basemapProviderFromInt(
+        QSettings().value(QStringLiteral("basemap/provider"), 0).toInt());
+}
+
+QString basemapApiKeyFromSettings() {
+    return QSettings().value(QStringLiteral("basemap/apiKey")).toString().trimmed();
+}
+
+namespace {
+QString basemapCustomTemplateFromSettings() {
+    return QSettings().value(QStringLiteral("basemap/customTemplate")).toString().trimmed();
+}
+
+QString basemapCustomAttributionFromSettings() {
+    const auto text =
+        QSettings().value(QStringLiteral("basemap/customAttribution")).toString().trimmed();
+    return text.isEmpty() ? QStringLiteral("© OpenStreetMap contributors") : text;
+}
+}  // namespace
+
+BasemapTileUrls basemapTileUrls(const int zoom, const int x, const int y,
+                                const BasemapProvider provider, const QString& apiKey,
+                                const QString& customTemplate) {
+    if (provider == BasemapProvider::EsriDark) {
+        // Esri tile order is z/y/x — keep the flip in exactly one place.
+        return {
+            QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+                                "World_Dark_Gray_Base/MapServer/tile/%1/%2/%3")
+                     .arg(zoom)
+                     .arg(y)
+                     .arg(x)),
+            QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+                                "World_Dark_Gray_Reference/MapServer/tile/%1/%2/%3")
+                     .arg(zoom)
+                     .arg(y)
+                     .arg(x)),
+        };
+    }
+    if (provider == BasemapProvider::Custom && !customTemplate.isEmpty()) {
+        // Deterministic subdomain per tile spreads load without breaking
+        // the disk cache (same tile always maps to the same host).
+        const auto sub = QStringLiteral("abcd").at((x + y) & 3);
+        auto url = customTemplate;
+        url.replace(QStringLiteral("{z}"), QString::number(zoom));
+        url.replace(QStringLiteral("{x}"), QString::number(x));
+        url.replace(QStringLiteral("{y}"), QString::number(y));
+        url.replace(QStringLiteral("{s}"), QString(sub));
+        url.replace(QStringLiteral("{key}"), apiKey);
+        return {QUrl(url), QUrl()};
+    }
+    // CARTO raster: single layer, standard z/x/y order, key appended so
+    // keyless requests do not come back watermarked. An empty key still
+    // serves tiles (with CARTO's "API key required" watermark) rather than
+    // failing, so a fresh install renders before the user pastes a key.
+    const auto style = provider == BasemapProvider::CartoLight ? QStringLiteral("light_all")
+                                                               : QStringLiteral("dark_all");
+    const auto sub = QStringLiteral("abcd").at((x + y) & 3);
+    return {QUrl(QStringLiteral("https://%1.basemaps.cartocdn.com/rastertiles/%2/%3/%4/%5.png?key=%6")
+                     .arg(QString(sub), style)
+                     .arg(zoom)
+                     .arg(x)
+                     .arg(y)
+                     .arg(apiKey)),
+            QUrl()};
+}
+
 BasemapTileUrls basemapTileUrls(const int zoom, const int x, const int y) {
-    // Esri tile order is z/y/x — keep the flip in exactly one place.
-    return {
-        QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
-                            "World_Dark_Gray_Base/MapServer/tile/%1/%2/%3")
-                 .arg(zoom)
-                 .arg(y)
-                 .arg(x)),
-        QUrl(QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
-                            "World_Dark_Gray_Reference/MapServer/tile/%1/%2/%3")
-                 .arg(zoom)
-                 .arg(y)
-                 .arg(x)),
-    };
+    return basemapTileUrls(zoom, x, y, basemapProviderFromSettings(), basemapApiKeyFromSettings(),
+                           basemapCustomTemplateFromSettings());
+}
+
+QString basemapAttribution(const BasemapProvider provider, const QString& customAttribution) {
+    switch (provider) {
+    case BasemapProvider::EsriDark:
+        return QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin");
+    case BasemapProvider::Custom:
+        return customAttribution.isEmpty() ? QStringLiteral("© OpenStreetMap contributors")
+                                           : customAttribution;
+    case BasemapProvider::CartoLight:
+    case BasemapProvider::CartoDark:
+    default:
+        return QStringLiteral("© OpenStreetMap contributors · © CARTO");
+    }
+}
+
+QString basemapAttribution() {
+    return basemapAttribution(basemapProviderFromSettings(), basemapCustomAttributionFromSettings());
 }
 
 // Same linkage treatment as basemapTileUrls above: declared in the header,
@@ -488,6 +581,25 @@ std::shared_ptr<const ProcessedVelocity> sharedProcessedVelocity(
     producer->set_value(processed);
     return processed;
 }
+}  // namespace
+
+void RadarMapCanvas::clearSharedTileCache() {
+    auto& store = tileStore();
+    store.tiles.clear();
+    store.staging.clear();
+    store.pendingKeys.clear();
+    // In-flight replies carry the old endpoint's bytes: abort them and drop
+    // the routing so their finish handlers release watchers instead of
+    // publishing stale tiles under the new provider.
+    const auto inFlight = store.replies.keys();
+    store.replies.clear();
+    store.watchers.clear();
+    for (auto* reply : inFlight) {
+        if (reply) {
+            reply->abort();
+            reply->deleteLater();
+        }
+    }
 }
 
 RadarMapCanvas::RadarMapCanvas(QWidget* parent)
@@ -3028,14 +3140,22 @@ void RadarMapCanvas::requestVisibleTiles() {
             const auto wrappedX = wrappedTileX(tileX, tileCount);
             const auto key = tileKey(wrappedX, tileY);
             if (store.tiles.contains(key)) continue;
+            const auto urls = basemapTileUrls(zoom_, wrappedX, tileY);
+            if (urls.base.isEmpty()) continue;  // misconfigured custom template: nothing to fetch
             watchTile(store, key, this);
             const auto referenceKey = key + QStringLiteral("@ref");
             if (store.pendingKeys.contains(key) || store.pendingKeys.contains(referenceKey)) continue;
-            const auto urls = basemapTileUrls(zoom_, wrappedX, tileY);
             store.pendingKeys.insert(key);
-            store.pendingKeys.insert(referenceKey);
             auto* baseReply = store.network->get(makeRequest(urls.base));
             store.replies.insert(baseReply, key);
+            if (urls.reference.isEmpty()) {
+                // Single-layer providers (CARTO, custom): no second request,
+                // so mark the reference leg resolved up front and let the
+                // base arrival publish the tile on its own.
+                store.staging[key].referenceDone = true;
+                continue;
+            }
+            store.pendingKeys.insert(referenceKey);
             auto* referenceReply = store.network->get(makeRequest(urls.reference));
             store.replies.insert(referenceReply, referenceKey);
         }
@@ -3559,8 +3679,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
                              painter.fontMetrics().elidedText(label, Qt::ElideRight,
                                                               static_cast<int>(text.width())));
         };
-        drawAttributionPlate(height() - 25.0,
-                             QStringLiteral("© OpenStreetMap contributors · Esri, HERE, Garmin"));
+        drawAttributionPlate(height() - 25.0, basemapAttribution());
         if (!supplementalAttribution_.isEmpty())
             drawAttributionPlate(height() - 46.0, supplementalAttribution_);
     }

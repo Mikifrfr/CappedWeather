@@ -408,23 +408,66 @@ static bool testAlertCenterPrimingAndAge(QString* error) {
 }
 
 static bool testBasemapTileUrls(QString* error) {
-    // Esri uses z/y/x order (y before x) — the flip lives in basemapTileUrls.
-    const auto urls = basemapTileUrls(5, 7, 12);
-    const auto base = urls.base.toString();
-    const auto reference = urls.reference.toString();
-    if (!base.endsWith(QStringLiteral("/5/12/7")) ||
-        !base.contains(QStringLiteral("World_Dark_Gray_Base"))) {
-        *error = QStringLiteral("base URL should be Dark_Gray_Base z/y/x, got %1").arg(base);
+    // CARTO is the default: single layer, standard z/x/y order, key appended.
+    const auto dark = basemapTileUrls(5, 7, 12, BasemapProvider::CartoDark,
+                                      QStringLiteral("test-key-123"), QString());
+    const auto darkBase = dark.base.toString();
+    if (!darkBase.contains(QStringLiteral("basemaps.cartocdn.com")) ||
+        !darkBase.contains(QStringLiteral("rastertiles/dark_all")) ||
+        !darkBase.endsWith(QStringLiteral("/5/7/12.png?key=test-key-123"))) {
+        *error = QStringLiteral("CARTO dark URL should be z/x/y with key, got %1").arg(darkBase);
         return false;
     }
-    if (!reference.endsWith(QStringLiteral("/5/12/7")) ||
-        !reference.contains(QStringLiteral("World_Dark_Gray_Reference"))) {
-        *error = QStringLiteral("reference URL should be Dark_Gray_Reference z/y/x, got %1")
-                     .arg(reference);
+    if (!dark.reference.isEmpty()) {
+        *error = QStringLiteral("CARTO is single-layer, reference must be empty");
         return false;
     }
-    if (base.contains(QStringLiteral("cartocdn")) || reference.contains(QStringLiteral("cartocdn"))) {
-        *error = QStringLiteral("basemap must not reference CARTO");
+    const auto light = basemapTileUrls(5, 7, 12, BasemapProvider::CartoLight,
+                                       QStringLiteral("k"), QString());
+    if (!light.base.toString().contains(QStringLiteral("rastertiles/light_all"))) {
+        *error = QStringLiteral("CARTO light should use light_all, got %1")
+                     .arg(light.base.toString());
+        return false;
+    }
+    // No key: tiles still addressable (CARTO watermarks instead of failing).
+    const auto keyless = basemapTileUrls(5, 7, 12, BasemapProvider::CartoDark, QString(), QString());
+    if (!keyless.base.toString().endsWith(QStringLiteral("/5/7/12.png?key="))) {
+        *error = QStringLiteral("keyless CARTO URL should keep an empty ?key=, got %1")
+                     .arg(keyless.base.toString());
+        return false;
+    }
+    // Esri legacy keeps z/y/x order plus the reference layer.
+    const auto esri =
+        basemapTileUrls(5, 7, 12, BasemapProvider::EsriDark, QString(), QString());
+    if (!esri.base.toString().endsWith(QStringLiteral("/5/12/7")) ||
+        !esri.base.toString().contains(QStringLiteral("World_Dark_Gray_Base")) ||
+        !esri.reference.toString().contains(QStringLiteral("World_Dark_Gray_Reference"))) {
+        *error = QStringLiteral("Esri fallback should stay z/y/x with reference, got %1")
+                     .arg(esri.base.toString());
+        return false;
+    }
+    // Custom templates substitute every placeholder, subdomain included.
+    const auto custom = basemapTileUrls(5, 7, 12, BasemapProvider::Custom, QStringLiteral("K"),
+                                        QStringLiteral("https://{s}.tiles.example.com/{z}/{x}/{y}.png?key={key}"));
+    if (custom.base.toString() !=
+        QStringLiteral("https://d.tiles.example.com/5/7/12.png?key=K")) {
+        *error = QStringLiteral("custom template substitution wrong, got %1")
+                     .arg(custom.base.toString());
+        return false;
+    }
+    // Attribution is provider-specific and CARTO credit is mandatory.
+    if (!basemapAttribution(BasemapProvider::CartoDark, QString()).contains(
+            QStringLiteral("CARTO")) ||
+        !basemapAttribution(BasemapProvider::EsriDark, QString()).contains(
+            QStringLiteral("Esri")) ||
+        basemapAttribution(BasemapProvider::Custom, QStringLiteral("Mine")) !=
+            QStringLiteral("Mine")) {
+        *error = QStringLiteral("basemap attribution strings are wrong");
+        return false;
+    }
+    if (basemapProviderFromInt(99) != BasemapProvider::CartoDark ||
+        basemapProviderFromInt(2) != BasemapProvider::EsriDark) {
+        *error = QStringLiteral("basemapProviderFromInt should default to CARTO Dark");
         return false;
     }
     return true;

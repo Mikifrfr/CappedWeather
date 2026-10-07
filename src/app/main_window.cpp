@@ -3015,6 +3015,7 @@ void MainWindow::showSettingsDialog() {
     auto* networkForm = makeSection(QStringLiteral("Network"));
     auto* glmForm = makeSection(QStringLiteral("Lightning (GLM)"));
     auto* cacheForm = makeSection(QStringLiteral("Map cache"));
+    auto* basemapForm = makeSection(QStringLiteral("Basemap"));
     auto* themeCombo = new QComboBox(&dialog);
     themeCombo->addItem(appThemeName(AppTheme::Classic), static_cast<int>(AppTheme::Classic));
     themeCombo->addItem(appThemeName(AppTheme::Prototype), static_cast<int>(AppTheme::Prototype));
@@ -3117,6 +3118,46 @@ void MainWindow::showSettingsDialog() {
     diskCache->setRange(16, 1024);
     diskCache->setSuffix(QStringLiteral(" MB/panel"));
     diskCache->setValue(QSettings().value(QStringLiteral("cache/diskMbPerPanel"), 64).toInt());
+    // Basemap provider + API key. The key lives in the user's own settings
+    // (registry/plist/ini), never in the install dir, so updates keep it.
+    auto* basemapProvider = new QComboBox(&dialog);
+    basemapProvider->addItem(basemapProviderName(BasemapProvider::CartoDark),
+                             static_cast<int>(BasemapProvider::CartoDark));
+    basemapProvider->addItem(basemapProviderName(BasemapProvider::CartoLight),
+                             static_cast<int>(BasemapProvider::CartoLight));
+    basemapProvider->addItem(basemapProviderName(BasemapProvider::EsriDark),
+                             static_cast<int>(BasemapProvider::EsriDark));
+    basemapProvider->addItem(basemapProviderName(BasemapProvider::Custom),
+                             static_cast<int>(BasemapProvider::Custom));
+    basemapProvider->setCurrentIndex(
+        basemapProvider->findData(QSettings().value(QStringLiteral("basemap/provider"), 0).toInt()));
+    basemapProvider->setToolTip(QStringLiteral(
+        "CARTO serves the map from your own free key (no shared keyless endpoint). "
+        "Esri Dark Gray is the pre-CARTO fallback."));
+    auto* basemapKey = new QLineEdit(&dialog);
+    basemapKey->setEchoMode(QLineEdit::Password);
+    basemapKey->setPlaceholderText(QStringLiteral("Free key from carto.com/basemaps/apikey"));
+    basemapKey->setText(QSettings().value(QStringLiteral("basemap/apiKey")).toString());
+    basemapKey->setToolTip(QStringLiteral(
+        "Stored in your user settings, so app updates never ask for it again. "
+        "Sent only to the tile endpoint as ?key=. Without a key CARTO tiles "
+        "still load but carry an API-key watermark."));
+    auto* basemapTemplate = new QLineEdit(&dialog);
+    basemapTemplate->setPlaceholderText(
+        QStringLiteral("https://tiles.example.com/{z}/{x}/{y}.png?key={key}"));
+    basemapTemplate->setText(QSettings().value(QStringLiteral("basemap/customTemplate")).toString());
+    auto* basemapCredit = new QLineEdit(&dialog);
+    basemapCredit->setPlaceholderText(QStringLiteral("(c) OpenStreetMap contributors"));
+    basemapCredit->setText(QSettings().value(QStringLiteral("basemap/customAttribution")).toString());
+    const auto syncBasemapRows = [basemapProvider, basemapTemplate, basemapCredit] {
+        const bool custom = basemapProvider->currentData().toInt() ==
+                            static_cast<int>(BasemapProvider::Custom);
+        basemapTemplate->setEnabled(custom);
+        basemapCredit->setEnabled(custom);
+    };
+    connect(basemapProvider, &QComboBox::currentIndexChanged, &dialog,
+            [syncBasemapRows](int) { syncBasemapRows(); });
+    syncBasemapRows();
     displayForm->addRow(QStringLiteral("Theme"), themeCombo);
     displayForm->addRow(QStringLiteral("Interface text scale"), fontScale);
     displayForm->addRow(QStringLiteral("Multi-panel"), synchronize);
@@ -3195,6 +3236,10 @@ void MainWindow::showSettingsDialog() {
     glmForm->addRow(QStringLiteral("GLM sigma window"), lightningWindow);
     cacheForm->addRow(QStringLiteral("Map memory cache (restart)"), memoryCache);
     cacheForm->addRow(QStringLiteral("Map disk cache (restart)"), diskCache);
+    basemapForm->addRow(QStringLiteral("Provider"), basemapProvider);
+    basemapForm->addRow(QStringLiteral("CARTO API key"), basemapKey);
+    basemapForm->addRow(QStringLiteral("Custom template"), basemapTemplate);
+    basemapForm->addRow(QStringLiteral("Custom attribution"), basemapCredit);
     memoryCache->setToolTip(QStringLiteral("Requires restart: the map tile store reads this once at first use."));
     diskCache->setToolTip(QStringLiteral("Requires restart: the map tile store reads this once at first use."));
 
@@ -3312,6 +3357,28 @@ void MainWindow::showSettingsDialog() {
     networkSettings.setValue(QStringLiteral("lightning/sigmaWindowMinutes"), lightningWindow->value());
     networkSettings.setValue(QStringLiteral("cache/memoryMbPerPanel"), memoryCache->value());
     networkSettings.setValue(QStringLiteral("cache/diskMbPerPanel"), diskCache->value());
+    const auto oldBasemapProvider = networkSettings.value(QStringLiteral("basemap/provider"), 0).toInt();
+    const auto oldBasemapKey = networkSettings.value(QStringLiteral("basemap/apiKey")).toString();
+    const auto oldBasemapTemplate =
+        networkSettings.value(QStringLiteral("basemap/customTemplate")).toString();
+    const auto oldBasemapCredit =
+        networkSettings.value(QStringLiteral("basemap/customAttribution")).toString();
+    networkSettings.setValue(QStringLiteral("basemap/provider"), basemapProvider->currentData().toInt());
+    networkSettings.setValue(QStringLiteral("basemap/apiKey"), basemapKey->text().trimmed());
+    networkSettings.setValue(QStringLiteral("basemap/customTemplate"),
+                             basemapTemplate->text().trimmed());
+    networkSettings.setValue(QStringLiteral("basemap/customAttribution"),
+                             basemapCredit->text().trimmed());
+    if (basemapProvider->currentData().toInt() != oldBasemapProvider ||
+        basemapKey->text().trimmed() != oldBasemapKey ||
+        basemapTemplate->text().trimmed() != oldBasemapTemplate ||
+        basemapCredit->text().trimmed() != oldBasemapCredit) {
+        // New endpoint or key: drop cached tiles so every panel refetches
+        // from it instead of showing the old provider's layers.
+        RadarMapCanvas::clearSharedTileCache();
+        for (auto* map : maps_)
+            if (map) map->update();
+    }
     refreshTimer_->setInterval(radarRefresh->value() * 1000);
     overlayRefreshTimer_->setInterval(overlayRefresh->value() * 1000);
     glmSource_->configure(glmConfigFromSettings());
