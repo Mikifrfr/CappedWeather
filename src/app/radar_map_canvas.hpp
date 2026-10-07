@@ -22,6 +22,8 @@
 
 #include <optional>
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -71,6 +73,29 @@ QString basemapAttribution();
 QString basemapAttribution(BasemapProvider provider, const QString& customAttribution);
 // Interface text scale multiplier for all canvas HUD painters.
 void setHudFontScale(double scale);
+
+// Per-gate echo geometry snapshot: world-space quads + normalized values,
+// computed once per (volume, product, elevation, zoom) and reused by every
+// pan-triggered re-raster instead of redoing destinationPoint/mercator trig
+// per gate per rebuild. float32 world pixels stay sub-pixel exact; only
+// gates carrying values (or visible below-threshold/folded flags) are kept.
+struct EchoGateGeometry {
+    struct Gate {
+        float x[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        float y[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        float value01 = 0.0F;
+        std::uint8_t kind = 0;  // 0 = value, 1 = range-folded, 2 = below-threshold
+    };
+    std::shared_ptr<const DecodedChunk> chunk;
+    std::shared_ptr<const ProcessedVelocity> velocity;
+    ProductKind product = ProductKind::Reflectivity;
+    std::optional<int> elevation;
+    int zoom = -1;
+    bool smooth = false;
+    bool belowVisible = false;
+    double maximumRangeMeters = 0.0;
+    std::vector<Gate> gates;
+};
 
 class RadarMapCanvas final : public QWidget {
     Q_OBJECT
@@ -356,6 +381,8 @@ private:
     quint64 overlayGeneration_ = 0;
     quint64 overlayImageGeneration_ = 0;
     bool overlayBuildPending_ = false;
+    std::atomic<int> overlayRequestId_{0};
+    std::shared_ptr<const EchoGateGeometry> echoGeometry_;
     double maximumRangeMeters_ = 230000.0;
     QImage weatherOverlayImage_;
     QPointF weatherOverlayImageCenterWorld_;

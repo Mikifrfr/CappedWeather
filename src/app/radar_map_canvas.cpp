@@ -1895,6 +1895,86 @@ void RadarMapCanvas::rebuildWeatherOverlay() {
     });
 }
 
+namespace {
+
+bool echoGeometryMatches(const EchoGateGeometry& geometry,
+                         const std::shared_ptr<const DecodedChunk>& chunk,
+                         const std::shared_ptr<const ProcessedVelocity>& velocity,
+                         const ProductKind product, const std::optional<int>& elevation,
+                         const int zoom, const bool smooth, const bool belowVisible) {
+    return geometry.chunk == chunk && geometry.velocity == velocity &&
+           geometry.product == product && geometry.elevation == elevation &&
+           geometry.zoom == zoom && geometry.smooth == smooth &&
+           geometry.belowVisible == belowVisible;
+}
+
+// Direct scanline rasterizer for cached gate quads: no QPainterPath
+// tessellation, no per-rebuild trig. Each quad is convex (azimuth/range
+// cell), so a scanline hits exactly two edges; half-open edge tests keep
+// shared edges single-covered, and the +1px right/bottom bleed closes the
+// same 1px seams the old same-color outline trick handled. Runs in the
+// worker thread on a Format_ARGB32 image (premultiplied at the end).
+void rasterizeEchoGates(QImage& image, const std::vector<EchoGateGeometry::Gate>& gates,
+                        const QPointF& centerWorld, const double dpr,
+                        const std::array<QRgb, 64>& lut, const QRgb foldedRgb,
+                        const QRgb belowRgb) {
+    const int width = image.width();
+    const int height = image.height();
+    if (width <= 0 || height <= 0 || gates.empty()) return;
+    const double originX = width * 0.5 - centerWorld.x() * dpr;
+    const double originY = height * 0.5 - centerWorld.y() * dpr;
+    for (const auto& gate : gates) {
+        double px[4];
+        double py[4];
+        double xMin = std::numeric_limits<double>::infinity();
+        double xMax = -std::numeric_limits<double>::infinity();
+        double yMin = std::numeric_limits<double>::infinity();
+        double yMax = -std::numeric_limits<double>::infinity();
+        for (int corner = 0; corner < 4; ++corner) {
+            px[corner] = static_cast<double>(gate.x[corner]) * dpr + originX;
+            py[corner] = static_cast<double>(gate.y[corner]) * dpr + originY;
+            xMin = std::min(xMin, px[corner]);
+            xMax = std::max(xMax, px[corner]);
+            yMin = std::min(yMin, py[corner]);
+            yMax = std::max(yMax, py[corner]);
+        }
+        int y0 = std::max(0, static_cast<int>(std::floor(yMin)));
+        int y1 = std::min(height - 1, static_cast<int>(std::ceil(yMax)) + 1);
+        if (y0 > y1) continue;
+        const int xLo = std::max(0, static_cast<int>(std::floor(xMin)));
+        const int xHi = std::min(width - 1, static_cast<int>(std::ceil(xMax)) + 1);
+        if (xLo > xHi) continue;
+        const QRgb color = gate.kind == 0
+                               ? lut[std::clamp(static_cast<int>(std::lround(
+                                                     static_cast<double>(gate.value01) * 63.0)),
+                                                 0, 63)]
+                               : (gate.kind == 1 ? foldedRgb : belowRgb);
+        for (int y = y0; y <= y1; ++y) {
+            const double yc = static_cast<double>(y) + 0.5;
+            double xa = std::numeric_limits<double>::infinity();
+            double xb = -std::numeric_limits<double>::infinity();
+            for (int edge = 0; edge < 4; ++edge) {
+                const double ex0 = px[edge];
+                const double ey0 = py[edge];
+                const double ex1 = px[(edge + 1) & 3];
+                const double ey1 = py[(edge + 1) & 3];
+                if ((ey0 <= yc && yc < ey1) || (ey1 <= yc && yc < ey0)) {
+                    const double xi = ex0 + (yc - ey0) / (ey1 - ey0) * (ex1 - ex0);
+                    xa = std::min(xa, xi);
+                    xb = std::max(xb, xi);
+                }
+            }
+            if (xa > xb) continue;
+            const int xs = std::max(xLo, static_cast<int>(std::floor(xa)));
+            const int xe = std::min(xHi, static_cast<int>(std::ceil(xb)));
+            QRgb* row = reinterpret_cast<QRgb*>(image.scanLine(y));
+            for (int x = xs; x <= xe; ++x) row[x] = color;
+        }
+    }
+}
+
+}  // namespace
+
 void RadarMapCanvas::rebuildOverlay() {
     if (overlayBuildPending_ || velocityBuildPending_ || width() <= 0 || height() <= 0) return;
     const auto* site = selectedSite();
@@ -1903,6 +1983,10 @@ void RadarMapCanvas::rebuildOverlay() {
         return;
     }
     overlayBuildPending_ = true;
+    // Every (re)build request bumps the id, even the early-outs below: a
+    // pan or zoom that lands while a worker is mid-volume aborts it at the
+    // next checkpoint instead of burning a full stale raster.
+    const auto requestId = overlayRequestId_.fetch_add(1, std::memory_order_relaxed) + 1;
     const auto generation = overlayGeneration_;
     const auto targetZoom = zoom_;
     const auto baseLatitude = *site->latitude;
@@ -1916,18 +2000,25 @@ void RadarMapCanvas::rebuildOverlay() {
     const auto smoothDisplay = displaySmoothing_;
     const auto chunk = chunk_;
     const auto processedVelocity = processedVelocity_;
+    const auto cachedGeometry = echoGeometry_;
     const auto viewportSize = size();
     const auto devicePixelRatio = devicePixelRatioF();
     const auto centerCoordinate = center_;
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start([
-        guard, generation, targetZoom, baseLatitude, baseLongitude, product, elevation,
+        guard, requestId, generation, targetZoom, baseLatitude, baseLongitude, product, elevation,
         belowThresholdVisible, palette, customPalette, opacity, smoothDisplay, chunk, processedVelocity,
-        viewportSize, devicePixelRatio, centerCoordinate
+        cachedGeometry, viewportSize, devicePixelRatio, centerCoordinate
     ] {
         constexpr int kOverlayMargin = 256;
-        QHash<QRgb, QPainterPath> paths;
+        std::shared_ptr<const EchoGateGeometry> geometry = cachedGeometry;
+        const bool geometryReusable =
+            geometry &&
+            echoGeometryMatches(*geometry, chunk, processedVelocity, product, elevation,
+                                targetZoom, smoothDisplay, belowThresholdVisible);
+        std::vector<EchoGateGeometry::Gate> builtGates;
         double maximumRangeMeters = 0.0;
+        bool cacheable = geometryReusable;
         const auto& descriptor = productDescriptor(product);
         const auto worldPointAt = [targetZoom](const double latitude, const double longitude) {
             const auto world = static_cast<double>(RadarMapCanvas::kTileSize * (1 << targetZoom));
@@ -1936,6 +2027,7 @@ void RadarMapCanvas::rebuildOverlay() {
             return QPointF((longitude + 180.0) / 360.0 * world,
                            (0.5 - std::log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * kPi)) * world);
         };
+        if (!geometryReusable) {
         // Azimuth tiling from ACTUAL neighbor spacing, not just the resolution
         // code. Where ray spacing outgrows the coded resolution (super-res
         // dropout at far range, mixed sweeps), width-from-code leaves
@@ -1986,6 +2078,19 @@ void RadarMapCanvas::rebuildOverlay() {
             }
         }
         for (std::size_t rayIndex = 0; rayIndex < chunk->rays.size(); ++rayIndex) {
+            // Stale-work checkpoint: a pan/zoom since this worker started
+            // makes its center obsolete, so drop it instead of rasterizing
+            // a full volume nobody will ever see.
+            if ((rayIndex & 63) == 0 && (!guard || requestId != guard->overlayRequestId_.load(
+                                                                     std::memory_order_relaxed))) {
+                QMetaObject::invokeMethod(
+                    guard,
+                    [guard] {
+                        if (guard) guard->overlayBuildPending_ = false;
+                    },
+                    Qt::QueuedConnection);
+                return;
+            }
             const auto& ray = chunk->rays[rayIndex];
             if (elevation && ray.elevationNumber != *elevation) continue;
             if (!ray.has(product)) continue;
@@ -2012,23 +2117,18 @@ void RadarMapCanvas::rebuildOverlay() {
                 const auto belowThreshold = values[gate] == 0;
                 const auto rangeFolded = values[gate] == 1;
                 if (!value && !(belowThresholdVisible && (belowThreshold || rangeFolded))) continue;
-                const auto normalized = value
-                    ? std::clamp((*value - descriptor.minimum) /
-                                     (descriptor.maximum - descriptor.minimum), 0.0, 1.0)
-                    : 0.0;
-                const auto color = value
-                    ? productColor(product, std::round(normalized * 63.0) / 63.0, palette, opacity, customPalette)
-                    : rangeFolded ? QColor(150, 150, 160, 95) : QColor(45, 70, 78, 55);
+                EchoGateGeometry::Gate quad;
+                quad.value01 = value ? static_cast<float>(std::clamp(
+                                           (*value - descriptor.minimum) /
+                                               (descriptor.maximum - descriptor.minimum),
+                                           0.0, 1.0))
+                                     : 0.0F;
+                quad.kind = static_cast<std::uint8_t>(value ? 0 : (rangeFolded ? 1 : 2));
                 const auto rangeCenter = static_cast<double>(firstGateMeters) +
                                          static_cast<double>(gate) * gateSpacingMeters;
                 const auto lowerRange = std::max(0.0, rangeCenter - halfRange);
                 const auto upperRange = rangeCenter + halfRange;
                 if (upperRange <= 0.0) continue;
-                const auto coordinateAt = [&](const double range, const double azimuth) {
-                    const auto beam = standardBeamGeometry(range, ray.elevationDegrees);
-                    return destinationPoint({baseLatitude, baseLongitude}, azimuth,
-                                            beam.surfaceDistanceMeters);
-                };
                 const AzSpan& span = azSpans[rayIndex];
                 const double resHalf = std::clamp(
                     static_cast<double>(ray.azimuthResolutionDegrees) * 0.5, 0.1, 0.75);
@@ -2039,44 +2139,67 @@ void RadarMapCanvas::rebuildOverlay() {
                 const auto upperAzimuth =
                     span.valid ? span.upper
                                : static_cast<double>(ray.azimuthDegrees) + resHalf * spanFactor;
-                const std::array coordinates{
-                    coordinateAt(lowerRange, lowerAzimuth), coordinateAt(upperRange, lowerAzimuth),
-                    coordinateAt(upperRange, upperAzimuth), coordinateAt(lowerRange, upperAzimuth),
+                const auto cornerAt = [&](const double range, const double azimuth) {
+                    const auto beam = standardBeamGeometry(range, ray.elevationDegrees);
+                    const auto geo = destinationPoint({baseLatitude, baseLongitude}, azimuth,
+                                                      beam.surfaceDistanceMeters);
+                    return worldPointAt(geo.latitude, geo.longitude);
                 };
-                QPolygonF polygon;
-                polygon.reserve(4);
-                for (const auto& coordinate : coordinates)
-                    polygon.push_back(worldPointAt(coordinate.latitude, coordinate.longitude));
-                paths[color.rgba()].addPolygon(polygon);
+                const QPointF corners[4] = {
+                    cornerAt(lowerRange, lowerAzimuth),
+                    cornerAt(upperRange, lowerAzimuth),
+                    cornerAt(upperRange, upperAzimuth),
+                    cornerAt(lowerRange, upperAzimuth),
+                };
+                for (int corner = 0; corner < 4; ++corner) {
+                    quad.x[corner] = static_cast<float>(corners[corner].x());
+                    quad.y[corner] = static_cast<float>(corners[corner].y());
+                }
+                builtGates.push_back(quad);
             }
         }
+        // Publish the fresh snapshot: the next pan-triggered rebuild reuses
+        // these quads instead of redoing per-gate trig. Oversized all-tilt
+        // volumes skip the cache (transient build only) to bound memory.
+        constexpr std::size_t kMaxCachedQuads = 1200000;
+        auto fresh = std::make_shared<EchoGateGeometry>();
+        fresh->chunk = chunk;
+        fresh->velocity = processedVelocity;
+        fresh->product = product;
+        fresh->elevation = elevation;
+        fresh->zoom = targetZoom;
+        fresh->smooth = smoothDisplay;
+        fresh->belowVisible = belowThresholdVisible;
+        fresh->maximumRangeMeters = maximumRangeMeters;
+        fresh->gates = std::move(builtGates);
+        cacheable = fresh->gates.size() <= kMaxCachedQuads;
+        geometry = std::move(fresh);
+        }  // end if (!geometryReusable)
         const auto overlayLogicalSize = viewportSize + QSize(kOverlayMargin * 2, kOverlayMargin * 2);
         const auto pixelSize = QSize(
             std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.width() * devicePixelRatio))),
             std::max(1, static_cast<int>(std::ceil(overlayLogicalSize.height() * devicePixelRatio))));
-        QImage overlayImage(pixelSize, QImage::Format_ARGB32_Premultiplied);
-        overlayImage.setDevicePixelRatio(devicePixelRatio);
+        QImage overlayImage(pixelSize, QImage::Format_ARGB32);
         overlayImage.fill(Qt::transparent);
         const auto overlayCenterWorld = worldPointAt(centerCoordinate.y(), centerCoordinate.x());
-        QPainter overlayPainter(&overlayImage);
-        overlayPainter.translate(overlayLogicalSize.width() / 2.0 - overlayCenterWorld.x(),
-                                 overlayLogicalSize.height() / 2.0 - overlayCenterWorld.y());
-        for (auto it = paths.cbegin(); it != paths.cend(); ++it) {
-            // Same-color 1px outline, not NoPen: adjacent gate quads share exact
-            // mathematical edges but rasterize independently, so NoPen leaves
-            // 1px background seams (azimuthal corduroy). The outline closes them
-            // deterministically regardless of color-group draw order.
-            const QColor color = QColor::fromRgba(it.key());
-            overlayPainter.setBrush(color);
-            overlayPainter.setPen(QPen(color, 1.0, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
-            overlayPainter.drawPath(it.value());
+        // 64-entry color LUT: the old code ran productColor() per gate.
+        std::array<QRgb, 64> colorLut;
+        for (int lutIndex = 0; lutIndex < 64; ++lutIndex) {
+            colorLut[lutIndex] =
+                productColor(product, static_cast<double>(lutIndex) / 63.0, palette, opacity,
+                             customPalette)
+                    .rgba();
         }
-        overlayPainter.end();
+        rasterizeEchoGates(overlayImage, geometry->gates, overlayCenterWorld, devicePixelRatio,
+                           colorLut, QColor(150, 150, 160, 95).rgba(), QColor(45, 70, 78, 55).rgba());
+        overlayImage = overlayImage.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        overlayImage.setDevicePixelRatio(devicePixelRatio);
         if (!guard) return;
         QMetaObject::invokeMethod(guard, [guard, generation, targetZoom,
                                           overlayImage = std::move(overlayImage),
                                           overlayLogicalSize, overlayCenterWorld,
-                                          maximumRangeMeters]() mutable {
+                                          maximumRangeMeters, cacheable,
+                                          geometry = std::move(geometry)]() mutable {
             if (!guard) return;
             guard->overlayBuildPending_ = false;
             if (generation == guard->overlayGeneration_ && targetZoom == guard->zoom_) {
@@ -2088,6 +2211,7 @@ void RadarMapCanvas::rebuildOverlay() {
                                                   : 230000.0;
                 guard->overlayZoom_ = targetZoom;
                 guard->overlayImageGeneration_ = generation;
+                if (cacheable) guard->echoGeometry_ = std::move(geometry);
             }
             guard->update();
         }, Qt::QueuedConnection);

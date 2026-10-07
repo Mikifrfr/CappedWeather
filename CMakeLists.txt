@@ -298,6 +298,14 @@ if(CAPPEDWEATHER_BUILD_APP)
                 cappedweather_ui
                 Qt6::Test
             )
+
+            qt_add_executable(pan_benchmark
+                tools/pan_benchmark.cpp
+            )
+            target_link_libraries(pan_benchmark PRIVATE
+                cappedweather_ui
+                Qt6::Test
+            )
         endif()
 
         set_target_properties(CappedWeather PROPERTIES
