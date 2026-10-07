@@ -470,6 +470,38 @@ static bool testBasemapTileUrls(QString* error) {
         *error = QStringLiteral("basemapProviderFromInt should default to CARTO Dark");
         return false;
     }
+    // Settings-driven wrapper: CARTO selected but no key falls back to Esri
+    // (tiles and attribution agree); pasting a key selects CARTO.
+    QSettings settings;
+    const auto savedProvider = settings.value(QStringLiteral("basemap/provider"));
+    const auto savedKey = settings.value(QStringLiteral("basemap/apiKey"));
+    const auto savedTemplate = settings.value(QStringLiteral("basemap/customTemplate"));
+    const auto restoreBasemapSettings = [&] {
+        if (savedProvider.isValid()) settings.setValue(QStringLiteral("basemap/provider"), savedProvider);
+        else settings.remove(QStringLiteral("basemap/provider"));
+        if (savedKey.isValid()) settings.setValue(QStringLiteral("basemap/apiKey"), savedKey);
+        else settings.remove(QStringLiteral("basemap/apiKey"));
+        if (savedTemplate.isValid())
+            settings.setValue(QStringLiteral("basemap/customTemplate"), savedTemplate);
+        else settings.remove(QStringLiteral("basemap/customTemplate"));
+    };
+    settings.setValue(QStringLiteral("basemap/provider"),
+                      static_cast<int>(BasemapProvider::CartoDark));
+    settings.remove(QStringLiteral("basemap/apiKey"));
+    settings.remove(QStringLiteral("basemap/customTemplate"));
+    const auto fallback = basemapTileUrls(5, 7, 12);
+    const bool fallbackOk =
+        fallback.base.toString().contains(QStringLiteral("World_Dark_Gray_Base")) &&
+        basemapAttribution().contains(QStringLiteral("Esri"));
+    settings.setValue(QStringLiteral("basemap/apiKey"), QStringLiteral("k"));
+    const auto keyed = basemapTileUrls(5, 7, 12);
+    const bool keyedOk = keyed.base.toString().contains(QStringLiteral("cartocdn")) &&
+                         basemapAttribution().contains(QStringLiteral("CARTO"));
+    restoreBasemapSettings();
+    if (!fallbackOk || !keyedOk) {
+        *error = QStringLiteral("keyless settings should fall back to Esri, keyed to CARTO");
+        return false;
+    }
     return true;
 }
 

@@ -3140,8 +3140,8 @@ void MainWindow::showSettingsDialog() {
     basemapKey->setText(QSettings().value(QStringLiteral("basemap/apiKey")).toString());
     basemapKey->setToolTip(QStringLiteral(
         "Stored in your user settings, so app updates never ask for it again. "
-        "Sent only to the tile endpoint as ?key=. Without a key CARTO tiles "
-        "still load but carry an API-key watermark."));
+        "Sent only to the tile endpoint as ?key=. Without a key the map "
+        "uses Esri instead of watermarked CARTO tiles."));
     auto* basemapTemplate = new QLineEdit(&dialog);
     basemapTemplate->setPlaceholderText(
         QStringLiteral("https://tiles.example.com/{z}/{x}/{y}.png?key={key}"));

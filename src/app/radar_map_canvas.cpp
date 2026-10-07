@@ -393,9 +393,28 @@ BasemapTileUrls basemapTileUrls(const int zoom, const int x, const int y,
             QUrl()};
 }
 
+namespace {
+BasemapProvider effectiveProvider(const BasemapProvider selected, const QString& apiKey,
+                                  const QString& customTemplate) {
+    // No key, no CARTO: keyless CARTO tiles come back watermarked, so fall
+    // back to Esri instead of showing branded tiles. Same when the custom
+    // template is empty (nothing to substitute).
+    if (selected == BasemapProvider::Custom && customTemplate.isEmpty())
+        return BasemapProvider::EsriDark;
+    if (apiKey.isEmpty() && (selected == BasemapProvider::CartoDark ||
+                             selected == BasemapProvider::CartoLight ||
+                             selected == BasemapProvider::Custom))
+        return BasemapProvider::EsriDark;
+    return selected;
+}
+}  // namespace
+
 BasemapTileUrls basemapTileUrls(const int zoom, const int x, const int y) {
-    return basemapTileUrls(zoom, x, y, basemapProviderFromSettings(), basemapApiKeyFromSettings(),
-                           basemapCustomTemplateFromSettings());
+    const auto provider = basemapProviderFromSettings();
+    const auto apiKey = basemapApiKeyFromSettings();
+    const auto customTemplate = basemapCustomTemplateFromSettings();
+    return basemapTileUrls(zoom, x, y, effectiveProvider(provider, apiKey, customTemplate), apiKey,
+                           customTemplate);
 }
 
 QString basemapAttribution(const BasemapProvider provider, const QString& customAttribution) {
@@ -413,7 +432,13 @@ QString basemapAttribution(const BasemapProvider provider, const QString& custom
 }
 
 QString basemapAttribution() {
-    return basemapAttribution(basemapProviderFromSettings(), basemapCustomAttributionFromSettings());
+    const auto provider = basemapProviderFromSettings();
+    const auto apiKey = basemapApiKeyFromSettings();
+    const auto customTemplate = basemapCustomTemplateFromSettings();
+    if (provider == BasemapProvider::Custom)
+        return basemapAttribution(effectiveProvider(provider, apiKey, customTemplate),
+                                  basemapCustomAttributionFromSettings());
+    return basemapAttribution(effectiveProvider(provider, apiKey, customTemplate), QString());
 }
 
 // Same linkage treatment as basemapTileUrls above: declared in the header,

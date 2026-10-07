@@ -330,7 +330,7 @@ Velocity controls enabled only when product is Velocity (`updateVelocityControls
 - `velocityGeneration_` / `velocityBuildPending_`: velocity field recomputed only when options or chunk changes.
 
 ### 8.5 Basemap Tiles
-- Uses CARTO raster tiles (Dark/Light, keyed per user) with Esri World Dark Gray as a legacy fallback, fetched through a shared tile store (referenced as `tileStore()` in `paintEvent()`), composited per tile into one cached image. CARTO attribution is painted on-canvas.
+- Uses CARTO raster tiles (Dark/Light) once the user pastes a free key, Esri World Dark Gray until then, fetched through a shared tile store (referenced as `tileStore()` in `paintEvent()`), composited per tile into one cached image. Attribution follows the active provider and is painted on-canvas.
 - Tiles fetched asynchronously (`requestVisibleTiles()`), rendered as QImages.
 - Bounded memory cache (configurable `cache/memoryMbPerPanel`) and disk cache (`cache/diskMbPerPanel`).
 
