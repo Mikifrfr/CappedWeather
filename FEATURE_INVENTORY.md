@@ -191,7 +191,7 @@ In Playback Dock (lines 701–736):
 - Honest limits: guidance only, never warnings; no hail sizing yet. Synthetic-volume core tests cover clear-air, single-tilt, NaN/folded, weak/speckle, shallow, misaligned, and azimuth-gap vetoes.
 
 ### 5.6 Rotation / Shear, Storm Trails, Smoothing
-- **Rotation / shear** (`shearCheck_` / `shearBadge_`, persisted `overlays/shear`): `paintShearOverlay()` renders `extractRadarStormFeatures()` objects independent of lightning — pink double-ring + `ROT dBZ | shear s^-1` at zoom ≥ 6, gray dot for strong non-rotating ≥ 50 dBZ cores at zoom ≥ 7.
+- **Rotation / shear** (`shearCheck_` / `shearBadge_`, persisted `overlays/shear`): `paintShearOverlay()` renders validated shear-watch candidates from `detectCirculations()` (meso-strength couplet columns failing TVS/meso on depth or diameter, multi-tilt only) — pink double-ring + `ROT m/s | km deep` at zoom ≥ 6, capped at the 12 strongest with 64 px label declutter, so quiet volumes stay clean; gray dot for strong non-rotating ≥ 50 dBZ cores at zoom ≥ 7. See `docs/rotation-validation.md` v4 for why the span heuristic left the map.
 - **Storm trails** (`trailCheck_`, persisted `overlays/trail`): `StormTracker` (cost-based + motion prediction + Hungarian assignment) matches features across volumes; every storm draws its own fading line with `#id` + 5-min motion vector at zoom ≥ 6, longest track keeps dots + `trail dBZ` + top-3 +10/+20/+30 min extrapolation; per-track running gate maxima (`GateMaxTrail`).
 - **Smooth echo (display only)** (`smoothingCheck_`, persisted `view/smoothing`, default off): expands azimuth half-width ×1.35 so adjacent gates overlap; no data smoothing or value interpolation.
 

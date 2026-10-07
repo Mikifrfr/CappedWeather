@@ -16,7 +16,12 @@ struct RadarFeatureConfig {
     double minimumReflectivityDbz = 35.0;
     double minimumVelocitySpanMetersPerSecond = 15.0;  // was 20: folded native
     // velocities underestimated span; dealiased input + lower gate lets real
-    // mesos pass while clear-air noise still fails the reflectivity guard.
+    // mesos pass. NOTE: this flag is recall-oriented, not display-grade:
+    // widespread 35-50 dBZ biological scatter / stratiform echo with noisy
+    // velocities spans 15+ m/s across most fragments, so `rotating` fires on
+    // quiet volumes too (2026-10 KABR). It is only a soft tracker/fusion
+    // hint; the map rotation layer draws validated shear-watch candidates
+    // from detectCirculations instead (see paintShearOverlay).
     double minimumAzimuthalShearPerSecond = 0.0015;  // was 0.0025, computed over
     // a fixed 3 km meso length scale (below) instead of storm area.
     double associationRadiusKm = 45.0;

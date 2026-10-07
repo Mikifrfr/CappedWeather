@@ -68,12 +68,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libbz2-dev zlib1g-dev libnetcdf-dev libhdf5-dev \
             libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-0 \
-            libxcb-cursor0 curl
+            libxcb-cursor0 curl patchelf file xvfb \
+            libxcb-shape0 libxcb-randr0 libxcb-xfixes0 libxcb-sync1 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-render-util0 libxcb-xinerama0
 
       - name: Install Qt 6.8.3 (gcc_64 + Multimedia)
         run: |
           pip install aqtinstall
-          aqt install-qt linux desktop 6.8.3 gcc_64 -m qtmultimedia -O "$HOME/Qt"
+          aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtmultimedia -O "$HOME/Qt"
           echo "CMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/gcc_64" >> "$GITHUB_ENV"
           echo "$HOME/Qt/6.8.3/gcc_64/bin" >> "$GITHUB_PATH"
 
@@ -90,6 +93,18 @@ jobs:
 
       - name: Assemble AppDir + tarball
         run: sh packaging/linux-appdir.sh build
+
+      - name: Smoke-test AppDir (extract + run under Xvfb)
+        run: |
+          mkdir -p /tmp/apptest && tar xzf CappedWeather-*Linux*.tgz -C /tmp/apptest
+          ldd /tmp/apptest/AppDir/usr/bin/CappedWeather | grep 'not found' && exit 1 || true
+          cd /tmp/apptest
+          set +e
+          timeout 25 xvfb-run -a ./AppDir/AppRun > /tmp/apprun_smoke.log 2>&1
+          rc=$?
+          set -e
+          tail -5 /tmp/apprun_smoke.log || true
+          test "$rc" = 124 || test "$rc" = 0
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2

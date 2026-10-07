@@ -33,6 +33,22 @@ struct CirculationDetection {
     int tiltCount = 0;
 };
 
+// Shear watch: a vertically-coherent couplet column (2+ tilts) at
+// mesocyclone strength that fails TVS/meso classification (too shallow,
+// or TVS-strength but too wide). Gate-to-gate structure, reflectivity
+// guard, and over-unfold veto are identical to classified detections, so
+// this is the honest rotation-watch tier: real rotation signatures below
+// warning-grade confidence. Feeds the map shear overlay (capped and
+// decluttered there), never the TVS/meso markers.
+struct ShearWatchCandidate {
+    double latitudeDeg = 0.0;
+    double longitudeDeg = 0.0;
+    double maxDeltaVelocityMetersPerSecond = 0.0;
+    double diameterKm = 0.0;
+    double depthMeters = 0.0;
+    int tiltCount = 0;
+};
+
 struct CirculationConfig {
     double minGateVelocityMetersPerSecond = 5.0;  // each side must exceed this
     // at close range; relaxed downrange by minGateRangeSlope (beam smoothing
@@ -75,6 +91,7 @@ struct CirculationConfig {
     // glitches; enable only via sweep when upper tilts are missing/noisy.
     double singleTiltTvsBoost = 1.3;
     int maxDetections = 24;
+    int maxShearWatch = 24;  // cap on sub-classification rotation watch
 };
 
 // Stage counts for miss diagnosis: populate via the optional out-param to see
@@ -93,9 +110,14 @@ struct CirculationDiagnostics {
 // Dealiased velocity grid aligned with chunk.rays and each ray's native
 // velocity gates (see processVelocity); NaN marks missing/folded gates.
 // Runs fully off the UI thread; pure function of its inputs.
+//
+// shearWatch (optional out-param) receives mesocyclone-strength couplet
+// columns that fail TVS/meso classification on depth or diameter. Null by
+// default (classification output only).
 std::vector<CirculationDetection> detectCirculations(
     const DecodedChunk& chunk, const std::vector<std::vector<float>>& dealiasedVelocity,
     double radarLatitudeDeg, double radarLongitudeDeg, double radarElevationMeters,
-    CirculationConfig config = {}, CirculationDiagnostics* diagnostics = nullptr);
+    CirculationConfig config = {}, CirculationDiagnostics* diagnostics = nullptr,
+    std::vector<ShearWatchCandidate>* shearWatch = nullptr);
 
 }  // namespace cappedweather

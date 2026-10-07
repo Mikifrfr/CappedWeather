@@ -61,7 +61,8 @@ std::optional<double> reflectivityAt(const DecodedRay& rayA, const DecodedRay& r
 std::vector<CirculationDetection> detectCirculations(
     const DecodedChunk& chunk, const std::vector<std::vector<float>>& dealiasedVelocity,
     const double radarLatitudeDeg, const double radarLongitudeDeg, const double radarElevationMeters,
-    const CirculationConfig config, CirculationDiagnostics* diagnostics) {
+    const CirculationConfig config, CirculationDiagnostics* diagnostics,
+    std::vector<ShearWatchCandidate>* shearWatch) {
     const auto velocityIndex = static_cast<std::size_t>(ProductKind::Velocity);
     // Group ray indices by elevation number, each sorted by azimuth.
     std::map<std::uint8_t, std::vector<std::size_t>> tilts;
@@ -235,6 +236,7 @@ std::vector<CirculationDetection> detectCirculations(
     }
 
     std::vector<CirculationDetection> detections;
+    std::vector<ShearWatchCandidate> watch;
     CirculationDiagnostics diag;
     for (const auto& tilt : perTilt) diag.tiltCoupletCount += static_cast<int>(tilt.couplets.size());
     diag.columnCount = static_cast<int>(columns.size());
@@ -294,7 +296,22 @@ std::vector<CirculationDetection> detectCirculations(
                 ++diag.diameterRejects;
             else
                 ++diag.depthRejects;
-            continue;  // shallow/weak shear is already covered by the shear overlay
+            // Meso-strength but sub-classification (shallow, or TVS-strength
+            // but too wide) is rotation-watch material: vertically coherent
+            // and reflectivity-guarded, just below warning-grade confidence.
+            // Weak columns stay out (noise floor, formerly the shear overlay's
+            // job until it proved unselective on quiet echo).
+            if (best->deltaV >= mesoThresh) {
+                ShearWatchCandidate candidate;
+                candidate.latitudeDeg = best->latitudeDeg;
+                candidate.longitudeDeg = best->longitudeDeg;
+                candidate.maxDeltaVelocityMetersPerSecond = best->deltaV;
+                candidate.diameterKm = best->diameterKm;
+                candidate.depthMeters = depth;
+                candidate.tiltCount = static_cast<int>(column.members.size());
+                watch.push_back(candidate);
+            }
+            continue;  // shallow/weak shear no longer reaches any overlay
         }
         detections.push_back(det);
     }
@@ -304,6 +321,12 @@ std::vector<CirculationDetection> detectCirculations(
     });
     if (static_cast<int>(detections.size()) > config.maxDetections)
         detections.resize(static_cast<std::size_t>(config.maxDetections));
+    std::sort(watch.begin(), watch.end(), [](const auto& a, const auto& b) {
+        return a.maxDeltaVelocityMetersPerSecond > b.maxDeltaVelocityMetersPerSecond;
+    });
+    if (static_cast<int>(watch.size()) > config.maxShearWatch)
+        watch.resize(static_cast<std::size_t>(config.maxShearWatch));
+    if (shearWatch != nullptr) *shearWatch = watch;
     return detections;
 }
 

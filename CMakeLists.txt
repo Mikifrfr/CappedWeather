@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(CappedWeather VERSION 0.7.0 LANGUAGES CXX)
+project(CappedWeather VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -109,6 +109,13 @@ elseif(HDF5_FOUND)
 endif()
 if(CAPPEDWEATHER_HDF5_TARGET)
     target_link_libraries(cappedweather_core PUBLIC ${CAPPEDWEATHER_HDF5_TARGET})
+    # Module-mode FindHDF5 (Debian/Ubuntu system packages) yields a bare
+    # library list with headers under /usr/include/hdf5/serial: add its
+    # include dirs explicitly. Config-mode imported targets (vcpkg) carry
+    # their own usage requirements, so this is a no-op there.
+    if(HDF5_INCLUDE_DIRS)
+        target_include_directories(cappedweather_core PUBLIC ${HDF5_INCLUDE_DIRS})
+    endif()
     target_compile_definitions(cappedweather_core PRIVATE CAPPEDWEATHER_HAS_HDF5=1)
     message(STATUS "HDF5 found: ODIM reader enabled")
 elseif(CAPPEDWEATHER_REQUIRE_HDF5)

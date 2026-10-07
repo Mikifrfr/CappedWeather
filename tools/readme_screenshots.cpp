@@ -168,15 +168,28 @@ int main(int argc, char** argv) {
     QTest::mouseClick(maps[0], Qt::LeftButton, Qt::NoModifier, maps[0]->rect().center());
     settle(application, 500);
     maps[0]->clearPinnedOverlay();
-    auto* row = firstWarningRow(inbox);
-    std::cout << "pinning warning: " << row->text().toStdString() << '\n';
-    inbox->itemClicked(row);
-    if (!waitUntil(application, 30000, [&] { return !maps[0]->infoCardRect().isNull(); })) {
-        std::cerr << "warning card did not pin\n";
-        return 8;
+    // Pin via the inbox with retries: warning geometry (especially
+    // Meteoalarm tile-joined areas) resolves asynchronously, and
+    // focusWarning silently skips warnings with no polygon yet. Re-fetch
+    // the top row each round in case the inbox refreshes underneath.
+    bool pinned = false;
+    QString pinnedText;
+    QElapsedTimer budget;
+    budget.start();
+    while (budget.elapsed() < 90000 && !pinned) {
+        if (auto* row = firstWarningRow(inbox)) {
+            pinnedText = row->text();
+            inbox->itemClicked(row);
+        }
+        pinned = waitUntil(application, 8000,
+                           [&] { return !maps[0]->infoCardRect().isNull(); });
     }
-    settle(application, 2000);
+    settle(application, 1500);
+    std::cout << "warning pinned=" << (pinned ? "yes" : "no");
+    if (pinned) std::cout << " text=" << pinnedText.toStdString();
+    std::cout << '\n';
+    settle(application, 500);
     if (!saveGrab(window, QStringLiteral("docs/screenshots/cappedweather-warnings.png")))
         return 9;
-    return 0;
+    return pinned ? 0 : 8;
 }

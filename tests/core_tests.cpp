@@ -1001,12 +1001,15 @@ void testCirculationMesocyclonePositive() {
     // Gates 168-178 sit at ~52-54.5 km slant where the 0.5/4.0-deg tilt
     // pair gives ~3.2 km depth (meso needs 3000 m).
     auto grid = coupletGrid(chunk, -10.0F, 10.0F, 168, 178);
-    const auto dets = detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {});
+    std::vector<ShearWatchCandidate> watch;
+    const auto dets =
+        detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}, nullptr, &watch);
     assert(dets.size() == 1);
     assert(dets.front().kind == CirculationKind::Mesocyclone);
     assert(dets.front().tiltCount == 2);
     assert(dets.front().depthMeters >= 3000.0);
     assert(std::abs(dets.front().maxDeltaVelocityMetersPerSecond - 20.0) < 0.01);
+    assert(watch.empty()); // classified detections never double as watch
 }
 
 void testCirculationTvsClassification() {
@@ -1152,10 +1155,30 @@ void testCirculationShallowVeto() {
     chunk.radarId = "KTLX";
     chunk.rays.push_back(syntheticCoupletRay(90.0F, 1, 0.5F, 50.0));
     chunk.rays.push_back(syntheticCoupletRay(91.0F, 1, 0.5F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(200.0F, 1, 0.5F, 10.0));
     chunk.rays.push_back(syntheticCoupletRay(90.0F, 2, 1.0F, 50.0));
     chunk.rays.push_back(syntheticCoupletRay(91.0F, 2, 1.0F, 50.0));
+    chunk.rays.push_back(syntheticCoupletRay(200.0F, 2, 1.0F, 10.0));
     auto grid = coupletGrid(chunk, -30.0F, 30.0F, 80, 90); // slant ~30-32 km
-    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}).empty());
+    std::vector<ShearWatchCandidate> watch;
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}, nullptr, &watch).empty());
+    // TVS-strength but ~260 m deep: no marker, exactly one shear-watch
+    // candidate carrying the same column.
+    assert(watch.size() == 1);
+    assert(std::abs(watch.front().maxDeltaVelocityMetersPerSecond - 60.0) < 0.01);
+    assert(watch.front().tiltCount == 2);
+    assert(watch.front().depthMeters < 3000.0);
+}
+
+void testShearWatchQuietUniformFlow() {
+    // Uniform environmental flow with light ripple: no opposite-sign pairs,
+    // so neither a marker nor a watch candidate may result. Regression for
+    // the quiet-echo pink soup (span-heuristic ROT fired on such volumes).
+    auto chunk = twoTiltCoupletChunk(40.0);
+    auto grid = coupletGrid(chunk, 8.0F, 12.0F, 150, 160); // deltaV 4, same sign
+    std::vector<ShearWatchCandidate> watch;
+    assert(detectCirculations(chunk, grid, 35.333, -97.278, 370.0, {}, nullptr, &watch).empty());
+    assert(watch.empty());
 }
 
 void testCirculationMisalignedAndGapVeto() {
@@ -1274,6 +1297,7 @@ int main() {
     testCirculationSingleTiltTvsOptIn();
     testShearGridFindsCouplet();
     testCirculationShallowVeto();
+    testShearWatchQuietUniformFlow();
     testCirculationMisalignedAndGapVeto();
     testDecodedRayLegacyGeometryMaxGates();
     std::cout << "core tests passed\n";

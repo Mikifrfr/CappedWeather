@@ -7,8 +7,10 @@
 //
 // Output CSV columns:
 //   volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts
-// where kind is TVS / MESO / ROT (ROT = thresholded shear object from
-// extractRadarStormFeatures, the pink double-ring layer).
+// where kind is TVS / MESO / ROT / WATCH (ROT = span-heuristic shear object
+// from extractRadarStormFeatures, the old pink-layer source; WATCH =
+// meso-strength but sub-classification couplet column from
+// detectCirculations, the current pink-layer source).
 //
 // This intentionally reuses the exact live pipeline: decodeLevel2Archive ->
 // processVelocity(Dealiased) -> detectCirculations + extractRadarStormFeatures.
@@ -163,7 +165,7 @@ int main(int argc, char** argv) {
     }
     int volumesOk = 0;
     int volumesFailed = 0;
-    int tvsCount = 0, mesoCount = 0, rotCount = 0, shearCount = 0;
+    int tvsCount = 0, mesoCount = 0, rotCount = 0, shearCount = 0, watchCount = 0;
     struct Track {
         CirculationDetection det;
         int hits = 0;
@@ -226,8 +228,9 @@ int main(int argc, char** argv) {
         }
         const auto dealised = processVelocity(decoded->decoded, velOpts);
         CirculationDiagnostics diag{};
+        std::vector<ShearWatchCandidate> watch;
         const auto dets = detectCirculations(decoded->decoded, dealised, lat, lon, elev, circ,
-                                             diagnose ? &diag : nullptr);
+                                             diagnose ? &diag : nullptr, &watch);
         if (diagnose) {
             std::printf("%s %s: couplets=%d columns=%d single=%d weak=%d shallow=%d wide=%d bestDV=%.1f bestDepth=%.0f dets=%zu\n",
                         volIso.c_str(), volFile.c_str(), diag.tiltCoupletCount,
@@ -341,6 +344,13 @@ int main(int argc, char** argv) {
                         f.velocitySpanMetersPerSecond,
                         std::sqrt(std::max(1.0, f.areaKm2)), f.reflectivityCellCount);
         }
+        for (const auto& w : watch) {
+            ++watchCount;
+            std::printf("%s,%s,WATCH,%.5f,%.5f,%.2f,%.3f,%.0f,%d\n", volIso.c_str(),
+                        volFile.c_str(), w.latitudeDeg, w.longitudeDeg,
+                        w.maxDeltaVelocityMetersPerSecond, w.diameterKm, w.depthMeters,
+                        w.tiltCount);
+        }
         if (shearCfg.minShearPerSecond > 0.0) {
             shearCfg.minReflectivityDbz = circ.minReflectivityDbz;
             const auto peaks = detectShearPeaks(decoded->decoded, dealised, lat, lon,
@@ -368,7 +378,8 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr,
                  "\n=== rotation replay summary ===\nvolumes: %d ok, %d failed\n"
-                 "detections: TVS=%d MESO=%d ROT=%d SHEAR=%d\n",
-                 volumesOk, volumesFailed, tvsCount, mesoCount, rotCount, shearCount);
+                 "detections: TVS=%d MESO=%d ROT=%d SHEAR=%d WATCH=%d\n",
+                 volumesOk, volumesFailed, tvsCount, mesoCount, rotCount, shearCount,
+                 watchCount);
     return EXIT_SUCCESS;
 }

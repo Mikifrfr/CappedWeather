@@ -166,6 +166,36 @@ CSI 0.041 — fires, but far below TVS/MESO and likely poisoned by unfold
 discontinuities. Both stay out of the promoted path; they need persistence +
 spatially-consistent dealiasing before they can beat sparse couplets.
 
+### v4: shear-watch replaces span ROT on the map (WATCH tier)
+
+The release screenshot forced the issue: quiet KABR stratiform echo drew ~29
+pink ROT rings (span ~21 m/s noise/gradient fragments over a fixed 3000 m
+denominator). Measurement showed thresholds cannot fix the span heuristic:
+tornadic-volume spans cluster at ~2×Nyquist (Moore p50 52, KHTX p50 59 —
+fold boundaries, not mesos) while quiet-KABR spans run 30–48, so any gate
+that keeps tornadic POD keeps most quiet-day FAR.
+
+Fix (`src/core/circulation_detector.{hpp,cpp}`, `paintShearOverlay`): the
+validated detector now also emits meso-strength couplet columns that fail
+TVS/meso classification on depth or diameter (multi-tilt only, same
+reflectivity + unfold-veto gates) as `ShearWatchCandidate`s. The map shear
+overlay draws WATCH (cap 12 strongest, 64 px label declutter) instead of
+span flags; the `rotating` flag stays a tracker/fusion hint only. Replay
+emits `WATCH` rows for the same `--kinds` scoring.
+
+SPC scores (radius 15 km, leads −10/+45 min, domain ≤ 150 km):
+
+| Case (domain SPC events) | ROT dets / CSI | WATCH dets / CSI | TVS/MESO CSI |
+|---|---|---|---|
+| Mayfield (19) | 639 / 0.002 | 36 / 0.064 | 0.148 |
+| Moore (2, noisy) | 251 / 0.004 | 94 / 0.011 | 0.010 |
+| KHTX (74) | 1497 / 0.019 | 79 / 0.085 | 0.118 |
+
+Quiet KABR archive volume (2026-10-07 12:54Z, same regime as the release
+screenshot): ROT 29 → WATCH 0. TVS/MESO counts bit-identical before/after
+(classification untouched). WATCH sits where a watch tier belongs: far
+above span noise, just below markers.
+
 ### Honest limits (read before quoting skill)
 
 - FAR is still 0.47–0.93 depending on case: these are guidance markers, never warnings.

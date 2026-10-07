@@ -347,6 +347,12 @@ private:
     std::vector<LightningCellSnapshot> lightningCells_;
     std::vector<RadarStormFeature> radarFeatures_;
     std::vector<LightningRadarAssociation> lightningAssociations_;
+    // Rotation-watch tier: meso-strength but sub-classification couplet
+    // columns (shallow / wide), drawn by paintShearOverlay with a cap and
+    // label declutter. Raw per-volume output (no time persistence): the
+    // vertical-coherence + reflectivity + unfold-veto gates already reject
+    // quiet-echo noise, unlike the old span-heuristic flags.
+    std::vector<ShearWatchCandidate> shearWatch_;
     // TVS / mesocyclone markers (GR2-style algorithm layer). Raw per-volume
     // detections are matched across volumes below; only tracks seen in 2+
     // volumes reach circulations_ so single-volume flicker never draws.

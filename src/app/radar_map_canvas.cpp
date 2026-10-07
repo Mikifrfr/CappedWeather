@@ -766,20 +766,24 @@ void RadarMapCanvas::rebuildLightningFusion() {
             auto dealiased = sharedProcessedVelocity(chunk, detectOptions);
             auto features = extractRadarStormFeatures(*chunk, latitude, longitude);
             auto associations = associateLightningWithRadar(cells, features);
+            std::vector<ShearWatchCandidate> watch;
             auto circulations = dealiased ? detectCirculations(*chunk, *dealiased, latitude,
-                                                               longitude, antennaElevM)
+                                                               longitude, antennaElevM,
+                                                               CirculationConfig{}, nullptr, &watch)
                                           : std::vector<CirculationDetection>{};
             if (!guard) return;
             QMetaObject::invokeMethod(
                 guard,
                 [guard, generation, features = std::move(features),
                  associations = std::move(associations),
-                 circulations = std::move(circulations)]() mutable {
+                 circulations = std::move(circulations),
+                 watch = std::move(watch)]() mutable {
                     if (!guard) return;
                     guard->lightningFusionBuildPending_ = false;
                     if (generation == guard->lightningFusionGeneration_) {
                         guard->radarFeatures_ = std::move(features);
                         guard->lightningAssociations_ = std::move(associations);
+                        guard->shearWatch_ = std::move(watch);
                         guard->persistCirculations(std::move(circulations));
                         guard->lightningFusionComputedGeneration_ = generation;
                         guard->refreshPinnedLightningInfo();
@@ -2243,11 +2247,12 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
 }
 
 void RadarMapCanvas::paintShearOverlay(QPainter& painter) {
-    if (!shearVisible_ || radarFeatures_.empty()) return;
-    // First-class rotation display independent of lightning: thresholded
-    // azimuthal-shear objects from extractRadarStormFeatures. Rotating
-    // couplets are pink + labeled; non-rotating objects are small gray dots
-    // unless they are fused to a jump (handled above).
+    if (!shearVisible_) return;
+    // First-class rotation display independent of lightning. The watch tier
+    // below TVS/meso markers: vertically-coherent, reflectivity-guarded
+    // couplet columns at meso strength that miss classification on depth or
+    // diameter. Rotating candidates are pink + labeled; strong non-rotating
+    // reflectivity cores are small gray dots (fusion spokes handled above).
     QSet<int> fused;
     if (lightningFusionVisible_ && lightningVisible_) {
         for (const auto& a : lightningAssociations_) {
@@ -2260,31 +2265,56 @@ void RadarMapCanvas::paintShearOverlay(QPainter& painter) {
     for (std::size_t i = 0; i < radarFeatures_.size(); ++i) {
         const auto& feature = radarFeatures_[i];
         if (fused.contains(static_cast<int>(i))) continue; // already drawn with spoke
-        const auto point = screenPoint(feature.latitudeDeg, feature.longitudeDeg);
-        if (!rect().adjusted(-40, -40, 40, 40).contains(point.toPoint())) continue;
-        if (feature.rotating) {
-            const QColor c(255, 78, 210);
-            painter.setBrush(QColor(c.red(), c.green(), c.blue(), 60));
-            painter.setPen(QPen(c, 2.5));
-            painter.drawEllipse(point, 10.0, 10.0);
-            painter.setPen(QPen(c, 1.5));
-            painter.drawEllipse(point, 14.0, 14.0);
-            if (zoom_ >= 6) {
-                painter.setPen(QColor(255, 220, 245));
-                painter.setFont(hudFont(7, QFont::DemiBold));
-                painter.drawText(QRectF(point.x() + 16, point.y() - 18, 170, 36),
-                                 Qt::AlignLeft | Qt::AlignVCenter,
-                                 QStringLiteral("ROT %1 dBZ | %2 s^-1")
-                                     .arg(feature.maximumReflectivityDbz, 0, 'f', 0)
-                                     .arg(feature.azimuthalShearPerSecond, 0, 'f', 3));
-            }
-        } else if (feature.maximumReflectivityDbz >= 50.0 && zoom_ >= 7) {
+        if (feature.rotating) continue; // watch tier below owns rotation display
+        if (feature.maximumReflectivityDbz >= 50.0 && zoom_ >= 7) {
+            const auto point = screenPoint(feature.latitudeDeg, feature.longitudeDeg);
+            if (!rect().adjusted(-40, -40, 40, 40).contains(point.toPoint())) continue;
             // Strong non-rotating cores get a subtle marker so hail cores
             // aren't invisible when the fusion toggle is off.
             painter.setBrush(QColor(170, 190, 205, 40));
             painter.setPen(QPen(QColor(170, 190, 205), 1.0));
             painter.drawEllipse(point, 5.0, 5.0);
         }
+    }
+    // Bounded by construction: strongest 12 candidates draw rings, and a
+    // label must clear 64 px from every accepted label, so even a noisy
+    // volume stays readable instead of the old unbounded label soup.
+    constexpr int kMaxWatchRings = 12;
+    constexpr double kLabelClearPx = 64.0;
+    std::vector<QPointF> labeled;
+    int drawn = 0;
+    for (const auto& candidate : shearWatch_) {
+        if (drawn >= kMaxWatchRings) break;
+        const auto point = screenPoint(candidate.latitudeDeg, candidate.longitudeDeg);
+        if (!rect().adjusted(-40, -40, 40, 40).contains(point.toPoint())) continue;
+        const QColor c(255, 78, 210);
+        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 60));
+        painter.setPen(QPen(c, 2.5));
+        painter.drawEllipse(point, 10.0, 10.0);
+        painter.setPen(QPen(c, 1.5));
+        painter.drawEllipse(point, 14.0, 14.0);
+        if (zoom_ >= 6) {
+            bool crowded = false;
+            for (const auto& accepted : labeled) {
+                const double dx = accepted.x() - point.x();
+                const double dy = accepted.y() - point.y();
+                if (dx * dx + dy * dy < kLabelClearPx * kLabelClearPx) {
+                    crowded = true;
+                    break;
+                }
+            }
+            if (!crowded) {
+                painter.setPen(QColor(255, 220, 245));
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                painter.drawText(QRectF(point.x() + 16, point.y() - 18, 170, 36),
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 QStringLiteral("ROT %1 m/s | %2 km deep")
+                                     .arg(candidate.maxDeltaVelocityMetersPerSecond, 0, 'f', 0)
+                                     .arg(candidate.depthMeters / 1000.0, 0, 'f', 1));
+                labeled.push_back(point);
+            }
+        }
+        ++drawn;
     }
     painter.restore();
 }
