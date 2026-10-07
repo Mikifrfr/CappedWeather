@@ -753,14 +753,13 @@ void testGlmReaderBuildContract() {
 std::vector<std::byte> readFixtureBytes(const char* name) {
     // Committed fixtures live in tests/fixtures; ctest runs from the build
     // directory, developers sometimes from the source root.
-    const char* candidates[] = {
-        "tests/fixtures/odim_nohur_dbzh.h5",
-        "../tests/fixtures/odim_nohur_dbzh.h5",
-        "../../tests/fixtures/odim_nohur_dbzh.h5",
+    const std::string roots[] = {
+        "tests/fixtures/",
+        "../tests/fixtures/",
+        "../../tests/fixtures/",
     };
-    (void)name;
-    for (const char* path : candidates) {
-        std::ifstream file(path, std::ios::binary);
+    for (const auto& root : roots) {
+        std::ifstream file(root + name, std::ios::binary);
         if (!file) continue;
         const std::string raw((std::istreambuf_iterator<char>(file)),
                               std::istreambuf_iterator<char>());
@@ -836,6 +835,48 @@ void testOdimReader() {
                                             std::byte{'f'}, std::byte{'5'}};
     assert(!readOdimPvol(garbage, "nohur", &error).has_value());
     assert(!readOdimPvol(std::span(bytes).first(100), "nohur", &error).has_value());
+}
+
+void testOdimAzimuthConvention() {
+    // Regression: the reader once used a1gate (a RANGE index) as the azimuth
+    // offset, rotating whole OPERA sweeps by 100+ degrees (DWD echoes drawn
+    // in the wrong direction). Azimuths must follow how/startazA (+stopazA
+    // midpoint) per ray, or uniform-from-north when the how group is absent.
+    if (!odimReaderAvailable()) return;
+    const auto deneu = readFixtureBytes("odim_deneu_dbzh.h5");
+    if (deneu.empty()) {
+        std::cout << "note: deneu fixture missing, skipping azimuth asserts\n";
+        return;
+    }
+    // Real DWD SCAN file: 360 rays, per-ray startazA ~= index, a1gate = 104
+    // (the old code put ray 0 at 104 degrees).
+    std::string error;
+    const auto chunk = readOdimPvol(deneu, "deneu", &error);
+    assert(chunk.has_value());
+    assert(chunk->rays.size() == 360);
+    for (const std::size_t ray : {0, 45, 90, 135, 180, 225, 270, 315, 359}) {
+        const double azimuth = chunk->rays[ray].azimuthDegrees;
+        double distance = std::fabs(azimuth - static_cast<double>(ray));
+        if (distance > 180.0) distance = 360.0 - distance;
+        assert(distance < 1.0);
+    }
+    // Fixture without a how group (nohur): uniform from north, one ray per
+    // resolution step, no a1gate rotation (dataset1: a1gate 634, 720 rays).
+    const auto nohur = readFixtureBytes("odim_nohur_dbzh.h5");
+    if (nohur.empty()) {
+        std::cout << "note: nohur fixture missing, skipping uniform asserts\n";
+        return;
+    }
+    const auto flat = readOdimPvol(nohur, "nohur", &error);
+    assert(flat.has_value());
+    for (const auto& ray : flat->rays) {
+        if (ray.elevationNumber != 1) continue;
+        const double expected =
+            std::fmod(static_cast<double>(&ray - flat->rays.data()) * 0.5, 360.0);
+        double distance = std::fabs(static_cast<double>(ray.azimuthDegrees) - expected);
+        if (distance > 180.0) distance = 360.0 - distance;
+        assert(distance < 0.01);
+    }
 }
 
 void testSlantRangeVerticalBeam() {
@@ -1278,6 +1319,7 @@ int main() {
     testGlmL2Keys();
     testGlmReaderBuildContract();
     testOdimReader();
+    testOdimAzimuthConvention();
     testRadarLightningFusion();
     testRadarLightningFusionSplitCut();
     testSlantRangeVerticalBeam();

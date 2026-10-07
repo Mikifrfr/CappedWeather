@@ -81,6 +81,13 @@ bool readAttrDouble(const hid_t object, const char* name, double* out) {
     attr.id = H5Aopen(object, name, H5P_DEFAULT);
     attr.close = H5Aclose;
     if (!attr.valid()) return false;
+    // Scalar only: array attributes (per-ray startazA/stopazA) must go
+    // through readAttrDoubleArray. Reading an N-element attribute into a
+    // single double overflows the stack buffer (0xC0000409).
+    H5Handle attrSpace;
+    attrSpace.id = H5Aget_space(attr.id);
+    attrSpace.close = H5Sclose;
+    if (!attrSpace.valid() || H5Sget_simple_extent_ndims(attrSpace.id) != 0) return false;
     const hid_t type = H5Aget_type(attr.id);
     H5Handle typeHandle;
     typeHandle.id = type;
@@ -136,14 +143,64 @@ struct OdimSweep {
     double elevationDegrees = 0.0;
     double rangeStartKm = 0.0;
     double rangeScaleM = 0.0;
-    long long firstGateIndex = 0;
     std::size_t rayCount = 0;
     std::size_t gateCount = 0;
+    // Ray-center azimuths in degrees [0, 360), one per ray, from the ODIM
+    // how/startazA (+stopazA midpoint) arrays when present, else uniform
+    // from north. a1gate is a RANGE index (first radiated gate) and must
+    // never offset azimuths (it rotated whole sweeps by 100+ degrees).
+    std::vector<double> rayAzimuthDegrees;
     // Per-ray gate values in physical units; NaN marks nodata (missing).
     // undetect (below threshold) is tracked separately per gate.
     std::vector<double> values;
     std::vector<char> belowThreshold;
 };
+
+// Attribute array reader: ODIM writers store per-ray startazA/stopazA as
+// fixed-size numeric attribute arrays. Accepts ints/floats/doubles and
+// requires exactly expectedSize elements; anything else leaves out empty.
+bool readAttrDoubleArray(const hid_t object, const char* name, const std::size_t expectedSize,
+                         std::vector<double>* out) {
+    if (H5Aexists(object, name) <= 0) return false;
+    H5Handle attr;
+    attr.id = H5Aopen(object, name, H5P_DEFAULT);
+    attr.close = H5Aclose;
+    if (!attr.valid()) return false;
+    H5Handle space;
+    space.id = H5Aget_space(attr.id);
+    space.close = H5Sclose;
+    if (!space.valid() || H5Sget_simple_extent_ndims(space.id) != 1) return false;
+    hsize_t dims[1] = {0};
+    if (H5Sget_simple_extent_dims(space.id, dims, nullptr) < 0 ||
+        dims[0] != static_cast<hsize_t>(expectedSize)) {
+        return false;
+    }
+    H5Handle type;
+    type.id = H5Aget_type(attr.id);
+    type.close = H5Tclose;
+    if (!type.valid()) return false;
+    const auto cls = H5Tget_class(type.id);
+    std::vector<double> values(expectedSize, 0.0);
+    herr_t status = -1;
+    if (cls == H5T_INTEGER) {
+        std::vector<long long> raw(expectedSize, 0);
+        status = H5Aread(attr.id, H5T_NATIVE_LLONG, raw.data());
+        for (std::size_t i = 0; i < expectedSize; ++i) values[i] = static_cast<double>(raw[i]);
+    } else if (cls == H5T_FLOAT) {
+        status = H5Aread(attr.id, H5T_NATIVE_DOUBLE, values.data());
+    } else {
+        return false;
+    }
+    if (status < 0) return false;
+    *out = std::move(values);
+    return true;
+}
+
+double wrapAzimuth(double degrees) {
+    double wrapped = std::fmod(degrees, 360.0);
+    if (wrapped < 0.0) wrapped += 360.0;
+    return wrapped;
+}
 
 bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) {
     double elevation = 0.0;
@@ -151,7 +208,6 @@ bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) 
     double nrays = 0.0;
     double rstart = 0.0;
     double rscale = 0.0;
-    double a1gate = 0.0;
     {
         H5Handle where = openGroup(dataset, "where");
         if (!where.valid()) return false;
@@ -160,7 +216,6 @@ bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) 
         if (!readAttrDouble(where.id, "nrays", &nrays)) return false;
         if (!readAttrDouble(where.id, "rstart", &rstart)) return false;
         if (!readAttrDouble(where.id, "rscale", &rscale)) return false;
-        if (!readAttrDouble(where.id, "a1gate", &a1gate)) return false;
     }
     if (!std::isfinite(elevation) || elevation < 0.0 || elevation > 90.0) return false;
     if (nbins < 1.0 || nbins > static_cast<double>(kMaxGates) || nrays < 1.0 ||
@@ -216,7 +271,40 @@ bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) 
         sweep->elevationDegrees = elevation;
         sweep->rangeStartKm = rstart;
         sweep->rangeScaleM = rscale;
-        sweep->firstGateIndex = static_cast<long long>(std::llround(a1gate));
+        // Ray azimuths: per-ray startazA/stopazA arrays when the writer
+        // provides them (DWD does), scalar startazA + uniform step, else
+        // uniform from north (ODIM default for a missing how group).
+        sweep->rayAzimuthDegrees.assign(rays, 0.0);
+        const double uniformStep = 360.0 / static_cast<double>(rays);
+        {
+            H5Handle how = openGroup(dataset, "how");
+            std::vector<double> startAz;
+            std::vector<double> stopAz;
+            double scalarStart = 0.0;
+            bool haveScalarStart = false;
+            if (how.valid()) {
+                readAttrDoubleArray(how.id, "startazA", rays, &startAz);
+                readAttrDoubleArray(how.id, "stopazA", rays, &stopAz);
+                haveScalarStart = readAttrDouble(how.id, "startazA", &scalarStart);
+            }
+            for (std::size_t ray = 0; ray < rays; ++ray) {
+                double azimuth = 0.0;
+                if (!startAz.empty()) {
+                    azimuth = startAz[ray];
+                    if (!stopAz.empty()) {
+                        // Wrap-aware midpoint: a 359.5->0.5 ray centers on 0, not 180.
+                        double half = stopAz[ray] - startAz[ray];
+                        half = std::fmod(half + 540.0, 360.0) - 180.0;
+                        azimuth = startAz[ray] + half * 0.5;
+                    }
+                } else if (haveScalarStart) {
+                    azimuth = scalarStart + static_cast<double>(ray) * uniformStep;
+                } else {
+                    azimuth = static_cast<double>(ray) * uniformStep;
+                }
+                sweep->rayAzimuthDegrees[ray] = wrapAzimuth(azimuth);
+            }
+        }
         sweep->rayCount = rays;
         sweep->gateCount = gates;
         sweep->values.resize(count);
@@ -359,12 +447,10 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
             std::clamp(std::llround(geometry->rangeScaleM), 1LL, 5000LL));
         for (std::size_t ray = 0; ray < geometry->rayCount; ++ray) {
             DecodedRay decoded;
-            // a1gate is the INDEX of the first radiated gate (ODIM_H5 2.2 section 4.3.1).
-            const double azimuth =
-                std::fmod((static_cast<double>(geometry->firstGateIndex) + static_cast<double>(ray)) *
-                              resolution,
-                          360.0);
-            decoded.azimuthDegrees = static_cast<float>(azimuth < 0.0 ? azimuth + 360.0 : azimuth);
+            const double azimuth = geometry->rayAzimuthDegrees.size() == geometry->rayCount
+                                       ? geometry->rayAzimuthDegrees[ray]
+                                       : wrapAzimuth(static_cast<double>(ray) * resolution);
+            decoded.azimuthDegrees = static_cast<float>(azimuth);
             decoded.azimuthResolutionDegrees = static_cast<float>(resolution);
             decoded.elevationNumber = elevationNumber;
             decoded.elevationDegrees = static_cast<float>(elevation.elevation);
@@ -393,13 +479,30 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
             }
             if (elevation.hasVelocity) {
                 const auto& sweep = elevation.velocity;
-                // Velocity rides its own scan table (own a1gate/nrays); match
-                // each geometry ray to the nearest velocity ray by azimuth,
-                // then resample gates by slant range.
+                // Velocity rides its own scan table; match each geometry ray
+                // to the nearest velocity ray by circular distance on the
+                // velocity sweep's own azimuths, then resample gates by
+                // slant range.
                 const double velocityResolution = 360.0 / static_cast<double>(sweep.rayCount);
-                double velocityStart =
-                    std::fmod(static_cast<double>(sweep.firstGateIndex) * velocityResolution, 360.0);
-                if (velocityStart < 0.0) velocityStart += 360.0;
+                auto nearestVelocityRay = [&](const double azimuth) {
+                    std::size_t best = 0;
+                    double bestDistance = 360.0;
+                    for (std::size_t candidate = 0; candidate < sweep.rayCount; ++candidate) {
+                        const double candidateAzimuth =
+                            sweep.rayAzimuthDegrees.size() == sweep.rayCount
+                                ? sweep.rayAzimuthDegrees[candidate]
+                                : wrapAzimuth(static_cast<double>(candidate) *
+                                              velocityResolution);
+                        double distance = std::fabs(azimuth - candidateAzimuth);
+                        if (distance > 180.0) distance = 360.0 - distance;
+                        if (distance < bestDistance) {
+                            bestDistance = distance;
+                            best = candidate;
+                        }
+                    }
+                    return best;
+                };
+                const auto velocityRay = nearestVelocityRay(azimuth);
                 auto& field = decoded.fields[velocityIndex];
                 field.reserve(decoded.gateCount);
                 for (std::size_t gate = 0; gate < decoded.gateCount; ++gate) {
@@ -410,10 +513,6 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
                     if (sweep.rangeScaleM > 0.0) {
                         source = std::llround((slant - sweepFirst) / sweep.rangeScaleM);
                     }
-                    double relative = std::fmod(azimuth - velocityStart, 360.0);
-                    if (relative < 0.0) relative += 360.0;
-                    const auto velocityRay = static_cast<std::size_t>(std::llround(relative / velocityResolution)) %
-                                             sweep.rayCount;
                     if (source < 0 || source >= static_cast<long long>(sweep.gateCount)) {
                         field.push_back(kEncodedMissing);
                         continue;
