@@ -1,6 +1,6 @@
 # CappedWeather
 
-Live WSR-88D / TDWR Level II radar viewer in Qt6/C++ — plus European OPERA volumes, GOES lightning fusion, and severe-weather analysis. No synthetic frames: nothing renders until real data decodes.
+Live WSR-88D / TDWR Level II radar viewer in Qt6/C++. It also handles European OPERA volumes, GOES lightning fusion, and severe-weather analysis. No synthetic frames: nothing renders until real data decodes.
 
 ## Screenshots
 
@@ -16,15 +16,15 @@ Live WSR-88D / TDWR Level II radar viewer in Qt6/C++ — plus European OPERA vol
 
 Grab the latest build from the [Releases page](https://github.com/Mikifrfr/CappedWeather/releases):
 
-- **Windows**: `CappedWeather-*-Windows-*.exe` — one-click NSIS installer (Start-menu shortcut, bundled Qt + BZip2 + netCDF + HDF5). Prefer portable? `CappedWeather-*-Windows-*.zip` — unzip and run `CappedWeather.exe`, no install needed.
-- **Linux**: `CappedWeather-v*-Linux-x86_64.tgz` — extract and run `./AppDir/AppRun` (built on Ubuntu 22.04, runs on newer distros too).
+- **Windows**: `CappedWeather-*-Windows-*.exe` is a one-click NSIS installer (Start-menu shortcut, bundled Qt + BZip2 + netCDF + HDF5). Prefer portable? `CappedWeather-*-Windows-*.zip`: unzip and run `CappedWeather.exe`, no install needed.
+- **Linux**: `CappedWeather-v*-Linux-x86_64.tgz`: extract and run `./AppDir/AppRun` (built on Ubuntu 22.04, runs on newer distros too).
 
 Release assets are built from tags (`v*`) by `.github/workflows/release.yml` with full Qt + netCDF + HDF5 on both OS. Sources for any binary are the matching tag (AGPL-3.0-or-later, see `LICENSE`).
 
 ## Quick start
 
-1. Pick a station — search, favorite, or chase mode.
-2. Hit **LIVE** — chunks stream in progressively and the newest frame follows.
+1. Pick a station: search, favorite, or chase mode.
+2. Hit **LIVE**: chunks stream in progressively and the newest frame follows.
 3. Scrub the filmstrip, toggle overlays, press `?` for shortcuts.
 
 ## Features
@@ -45,7 +45,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 
 ### Analysis
 
-- TVS / mesocyclone markers (NSSL-style couplet heuristic), rotation/shear overlay, and per-storm tracks with +10/+20/+30 min extrapolation — guidance only, never warnings ([validation](docs/rotation-validation.md)).
+- TVS / mesocyclone markers (NSSL-style couplet heuristic), rotation/shear overlay, and per-storm tracks with +10/+20/+30 min extrapolation. Guidance only, never warnings ([validation](docs/rotation-validation.md)).
 - Measure (great-circle range/bearing), beam height, scan diagnostics, and modeless multi-tilt cross-sections with CSV export.
 - Scoped Archive-II case loading (local files or an AWS time window) and a GR-compatible placefile subset ([limits](docs/placefiles-and-archives.md)).
 
@@ -88,7 +88,7 @@ Production builds fail fast without netCDF/HDF5 (`CAPPEDWEATHER_REQUIRE_NETCDF/H
 - European OPERA volumes (anonymous): `https://s3.waw3-1.cloudferro.com/openradar-24h` (CC BY 4.0 EUMETNET; see `docs/europe-sources.md`)
 - Station catalog, warnings, reports: `https://api.weather.gov/radar/stations`, `https://api.weather.gov/alerts/active`, `https://www.spc.noaa.gov/climo/reports/`
 
-Plain HTTPS listing and download requests, no cloud SDK. The embedded station fallback contains only real station classes — no generated stations, no synthetic frames.
+Plain HTTPS listing and download requests, no cloud SDK. The embedded station fallback contains only real station classes. No generated stations, no synthetic frames.
 
 ## License
 
@@ -102,4 +102,4 @@ the Free Software Foundation, either version 3 of the License, or
 Source for release binaries is available at <https://github.com/Mikifrfr/CappedWeather>.
 
 European OPERA data is CC BY 4.0 EUMETNET (see `docs/europe-sources.md`).
-Basemap (c) Esri — attribution is painted on-canvas.
+Basemap (c) Esri, with attribution painted on-canvas.

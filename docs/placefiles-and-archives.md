@@ -43,7 +43,7 @@ The playback dock exposes three offline/case-study actions:
 
 Local files must match the currently selected radar. This prevents a mislabeled file from silently entering the wrong radar session. Filename timestamps such as `KTLX20260729_000234_V06` are used as the timeline time; otherwise the local file modification time is used.
 
-The AWS dialog defaults to the previous six hours and up to 24 evenly sampled volumes. Sampling includes both ends of the selected window. A request can span up to 31 days and lists each UTC date prefix directly over public HTTPS—no AWS credentials or cloud SDK are used.
+The AWS dialog defaults to the previous six hours and up to 24 evenly sampled volumes. Sampling includes both ends of the selected window. A request can span up to 31 days and lists each UTC date prefix directly over public HTTPS. No AWS credentials or cloud SDK are used.
 
 Starting any archive action cancels live/archive acquisition for that radar and replaces its active timeline with a dedicated case-study timeline. Local file/folder actions keep the most recent 24 selected files; AWS exposes the same honest 24-frame in-memory ceiling. This prevents a large request from downloading hundreds of volumes only to silently discard all but the normal history limit. Deeper or disk-backed history remains a separate roadmap item.
 

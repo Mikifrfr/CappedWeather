@@ -1,4 +1,4 @@
-# Rotation validation — archived tornado cases
+# Rotation validation: archived tornado cases
 
 Status: tuned and promoted (v3). 68 volumes across 3 outbreaks scored; shipped
 defaults: `min-reflect 35`, over-unfold veto 120 m/s, conditional unfold + 90 m/s
@@ -63,7 +63,7 @@ defaults (`--meso-dv 10 --tvs-dv 25 --min-reflect 20 --max-dv 120 --nyquist 28`)
 
 - detections: TVS=43 MESO=59 ROT=0 (102 total, ~5/vol)
 - vs 9 TOR warning polygons (15 km, lead [-10,+45] min): **POD 0.89, FAR 0.92, CSI 0.08**,
-  median lead +26 min — finds the tornadoes but drowns them in false alarms.
+  median lead +26 min, finds the tornadoes but drowns them in false alarms.
 - vs 2 domain SPC reports: POD 0.50, FAR 0.99, CSI 0.01, hit lead +13 min.
 - the 223 m/s single-gate monster is gone (veto works); remaining FAR is
   far-field MESO (e.g. delta-V 27 at 100+ km in 20 dBZ echo).
@@ -84,7 +84,7 @@ numbers plus the KPAH/KHTX cases once their downloads land.
 | 10 | 35 | 71 | 0.78 | 0.90 | 0.096 | 0.014 |
 | 10 (base) | 20 (base) | 102 | 0.89 | 0.92 | 0.078 | 0.010 |
 
-(`tvs-dv` 25 vs 30 barely matters — the MESO gate + reflectivity guard do the
+(`tvs-dv` 25 vs 30 barely matters: the MESO gate + reflectivity guard do the
 work; TVS threshold rarely binds.) Strict `meso-dv 18` wins Moore warnings but
 collapses Mayfield POD (0.09→0.03), so the winner is picked on all three cases.
 
@@ -101,7 +101,7 @@ Detections: base 199 → ref30 132 → **ref35 110** (−45%). Warning hits: 40 
 SPC CSI sums: 0.208 → 0.240 → **0.279**. Median leads: Moore +26 min, Mayfield +7 min, KHTX +8 min.
 
 Promoted (`src/core/circulation_detector.hpp:36`): `minReflectivityDbz 20→35`,
-`maxDeltaVelocityMetersPerSecond 120` (over-unfold veto). `meso-dv` stays 10 —
+`maxDeltaVelocityMetersPerSecond 120` (over-unfold veto). `meso-dv` stays 10.
 18 wins Moore alone but blinds Mayfield/Hackleburg far-field. `tvs-dv` stays 25.
 
 ### v2–v3: velocity + gate + ROT fixes (TVS/MESO, unfiltered warnings)
@@ -134,7 +134,7 @@ of the radar). Same v3 detections, honest denominators:
 KHTX at 0.33 CSI / 0.47 POD with 0.47 FAR is a respectable tornado-guidance
 operating point. Remaining misses are now mostly real: QLCS spin-ups with shallow
 / short-lived shear below the 2-tilt + 2500 m depth gates, and far-field couplets
-smoothed below the gate by beam broadening — plus a few over-unfolded volumes.
+smoothed below the gate by beam broadening, plus a few over-unfolded volumes.
 Chasing those with lower thresholds trades 1 hit for 10+ false alarms on every
 sweep tried so far.
 
@@ -146,10 +146,10 @@ columns die as `single` (1 tilt only, 1–7/vol) or `shallow` (depth < 3000 m).
 E.g. 02:23Z: 11 couplets → 7 columns → 5 single + 1 shallow → 1 det.
 The shear is real and strong; it never stacks vertically within 5 km across
 2+ tilts. Loosening to depth 1500 m + align 8 km converts some (Mayfield 12 →
-31 dets, 6 → 8 hits) but FAR 0.50 → 0.74 and CSI 0.158 → 0.145 — the extra
+31 dets, 6 → 8 hits) but FAR 0.50 → 0.74 and CSI 0.158 → 0.145, the extra
 columns are mostly noise. The principled fix is *temporal* persistence (live
 `persistCirculations` already needs 2 repeat volumes before drawing; replay
-scores raw single-volume output), not lower single-volume gates — plus
+scores raw single-volume output), not lower single-volume gates, plus
 spatially-consistent dealiasing so upper-tilt couplets stop being missed.
 
 Shipped as v3 defaults: conditional unfold holds Moore POD with fewer dets; the
@@ -159,10 +159,10 @@ where beam smoothing weakens couplets. Same-sign stays OFF (Moore CSI 0.108 →
 0.109 when enabled).
 
 ROT (native velocities after the dealiased-span fiasco): Moore 251 dets, POD 1.0,
-FAR 0.96, CSI 0.036 — unselective at storm scale; spans now physical (max 61,
+FAR 0.96, CSI 0.036. Unselective at storm scale; spans now physical (max 61,
 median 52) but the gate can't tell mesos from tornadoes. SHEAR prototype (LLSD
 grid, `src/core/shear_grid.cpp`): Moore 92 dets at 0.025 threshold, POD 0.44,
-CSI 0.041 — fires, but far below TVS/MESO and likely poisoned by unfold
+CSI 0.041, fires, but far below TVS/MESO and likely poisoned by unfold
 discontinuities. Both stay out of the promoted path; they need persistence +
 spatially-consistent dealiasing before they can beat sparse couplets.
 
@@ -171,7 +171,7 @@ spatially-consistent dealiasing before they can beat sparse couplets.
 The release screenshot forced the issue: quiet KABR stratiform echo drew ~29
 pink ROT rings (span ~21 m/s noise/gradient fragments over a fixed 3000 m
 denominator). Measurement showed thresholds cannot fix the span heuristic:
-tornadic-volume spans cluster at ~2×Nyquist (Moore p50 52, KHTX p50 59 —
+tornadic-volume spans cluster at ~2×Nyquist (Moore p50 52, KHTX p50 59,
 fold boundaries, not mesos) while quiet-KABR spans run 30–48, so any gate
 that keeps tornadic POD keeps most quiet-day FAR.
 
@@ -200,10 +200,10 @@ above span noise, just below markers.
 
 - FAR is still 0.47–0.93 depending on case: these are guidance markers, never warnings.
 - Mayfield warning POD was 0.06 before the domain filter because 80 TOR polygons
-  span four states while matching radius is 15 km — geography, not just detector.
+  span four states while matching radius is 15 km, geography, not just detector.
   Domain-filtered (32 in-range polygons) it is 0.19; SPC reports (0.161 CSI) remain
   the fairer truth there. See v3b.
-- ROT shear objects fired **0 times in 68 volumes** in the v1 harness — root cause
+- ROT shear objects fired **0 times in 68 volumes** in the v1 harness. Root cause
   found: NEXRAD split cuts put reflectivity-only surveillance (elev #1) below the
   lowest Doppler tilt (elev #2), and the fusion code took the single lowest elevation
   carrying *either* product, so `velocitySamples` was always 0. Fixed by taking each
@@ -217,7 +217,7 @@ above span noise, just below markers.
 - Same-sign (storm-motion-biased) couplets hurt on Moore: ssb=1.8 adds 48 dets with
   zero new hits (CSI 0.108 → 0.062). Default is now OFF (`sameSignBoost = 0.0`).
 - KHTX needed the `F-Scale` hyphen fix in `tools/rotation_verify.py` (pre-2012 SPC
-  spelling) — without it the whole 2011 truth set silently scored 0 events.
+  spelling), without it the whole 2011 truth set silently scored 0 events.
 - "Perfect" is not on the table: single-radar gate-to-gate couplets cannot resolve
   every QLCS spin-up. Next real gains: azimuthal-persistence dealiasing, then the
   dense LLSD shear grid as a first-class product (your screenshot wash).
@@ -237,7 +237,7 @@ above span noise, just below markers.
    spatially-consistent dealiasing. The harness scores it unchanged.
 8. Multi-radar cases (KLOT/KLSX neighbors for Mayfield far polygons).
 
-### Failed experiments (kept out of defaults — read before retrying)
+### Failed experiments (kept out of defaults, read before retrying)
 
 - Same-sign couplets (ssb=1.8): Moore CSI 0.108 → 0.062, +48 dets, zero new hits.
 - Single-tilt TVS: Mayfield SPC 0.147 → 0.109, warn CSI flat. Opt-in only.
@@ -246,7 +246,7 @@ above span noise, just below markers.
   (63 → 134 dets, CSI 0.108 → 0.051). Range slope (5 − 0.02/km) keeps both.
 - Track persistence in replay (`--persist`, 2-hits/8 km, plus a
   motion-compensated variant): collapses on subsampled volumes (10–15 min gaps
-  exceed track life) — KHTX CSI 0.330 → 0.06–0.12, Mayfield POD 0.19 → 0.09.
+  exceed track life), KHTX CSI 0.330 → 0.06–0.12, Mayfield POD 0.19 → 0.09.
 - Fixed-vector storm-relative (`--storm-dir/--storm-speed`): Mayfield POD
   0.19 → 0.31 but FAR 0.50 → 0.86 (CSI down); Moore 103 → 339 dets (CSI 0.024).
   One vector per multi-storm window is too crude; per-storm motion is future work.
@@ -261,5 +261,5 @@ with GR2 settles it: export GR2 markers for the three `cases.json` windows as
 --lead-min -10 --lead-max 45`. Numbers to beat (domain-filtered, v3 defaults):
 Moore POD 0.875 / CSI 0.067 (8 events), Mayfield POD 0.19 / CSI 0.158
 (32 events), Hackleburg POD 0.47 / CSI 0.330 (66 events). Published NWS TDA
-skill sits in the same band — matching it with an open pipeline is the standing
+skill sits in the same band, matching it with an open pipeline is the standing
 goal, not a victory lap.

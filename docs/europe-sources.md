@@ -1,4 +1,4 @@
-# Europe: OPERA/ODIM volumes — verified ground truth + plan
+# Europe: OPERA/ODIM volumes: verified ground truth + plan
 
 All endpoints below were probed live on 2026-09-05. No API keys were used.
 User direction: verify access first, skip the composite-layer detour, go
@@ -6,7 +6,7 @@ straight at ODIM polar volumes.
 
 ## What is open (verified)
 
-### 1. OPERA single-site volumes on anonymous S3 — the primary path
+### 1. OPERA single-site volumes on anonymous S3: the primary path
 
 - Bucket `openradar-24h` on CloudFerro S3, anonymous List + Get:
   `https://s3.waw3-1.cloudferro.com/openradar-24h?list-type=2&prefix=...`
@@ -42,7 +42,7 @@ straight at ODIM polar volumes.
 - Format: ODIM_H5 polar volumes (HDF5). Requires an HDF5 reader
   (vcpkg `hdf5`, same REQUIRE-gate pattern as netCDF).
 
-### 2. ORD API (MeteoGate) — catalog + metadata, keyed for quota
+### 2. ORD API (MeteoGate): catalog + metadata, keyed for quota
 
 - `https://api.meteogate.eu/eu-eumetnet-weather-radar`, OGC EDR style.
   Anonymous queries are allowed but throttled hard (consistent HTTP 429
@@ -64,13 +64,13 @@ straight at ODIM polar volumes.
   HRZAG→HRPUN rename. `tools/generate_opera_sites.py` holds these lists;
   `tools/check_opera_availability.py` re-probes the bucket (132 sites).
 
-### 3. DWD open data — fallback / Germany depth (probed live, no key)
+### 3. DWD open data: fallback / Germany depth (probed live, no key)
 
 - `https://opendata.dwd.de/weather/radar/composite/` → `wn/ pg/ rv/
   vii/ rs/ hg/ hx/ dmax/ hymecng/`, 5-minute `WN<date>.tar.bz2` files.
 - `.../radolan/`, `.../sites/`, `.../mesocyclones/`, `.../konrad3d/`
   also live. Formats are DWD-specific (BUFR, RADOLAN binary,
-  run-length products) — NOT ODIM. Only worth it if OPERA misses a
+  run-length products): NOT ODIM. Only worth it if OPERA misses a
   German site or for mesocyclone markers later.
 
 ### 4. Licensing
@@ -84,7 +84,7 @@ straight at ODIM polar volumes.
 - OPERA NIMBUS composites as a map layer (user: skip the detour).
 - KNMI/SMHI/FMI national APIs (per-service keys, redundant once OPERA
   volumes flow; revisit only for sites OPERA lacks).
-- Meteoalarm warnings: live with full map geometry — per-country hazard
+- Meteoalarm warnings: live with full map geometry, per-country hazard
   feeds from the visualization service (`visservice.meteoalarm.org`, same
   backend as meteoalarm.org) joined to the official warning-area polygons
   from its vector tiles by area UUID, with per-area warning texts
@@ -97,7 +97,7 @@ straight at ODIM polar volumes.
 
 ## Implementation plan: ODIM volumes as first-class radar sessions
 
-Goal: a German/Dutch/Norwegian site behaves exactly like a US one —
+Goal: a German/Dutch/Norwegian site behaves exactly like a US one:
 pick station, LIVE follow, tilts, products, timeline, cross-sections.
 
 ### Core: `src/core/odim_reader.{hpp,cpp}` + tests
@@ -106,14 +106,14 @@ pick station, LIVE follow, tilts, products, timeline, cross-sections.
   `/datasetN/where/elangle,nbins,nrays,rstart,rscale`,
   `data{what/gain,offset,nodata,undetect}`.
 - Map moments: DBZH → Reflectivity, VRADH → Velocity, TH → (hold;
-  expose as Reflectivity only if DBZH absent, else ignore — decide in
+  expose as Reflectivity only if DBZH absent, else ignore, decide in
   review; never invent a ninth product silently).
 - Emit the existing `DecodedRay` model: one ray per azimuth per
   elevation, gate values decoded with gain/offset, nodata/undetect
   mapped to the existing below-threshold/missing sentinels.
 - Elevation numbers: assign sequentially sorted by elangle (ODIM has
   no stable tilt numbering across sites).
-- Unit tests: hand-built minimal ODIM_H5? netCDF-style stub problem —
+- Unit tests: hand-built minimal ODIM_H5? netCDF-style stub problem:
   HDF5 has no hand-rolled writer. Options: (a) commit a tiny real
   fixture file (~100 KB, one elevation, CC BY 4.0, attributed);
   (b) generate the fixture at test time with the HDF5 lib when
@@ -132,12 +132,12 @@ pick station, LIVE follow, tilts, products, timeline, cross-sections.
 - PVOL volumes decode from a single object; SCAN volumes merge one object per
   elevation in the newest 5-minute scan bucket (elevations renumbered sorted
   by angle so tilts, timeline, Echo Tops/VIL, probing, and export work
-  unmodified — SCAN volumes with ≥2 tilts derive ET/VIL like PVOL ones).
+  unmodified: SCAN volumes with ≥2 tilts derive ET/VIL like PVOL ones).
 - Reuse `app/http_client` (UA/timeout/redirect) and `app/s3_listing`
   (the ListObjectsV2 parser from the dedup task) unchanged.
 - Decode off the UI thread via the shared decode executor, publish
   through the same `volumeReady` path so timeline, tilts, derived
-  products (Echo Tops/VIL need ≥2 tilts — PVOL DBZH objects carry 12,
+  products (Echo Tops/VIL need ≥2 tilts: PVOL DBZH objects carry 12,
   SCAN buckets typically 5–14), probing, and GIF export work unmodified.
 - Refresh cadence: follow the overlay timer (60 s default); volumes
   appear every 5 min per site.
@@ -166,12 +166,12 @@ pick station, LIVE follow, tilts, products, timeline, cross-sections.
 ### Risks
 
 - Anonymous S3 throttling (we hit 429 only on the API, never on S3;
-  CloudFerro may still rate-limit heavy polling — bounded-parallel
+  CloudFerro may still rate-limit heavy polling, bounded-parallel
   downloads + 60 s cadence already respect this).
 - VRADH/DBZH schedule skew: different elevation tables per moment;
   associate by closest timestamp within ±5 min or show DBZH-only.
 - Elevation tables vary per site/scan (see the nohur filename pair);
-  never hardcode tilt lists — always parse from the object key +
+  never hardcode tilt lists. Always parse from the object key +
   file.
 - 24 h rolling window: document clearly that European timeline depth
   is one day, not eight volumes of deep history.

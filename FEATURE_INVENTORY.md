@@ -1,4 +1,4 @@
-# CappedWeather v0.7.0 — Feature & UI Inventory
+# CappedWeather v0.7.0: Feature & UI Inventory
 
 > **Source-ground analysis**: every item below is confirmed in the actual C++20/Qt6 source code at `src/`. This is not a README summary; it is a direct code audit.
 
@@ -15,12 +15,12 @@ Defined in `core/product.hpp` (`ProductKind` enum) and `core/product.cpp` (`prod
 | 1 | `Velocity` | VEL | Radial Velocity | m/s | configurable |
 | 2 | `SpectrumWidth` | SW | Spectrum Width | m/s | 0–32 |
 | 3 | `DifferentialReflectivity` | ZDR | Differential Reflectivity | dB | -8 to +8 |
-| 4 | `CorrelationCoefficient` | CC | Correlation Coefficient | — | 0–1 |
+| 4 | `CorrelationCoefficient` | CC | Correlation Coefficient | - | 0–1 |
 | 5 | `DifferentialPhase` | PHI | Differential Phase | deg | 0–360 |
 
 - The product combo (`productCombo_` in `MainWindow::buildUi()`) is populated from `productDescriptors()`. Panel chips show the operational abbreviation (REF, VEL, SW, ZDR, RHOHV, PHIDP, ET18, VIL); the full name + unit is spelled out in `activeProductLabel_` above the grid and in each chip's tooltip (`productChipTooltip()` = name + `productExplainer()` word-wrapped by `wrapTooltipText()`). `productShortBlurb()` feeds the command-palette entries.
 - Each decoded ray has eight field slots (`DecodedRay::fields` in `level2_decoder.hpp`): six populated directly by Message 31 moments and two populated by the derived-volume pass.
-- TDWR volumes *automatically* disable unavailable dual-polarization products (Reflectivity, Velocity, Spectrum Width only — via `updateProductAvailability()` at line 1352–1372).
+- TDWR volumes *automatically* disable unavailable dual-polarization products (Reflectivity, Velocity, Spectrum Width only, via `updateProductAvailability()` at line 1352–1372).
 
 ### 1.1a Volume-derived 2D products (2)
 
@@ -134,7 +134,7 @@ In the Navigation section (lines 648–687):
 In Playback Dock (lines 701–736):
 - **Previous** / **Next** frame buttons (with auto-repeated keyboard Left/Right).
 - **Play/Pause** toggle (`playButton_`): looping animation at configurable speed.
-- **LIVE** toggle (`liveButton_`): `followLatest` mode — always shows newest frame. Green accent when active (#6fbf5a, line 386).
+- **LIVE** toggle (`liveButton_`): `followLatest` mode, always shows newest frame. Green accent when active (#6fbf5a, line 386).
 - **Frame slider** (`frameSlider_`): scrubbing through history. Tooltip shows frame position, datetime, volume completeness.
 - **Speed combo** (`speedCombo_`): 0.5×, 1×, 2× (default), 4×, 8×, 16×. Legacy `timeline/speed` indices migrated so existing user prefs keep the same speed.
 
@@ -185,13 +185,13 @@ In Playback Dock (lines 701–736):
 
 ### 5.5 TVS / Mesocyclone Markers
 - **Toggle**: `tvsCheck_` / `tvsBadge_` layer row ("TVS / meso markers", sub "NSSL-style couplet + depth tracking"), persisted `overlays/tvs` (default on). Badge shows count / `off` / `idle` via `circulationCount()`.
-- **Detector**: `detectCirculations()` in `core/circulation_detector.cpp` — NSSL-style heuristic (NOT an NWS RPG port): gate-to-gate couplets on dealiased velocity, range-dependent delta-V gates (meso 10.0 + 0.06/km, TVS 25.0 + 0.08/km), range-relaxed couplet gate (5 m/s − 0.02/km, floor 2), 35 dBZ reflectivity guard (tuned on 68 archived tornadic volumes, see `docs/rotation-validation.md`), 120 m/s over-unfold veto, vertical association across 2+ tilts within 5 km, TVS needs ≤3.0 km diameter and ≥2500 m depth (meso ≥3000 m). Same-sign path OFF by default (hurts CSI); single-tilt TVS opt-in. Capped at 24 detections, sorted by delta-V. Dense LLSD shear prototype in `core/shear_grid.cpp` (not yet promoted).
-- **Time continuity**: `persistCirculations()` (8 km match, 2 hits to show, 2 misses to drop, 24-track cap) — only tracks seen in 2+ volumes reach `circulations_`, so single-volume flicker never draws.
-- **Rendering**: `paintCirculationMarkers()` — red triangle = TVS, orange diamond = meso, labeled `TVS/MESO <delta-V> m/s | <depth> km deep` at zoom ≥ 5; legend chip `▲ TVS n · ◆ MESO n`.
+- **Detector**: `detectCirculations()` in `core/circulation_detector.cpp`, NSSL-style heuristic (NOT an NWS RPG port): gate-to-gate couplets on dealiased velocity, range-dependent delta-V gates (meso 10.0 + 0.06/km, TVS 25.0 + 0.08/km), range-relaxed couplet gate (5 m/s − 0.02/km, floor 2), 35 dBZ reflectivity guard (tuned on 68 archived tornadic volumes, see `docs/rotation-validation.md`), 120 m/s over-unfold veto, vertical association across 2+ tilts within 5 km, TVS needs ≤3.0 km diameter and ≥2500 m depth (meso ≥3000 m). Same-sign path OFF by default (hurts CSI); single-tilt TVS opt-in. Capped at 24 detections, sorted by delta-V. Dense LLSD shear prototype in `core/shear_grid.cpp` (not yet promoted).
+- **Time continuity**: `persistCirculations()` (8 km match, 2 hits to show, 2 misses to drop, 24-track cap), only tracks seen in 2+ volumes reach `circulations_`, so single-volume flicker never draws.
+- **Rendering**: `paintCirculationMarkers()`: red triangle = TVS, orange diamond = meso, labeled `TVS/MESO <delta-V> m/s | <depth> km deep` at zoom ≥ 5; legend chip `▲ TVS n · ◆ MESO n`.
 - Honest limits: guidance only, never warnings; no hail sizing yet. Synthetic-volume core tests cover clear-air, single-tilt, NaN/folded, weak/speckle, shallow, misaligned, and azimuth-gap vetoes.
 
 ### 5.6 Rotation / Shear, Storm Trails, Smoothing
-- **Rotation / shear** (`shearCheck_` / `shearBadge_`, persisted `overlays/shear`): `paintShearOverlay()` renders validated shear-watch candidates from `detectCirculations()` (meso-strength couplet columns failing TVS/meso on depth or diameter, multi-tilt only) — pink double-ring + `ROT m/s | km deep` at zoom ≥ 6, capped at the 12 strongest with 64 px label declutter, so quiet volumes stay clean; gray dot for strong non-rotating ≥ 50 dBZ cores at zoom ≥ 7. See `docs/rotation-validation.md` v4 for why the span heuristic left the map.
+- **Rotation / shear** (`shearCheck_` / `shearBadge_`, persisted `overlays/shear`): `paintShearOverlay()` renders validated shear-watch candidates from `detectCirculations()` (meso-strength couplet columns failing TVS/meso on depth or diameter, multi-tilt only): pink double-ring + `ROT m/s | km deep` at zoom ≥ 6, capped at the 12 strongest with 64 px label declutter, so quiet volumes stay clean; gray dot for strong non-rotating ≥ 50 dBZ cores at zoom ≥ 7. See `docs/rotation-validation.md` v4 for why the span heuristic left the map.
 - **Storm trails** (`trailCheck_`, persisted `overlays/trail`): `StormTracker` (cost-based + motion prediction + Hungarian assignment) matches features across volumes; every storm draws its own fading line with `#id` + 5-min motion vector at zoom ≥ 6, longest track keeps dots + `trail dBZ` + top-3 +10/+20/+30 min extrapolation; per-track running gate maxima (`GateMaxTrail`).
 - **Smooth echo (display only)** (`smoothingCheck_`, persisted `view/smoothing`, default off): expands azimuth half-width ×1.35 so adjacent gates overlap; no data smoothing or value interpolation.
 
@@ -229,7 +229,7 @@ In Playback Dock (lines 701–736):
 - Uses `writeAnimatedGif()` from `app/gif_writer.hpp` (line 1887).
 - Delay derived from current speed setting (ms/10 in centiseconds).
 - Auto-generated filename: `{radarId}-{product}-timeline.gif`.
-- Exports **only currently loaded frames** — does not retrieve archive data.
+- Exports **only currently loaded frames** (does not retrieve archive data).
 
 ### 6.3 Cross-Section CSV Export
 `CrossSectionWidget::exportCsv()` (lines 32–42 in `cross_section_widget.cpp`):
@@ -255,8 +255,8 @@ In Playback Dock (lines 701–736):
 | Category | Setting | Key | Default | Range |
 |----------|---------|-----|---------|-------|
 | **Display** | Interface text scale (live) | `ui/fontScale` | 100% | 80–150% |
-| | Theme | `ui/theme` | — | Classic / Squall |
-| **Chase** | Enabled | `chase/enabled` | false | — |
+| | Theme | `ui/theme` | - | Classic / Squall |
+| **Chase** | Enabled | `chase/enabled` | false | - |
 | | Latitude | `chase/latitude` | 35.0 | ±90° |
 | | Longitude | `chase/longitude` | -97.0 | ±180° |
 | **Timeline** | Frames kept (live) | `timeline/maximumFrames` | 12 | 2–24 |
@@ -276,9 +276,9 @@ In Playback Dock (lines 701–736):
 | | Sigma window | `lightning/sigmaWindowMinutes` | 10min | 5–30min |
 | **Cache** | Memory cache (restart) | `cache/memoryMbPerPanel` | 32MB | 8–256MB |
 | | Disk cache (restart) | `cache/diskMbPerPanel` | 64MB | 16–1024MB |
-| **Panels** | Synchronize nav | `panels/synchronizeNavigation` | true | — |
+| **Panels** | Synchronize nav | `panels/synchronizeNavigation` | true | - |
 | **Alerts** | Minimum severity | `alerts/minSeverity` | Severe | Minor–Extreme |
-| | (plus sound/notification toggles, geo filter, event allowlist, sigma threshold, suppression window, custom sound) | `alerts/*` | — | — |
+| | (plus sound/notification toggles, geo filter, event allowlist, sigma threshold, suppression window, custom sound) | `alerts/*` | - | - |
 
 ### 7.2 Persisted State (QSettings)
 Saved in `MainWindow::saveSettings()`:
@@ -368,7 +368,7 @@ This is the most significant conditional feature in the codebase.
 **Code impact** (`core/glm_l2_reader.cpp`):
 - `glmL2ReaderAvailable()` returns `true` only when `CAPPEDWEATHER_HAS_NETCDF` is defined.
 - `readGlmLcfa()`: the entire netCDF parsing body (lines 111–168) is inside `#ifdef CAPPEDWEATHER_HAS_NETCDF`. When not defined, it returns `std::nullopt` (line 167).
-- The S3 key helper functions (`glmLcfaPrefix()`, `parseGlmLcfaStartTime()`) are **always available** (no netCDF dependency — pure string parsing, unit-tested).
+- The S3 key helper functions (`glmLcfaPrefix()`, `parseGlmLcfaStartTime()`) are **always available** (no netCDF dependency, pure string parsing, unit-tested).
 
 **Runtime impact** (`app/glm_source.cpp`, lines 89–96):
 - `GlmSource::refresh()` checks `glmL2ReaderAvailable()` immediately.
@@ -385,8 +385,8 @@ This is the most significant conditional feature in the codebase.
 - **NEXRAD algorithm markers**: TVS/meso first slice done (see §5.5); hail/MEHS + RPG-fidelity remains the open follow-on.
 
 **Backlog (not built)**:
-1. **GPU volume rendering** — "ray-marched 3D dual-pol volumes at interactive framerates." Purely speculative, no code exists.
-2. **Storm-scale severe nowcasting** — motion-based track prediction/extrapolation exists (`StormTracker` velocity + top-3 +10/+20/+30 min); ML 0–60 min warn-on-forecast is still speculative, no code exists.
+1. **GPU volume rendering**: "ray-marched 3D dual-pol volumes at interactive framerates." Purely speculative, no code exists.
+2. **Storm-scale severe nowcasting**: motion-based track prediction/extrapolation exists (`StormTracker` velocity + top-3 +10/+20/+30 min); ML 0–60 min warn-on-forecast is still speculative, no code exists.
 
 ### 9.3 Stubs and Conditional Code
 - No `TODO`, `FIXME`, `HACK`, or `stub` comments found in source code (search confirmed).
@@ -394,7 +394,7 @@ This is the most significant conditional feature in the codebase.
 - The GLM netCDF `#else` branch is the only meaningful stub: `readGlmLcfa()` returns `std::nullopt`, which is a clean, intentional stub, not an oversight.
 
 ### 9.4 What the Backup Radar Catalog Is
-- `RadarCatalog::defaultSites()` (`core/radar_catalog.cpp`): real, hardcoded WSR-88D and TDWR sites — not synthetic/generated.
+- `RadarCatalog::defaultSites()` (`core/radar_catalog.cpp`): real, hardcoded WSR-88D and TDWR sites, not synthetic/generated.
 - If the live `api.weather.gov/radar/stations` catalog fails, the embedded fallback is used. The fallback contains only real station classes.
 
 ---
@@ -420,14 +420,14 @@ This is the most significant conditional feature in the codebase.
 | Cached color-batched radar geometry off UI thread | ✓ Confirmed: `overlayImage_` cache, `overlayBuildPending_`, thread pool |
 | Shared decoded frames across panels | ✓ Confirmed: `std::shared_ptr<const DecodedChunk>` |
 | Dock-based layout, dark theme, Esri basemap | ✓ Confirmed: dock widgets, QSS, tile store |
-| Lightning-jump engine (GOES GLM) | ✓ Confirmed: full LJA implementation — *but requires netCDF-C at build time* |
+| Lightning-jump engine (GOES GLM) | ✓ Confirmed: full LJA implementation, *but requires netCDF-C at build time* |
 | Lightning-radar fusion | ✓ Confirmed: `extractRadarStormFeatures()` + `associateLightningWithRadar()`; `rebuildLightningFusion()` also drives independent shear/TVS/tracker layers with lightning hidden |
 | TVS / mesocyclone markers | ✓ Added in v0.7.0: `core/circulation_detector` (NSSL-style couplet + depth + time persistence) with Layers toggle, badge, and synthetic-volume tests. Guidance only, never warnings |
 | Parse diagnostics + randomized malformed-input tests | ✓ Confirmed: `rejectedMessages`/`rejectedBlocks` tracking, test suite |
 | Persistent settings | ✓ Confirmed: `saveSettings()` covers all 21+ settings |
 | Warning / lightning jump alerts | ✓ Added in P1: `AlertCenter` (`src/app/alert_center.{hpp,cpp}`), sinks `overlaysReady` + `cellsUpdated`, plays sound (custom `.wav` via `QSoundEffect` when `Qt6::Multimedia` is available, system beep otherwise) and shows a tray balloon. NWS id + cell key dedupe with a configurable suppression window. |
 | Minimum-severity alert filter | ✓ Added in P1 round 6: `AlertConfig::minSeverity` (default = Severe) maps the NWS CAP `severity` tag (Extreme/Severe/Moderate/Minor/Unknown) onto a 0–3 scale and drops any warning below threshold before sound + tray fire. Unknown is treated as Moderate. Exposed in Settings as a "Minimum severity" combo, persisted under `alerts/minSeverity`. Stops the operator from being paged for advisories / Special Weather Statements / Air Quality Alerts. |
-| Right-click map context menu | ✓ Added in P1: `RadarMapCanvas::contextMenuEvent` — select radar, recenter, national view, zoom in/out, copy lat/lon, inspect, and checkable measure / cross-section entries. |
+| Right-click map context menu | ✓ Added in P1: `RadarMapCanvas::contextMenuEvent`: select radar, recenter, national view, zoom in/out, copy lat/lon, inspect, and checkable measure / cross-section entries. |
 | Per-panel overlay toggles | ✓ Added in P1 round 2: `RadarMapCanvas::OverlayVisibility` + a new "Active panel overlays" section in the control dock (Warnings / Storm reports / GLM lightning / Radar fusion + "Use global" reset). |
 | More loop speeds (0.5×, 8×, 16×) | ✓ Added in P1 round 2: speed combo expanded from 3 to 6 entries; legacy `timeline/speed` indices migrated so existing user prefs keep the same speed. |
 | Jump to earliest / latest + absolute time entry | ✓ Added in P1 round 2: `Home` / `End` shortcuts + a `QDateTimeEdit` with calendar popup that finds the closest loaded frame. |
@@ -439,6 +439,6 @@ This is the most significant conditional feature in the codebase.
 | Nav history undo/redo | ✓ Added in P1 round 5: `RadarMapCanvas` keeps bounded `viewBack_` / `viewForward_` rings; `Ctrl+Z` / `Ctrl+Shift+Z` rewind/replay user-driven pan/zoom. |
 | GPS / current-location chase | ✓ Added in P1 round 5: "Detect from IP" button in Settings hits `https://ipwho.is/` and populates the chase coords (city-level, not GPS-grade; honest fallback until a real GPS source is wired). |
 | Settings tooltips / help text | ✓ Added in P1 round 5: tooltips on the lightning σ threshold, σ window, cell size, min flash rate, and backfill; combined with pre-existing tooltips, every obscure knob in the dialog has a hover hint. |
-| GPU volume rendering | ✗ Backlog only — no code |
-| Storm-scale nowcasting | ✗ Backlog only — no code |
+| GPU volume rendering | ✗ Backlog only, no code |
+| Storm-scale nowcasting | ✗ Backlog only, no code |
 | Echo Tops + VIL | ✓ Added in P2: `appendDerivedProducts()` materializes ET18 and VIL on completed multi-tilt reflectivity volumes; first-class product selection, palettes, probing, persistence, and tests are wired. |
