@@ -538,6 +538,14 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) panel->setTvsVisible(visible);
         refreshLayerBadges();
     });
+    connect(hailCoreCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setHailVisible(visible);
+        refreshLayerBadges();
+    });
+    connect(tdsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setTdsVisible(visible);
+        refreshLayerBadges();
+    });
     connect(placefilesCheck_, &QCheckBox::toggled, this, [this](const bool visible) {
         for (auto* panel : maps_) panel->setPlacefilesVisible(visible);
     });
@@ -1229,6 +1237,16 @@ void MainWindow::buildUi() {
                  QStringLiteral("NSSL-style couplet + depth tracking"), tvsBadge_,
                  QStringLiteral("tvsBadge"), true,
                  QStringLiteral("Tornado-vortex and mesocyclone markers from gate-to-gate couplets with vertical and time continuity (red triangle = TVS, orange diamond = meso)"));
+    makeLayerRow(hailCoreCheck_, QStringLiteral("Hail cores (VIL density)"),
+                 QStringLiteral("hailCoreCheck"),
+                 QStringLiteral("VIL density guidance, size ranges not diameters"), hailCoreBadge_,
+                 QStringLiteral("hailCoreBadge"), true,
+                 QStringLiteral("Hail guidance from VIL divided by echo-top height (3.5 severe possible, 4.0 likely, 4.5 significant). Correlates with hail size, never measures a diameter."));
+    makeLayerRow(tdsCheck_, QStringLiteral("Debris signature (TDS)"),
+                 QStringLiteral("tdsCheck"),
+                 QStringLiteral("CC drop at a live couplet, persisted"), tdsBadge_,
+                 QStringLiteral("tdsBadge"), true,
+                 QStringLiteral("Polarimetric debris confirmation: low correlation coefficient collocated with a rotation couplet, shown only after repeating across volumes. Confirms lofted debris, never predicts."));
     makeLayerRow(placefilesCheck_, QStringLiteral("GR placefiles"), QStringLiteral("placefilesCheck"),
                  QStringLiteral("Chaser and spotter feeds"), placefilesBadge_,
                  QStringLiteral("placefilesBadge"), true,
@@ -2910,11 +2928,15 @@ void MainWindow::restoreSettings() {
     smoothingCheck_->setChecked(settings.value(QStringLiteral("view/smoothing"), false).toBool());
     shearCheck_->setChecked(settings.value(QStringLiteral("overlays/shear"), true).toBool());
     tvsCheck_->setChecked(settings.value(QStringLiteral("overlays/tvs"), true).toBool());
+    hailCoreCheck_->setChecked(settings.value(QStringLiteral("overlays/hailCores"), true).toBool());
+    tdsCheck_->setChecked(settings.value(QStringLiteral("overlays/tds"), true).toBool());
     for (auto* panel : maps_) {
         panel->setStormTrailVisible(trailCheck_->isChecked());
         panel->setDisplaySmoothing(smoothingCheck_->isChecked());
         panel->setShearVisible(shearCheck_->isChecked());
         panel->setTvsVisible(tvsCheck_->isChecked());
+        panel->setHailVisible(hailCoreCheck_->isChecked());
+        panel->setTdsVisible(tdsCheck_->isChecked());
     }
     if (lightningCheck_->isEnabled())
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
@@ -2962,6 +2984,8 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("view/smoothing"), smoothingCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/shear"), shearCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/tvs"), tvsCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/hailCores"), hailCoreCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/tds"), tdsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/warnings"), warningsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/reports"), reportsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/tornado"), tornadoCheck_->isChecked());
@@ -3882,6 +3906,16 @@ void MainWindow::refreshLayerBadges() {
     if (tvsBadge_) {
         const auto n = map_->circulationCount();
         tvsBadge_->setText(!tvsCheck_ || !tvsCheck_->isChecked() ? QStringLiteral("off")
+                          : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
+    if (hailCoreBadge_) {
+        const auto n = map_->hailCoreCount();
+        hailCoreBadge_->setText(!hailCoreCheck_ || !hailCoreCheck_->isChecked() ? QStringLiteral("off")
+                                : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
+    if (tdsBadge_) {
+        const auto n = map_->tdsCount();
+        tdsBadge_->setText(!tdsCheck_ || !tdsCheck_->isChecked() ? QStringLiteral("off")
                           : n > 0 ? QString::number(n) : QStringLiteral("idle"));
     }
     if (scanDiagnosticsLabel_ && map_) {

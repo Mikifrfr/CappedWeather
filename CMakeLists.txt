@@ -44,6 +44,8 @@ include(CTest)
 
 add_library(cappedweather_core STATIC
     src/core/circulation_detector.cpp
+    src/core/hail_detector.cpp
+    src/core/debris_detector.cpp
     src/core/shear_grid.cpp
     src/core/derived_products.cpp
     src/core/level2_primitives.cpp

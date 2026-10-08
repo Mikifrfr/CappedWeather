@@ -2,6 +2,8 @@
 
 #include "core/radar_catalog.hpp"
 #include "core/circulation_detector.hpp"
+#include "core/debris_detector.hpp"
+#include "core/hail_detector.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 #include "core/velocity_processing.hpp"
@@ -135,6 +137,12 @@ public:
     void setTvsVisible(bool visible);
     [[nodiscard]] bool tvsVisible() const { return tvsVisible_; }
     [[nodiscard]] int circulationCount() const;
+    void setHailVisible(bool visible);
+    [[nodiscard]] bool hailVisible() const { return hailVisible_; }
+    [[nodiscard]] int hailCoreCount() const;
+    void setTdsVisible(bool visible);
+    [[nodiscard]] bool tdsVisible() const { return tdsVisible_; }
+    [[nodiscard]] int tdsCount() const;
     void setStormTrailVisible(bool visible);
     [[nodiscard]] bool stormTrailVisible() const { return stormTrailVisible_; }
     [[nodiscard]] bool hasStormTracks() const;
@@ -432,6 +440,21 @@ private:
     std::vector<CirculationDetection> circulations_;
     void paintCirculationMarkers(QPainter& painter);
     void persistCirculations(std::vector<CirculationDetection> fresh);
+    // VIL-density hail cores (guidance ranges, never diameters). Per-volume
+    // output: the VIL field is already volume-smoothed, so no time gate.
+    std::vector<HailCore> hailCores_;
+    void paintHailCores(QPainter& painter);
+    // Debris signatures ride the same 2-hit persistence as circulations: a
+    // one-volume CC dip is hail or clutter until it repeats.
+    struct PersistedTds {
+        TdsDetection detection;
+        int hits = 0;
+        int misses = 0;
+    };
+    std::vector<PersistedTds> tdsTracks_;
+    std::vector<TdsDetection> tdsDetections_;
+    void paintTdsMarkers(QPainter& painter);
+    void persistTds(std::vector<TdsDetection> fresh);
     struct CachedWarningPath {
         int warningIndex = -1;
         QColor color;
@@ -501,6 +524,8 @@ private:
     bool lightningFusionVisible_ = true;
     bool shearVisible_ = true;
     bool tvsVisible_ = true;
+    bool hailVisible_ = true;
+    bool tdsVisible_ = true;
     bool stormTrailVisible_ = true;
     bool displaySmoothing_ = false;
     // One history per storm (matched across volumes by proximity), fed from

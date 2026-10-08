@@ -6,18 +6,27 @@
 //     [--nyquist 28] [--csv] [--meso-dv 10] [--tvs-dv 25]
 //
 // Output CSV columns:
-//   volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts
-// where kind is TVS / MESO / ROT / WATCH (ROT = span-heuristic shear object
+//   volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts,min_cc,max_ref_dbz
+// where kind is TVS / MESO / ROT / WATCH / HAIL / TDS (ROT = span-heuristic shear object
 // from extractRadarStormFeatures, the old pink-layer source; WATCH =
 // meso-strength but sub-classification couplet column from
 // detectCirculations, the current pink-layer source).
+// HAIL packs VIL density into delta_v_mps, max VIL into diameter_km, echo-top
+// MSL meters into depth_m, and the severity tier into tilts. TDS packs the
+// parent delta-V into delta_v_mps, range km into diameter_km, height MSL
+// meters into depth_m, parent TVS=1/MESO=0 into tilts, and the debris minimum
+// CC + collocated reflectivity into min_cc/max_ref_dbz.
 //
 // This intentionally reuses the exact live pipeline: decodeLevel2Archive ->
-// processVelocity(Dealiased) -> detectCirculations + extractRadarStormFeatures.
+// processVelocity(Dealiased) -> detectCirculations + extractRadarStormFeatures
+// + appendDerivedProducts -> detectHailCores + detectDebrisSignatures.
 // Threshold sweeps for tuning change only the config, never the code path.
 
 #include "app/archive_level2.hpp"
 #include "core/circulation_detector.hpp"
+#include "core/debris_detector.hpp"
+#include "core/derived_products.hpp"
+#include "core/hail_detector.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "core/shear_grid.hpp"
 #include "core/velocity_processing.hpp"
@@ -75,7 +84,8 @@ int main(int argc, char** argv) {
     CirculationConfig circ{};
     RadarFeatureConfig featCfg{};
     ShearGridConfig shearCfg{};
-    shearCfg.minShearPerSecond = 0.0;  // disabled unless --shear is passed
+    HailConfig hailCfg{};
+    TdsConfig tdsCfg{};    shearCfg.minShearPerSecond = 0.0;  // disabled unless --shear is passed
     bool rotDealiased = false;  // native by default: dealiased spans hit 60-200
     // m/s on real volumes (adjacent rays unfold to different intervals), so
     // span is garbage. Native caps span at 2*Nyquist (~56) — underestimates
@@ -129,6 +139,10 @@ int main(int argc, char** argv) {
         else if (flag == "--rot-grid") featCfg.gridSizeDeg = value;
         else if (flag == "--rot-dealiased") rotDealiased = value != 0.0;
         else if (flag == "--max-phys") velPrototype.maxPhysicalVelocityMetersPerSecond = value;
+        else if (flag == "--hail-cluster") hailCfg.clusterKm = value;
+        else if (flag == "--hail-min-vild") hailCfg.minVildGPerCubicMeter = value;
+        else if (flag == "--tds-cc") tdsCfg.maxCorrelationCoefficient = value;
+        else if (flag == "--tds-contrast") tdsCfg.minContrast = value;
         else if (flag == "--shear") shearCfg.minShearPerSecond = value;
         else if (flag == "--persist") persist = value != 0.0;
         else {
@@ -161,11 +175,12 @@ int main(int argc, char** argv) {
     }
 
     if (csv) {
-        std::printf("volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts\n");
+        std::printf("volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts,min_cc,max_ref_dbz\n");
     }
     int volumesOk = 0;
     int volumesFailed = 0;
     int tvsCount = 0, mesoCount = 0, rotCount = 0, shearCount = 0, watchCount = 0;
+    int hailCount = 0, tdsCount = 0;
     struct Track {
         CirculationDetection det;
         int hits = 0;
@@ -320,7 +335,7 @@ int main(int argc, char** argv) {
                     d.kind == CirculationKind::TornadoVortex ? "TVS" : "MESO";
                 if (d.kind == CirculationKind::TornadoVortex) ++tvsCount;
                 else ++mesoCount;
-                std::printf("%s,%s,%s,%.5f,%.5f,%.2f,%.3f,%.0f,%d\n", volIso.c_str(),
+                std::printf("%s,%s,%s,%.5f,%.5f,%.2f,%.3f,%.0f,%d,,\n", volIso.c_str(),
                             volFile.c_str(), kind, d.latitudeDeg, d.longitudeDeg,
                             d.maxDeltaVelocityMetersPerSecond, d.diameterKm, d.depthMeters,
                             d.tiltCount);
@@ -331,7 +346,7 @@ int main(int argc, char** argv) {
                     d.kind == CirculationKind::TornadoVortex ? "TVS" : "MESO";
                 if (d.kind == CirculationKind::TornadoVortex) ++tvsCount;
                 else ++mesoCount;
-                std::printf("%s,%s,%s,%.5f,%.5f,%.2f,%.3f,%.0f,%d\n", volIso.c_str(),
+                std::printf("%s,%s,%s,%.5f,%.5f,%.2f,%.3f,%.0f,%d,,\n", volIso.c_str(),
                             volFile.c_str(), kind, d.latitudeDeg, d.longitudeDeg,
                             d.maxDeltaVelocityMetersPerSecond, d.diameterKm, d.depthMeters,
                             d.tiltCount);
@@ -339,17 +354,39 @@ int main(int argc, char** argv) {
         for (const auto& f : feats) {
             if (!f.rotating) continue;
             ++rotCount;
-            std::printf("%s,%s,ROT,%.5f,%.5f,%.2f,%.3f,,%d\n", volIso.c_str(),
+            std::printf("%s,%s,ROT,%.5f,%.5f,%.2f,%.3f,,%d,,\n", volIso.c_str(),
                         volFile.c_str(), f.latitudeDeg, f.longitudeDeg,
                         f.velocitySpanMetersPerSecond,
                         std::sqrt(std::max(1.0, f.areaKm2)), f.reflectivityCellCount);
         }
         for (const auto& w : watch) {
             ++watchCount;
-            std::printf("%s,%s,WATCH,%.5f,%.5f,%.2f,%.3f,%.0f,%d\n", volIso.c_str(),
+            std::printf("%s,%s,WATCH,%.5f,%.5f,%.2f,%.3f,%.0f,%d,,\n", volIso.c_str(),
                         volFile.c_str(), w.latitudeDeg, w.longitudeDeg,
                         w.maxDeltaVelocityMetersPerSecond, w.diameterKm, w.depthMeters,
                         w.tiltCount);
+        }
+        // Hail + debris run on the same decoded volume the live canvas sees:
+        // derived products materialize first (VIL/ET18), then VIL-density
+        // cores, then CC-drop debris around the raw (unpersisted) couplets.
+        // Replay scores raw output; live display adds time persistence.
+        appendDerivedProducts(decoded->decoded, elev);
+        const auto hailCores = detectHailCores(decoded->decoded, lat, lon, elev, hailCfg);
+        for (const auto& h : hailCores) {
+            ++hailCount;
+            std::printf("%s,%s,HAIL,%.5f,%.5f,%.2f,%.2f,%.0f,%d,,\n", volIso.c_str(),
+                        volFile.c_str(), h.latitudeDeg, h.longitudeDeg,
+                        h.maxVildGPerCubicMeter, h.maxVilKgPerSquareMeter,
+                        h.echoTopMslMeters, h.tier);
+        }
+        const auto tds = detectDebrisSignatures(decoded->decoded, dets, lat, lon, elev, tdsCfg);
+        for (const auto& t : tds) {
+            ++tdsCount;
+            std::printf("%s,%s,TDS,%.5f,%.5f,%.2f,%.3f,%.0f,%d,%.3f,%.1f\n", volIso.c_str(),
+                        volFile.c_str(), t.latitudeDeg, t.longitudeDeg,
+                        t.parentDeltaVelocityMetersPerSecond, t.rangeKm, t.heightMslMeters,
+                        t.parentKind == CirculationKind::TornadoVortex ? 1 : 0,
+                        t.minCorrelationCoefficient, t.maxReflectivityDbz);
         }
         if (shearCfg.minShearPerSecond > 0.0) {
             shearCfg.minReflectivityDbz = circ.minReflectivityDbz;
@@ -357,7 +394,7 @@ int main(int argc, char** argv) {
                                                elev, shearCfg);
             for (const auto& p : peaks) {
                 ++shearCount;
-                std::printf("%s,%s,SHEAR,%.5f,%.5f,%.2f,%.3f,%.0f,%d\n", volIso.c_str(),
+                std::printf("%s,%s,SHEAR,%.5f,%.5f,%.2f,%.3f,%.0f,%d,,\n", volIso.c_str(),
                             volFile.c_str(), p.latitudeDeg, p.longitudeDeg,
                             p.equivalentDeltaVMps, p.diameterKm, p.depthMeters,
                             p.tiltCount);
@@ -378,8 +415,8 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr,
                  "\n=== rotation replay summary ===\nvolumes: %d ok, %d failed\n"
-                 "detections: TVS=%d MESO=%d ROT=%d SHEAR=%d WATCH=%d\n",
+                 "detections: TVS=%d MESO=%d ROT=%d SHEAR=%d WATCH=%d HAIL=%d TDS=%d\n",
                  volumesOk, volumesFailed, tvsCount, mesoCount, rotCount, shearCount,
-                 watchCount);
+                 watchCount, hailCount, tdsCount);
     return EXIT_SUCCESS;
 }

@@ -10,7 +10,8 @@ Detection CSV (from tools/rotation_replay --csv):
 
 Truth sources (either or both):
   --warnings data/rotation_cases/<id>/warnings.geojson  (via tools/fetch_verification_truth.py, phenomena TO)
-  --reports  data/rotation_cases/<id>/spc_rpts.csv      (SPC filtered reports, tornado section only)
+  --reports  data/rotation_cases/<id>/spc_rpts.csv      (SPC filtered reports, --report-kind selects
+     tornado/wind/hail section; hail honors --min-size-in, inches)
   --convective-date YYYY-MM-DD  (needed to resolve SPC HHMM times; 12Z boundary like the app)
 
 Matching:
@@ -118,19 +119,35 @@ def load_warnings(path: pathlib.Path, phenomena: set[str]) -> list[Event]:
     return sorted(out, key=lambda e: e.time)
 
 
-def load_reports(path: pathlib.Path, convective_date: dt.date) -> list[Event]:
-    """SPC yymmdd_rpts.csv: tornado section is the rows before the first wind header."""
+def load_reports(path: pathlib.Path, convective_date: dt.date,
+                 report_kind: str = "tornado", min_size_in: float = 0.0) -> list[Event]:
+    """SPC yymmdd_rpts.csv block reader (tornado / wind / hail sections).
+
+    Tornado block starts at Time,F_Scale (pre-2012: Time,F-Scale) and ends at
+    the next Time,Speed header; wind runs to Time,Size; hail runs to EOF.
+    Hail rows carry a Size column in inches; --min-size-in filters sub-severe.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     # Find tornado block: starts with Time,F_Scale header, ends at next Time,Speed header.
     # Pre-2012 files spell it Time,F-Scale (hyphen).
     header_idx = next((i for i, l in enumerate(lines)
                        if l.startswith("Time,F_Scale") or l.startswith("Time,F-Scale")), -1)
     wind_idx = next((i for i, l in enumerate(lines) if l.startswith("Time,Speed")), len(lines))
-    if header_idx < 0:
+    hail_idx = next((i for i, l in enumerate(lines) if l.startswith("Time,Size")), len(lines))
+    blocks = {"tornado": (header_idx, wind_idx, "F_Scale"),
+              "wind": (wind_idx, hail_idx, "Speed"),
+              "hail": (hail_idx, len(lines), "Size")}
+    if report_kind not in blocks:
+        raise ValueError(f"unknown report kind {report_kind!r}")
+    start, end, _ = blocks[report_kind]
+    if report_kind == "tornado" and start < 0:
+        # hyphen spelling fallback already covered above; truly absent file
+        return []
+    if start < 0 or start >= end:
         return []
     out = []
     with path.open(newline="", encoding="utf-8") as stream:
-        reader = csv.DictReader(lines[header_idx:wind_idx])
+        reader = csv.DictReader(lines[start:end])
         for row in reader:
             try:
                 hhmm = int(str(row.get("Time", "")).strip())
@@ -139,6 +156,13 @@ def load_reports(path: pathlib.Path, convective_date: dt.date) -> list[Event]:
                 continue
             if not (0 <= hhmm <= 2359 and hhmm % 100 < 60):
                 continue
+            if report_kind == "hail" and min_size_in > 0.0:
+                try:
+                    size = float(str(row.get("Size", "")).strip())
+                except (ValueError, TypeError):
+                    continue
+                if size < min_size_in:
+                    continue
             day = convective_date + (dt.timedelta(days=1) if hhmm < 1200 else dt.timedelta(0))
             t = dt.datetime(day.year, day.month, day.day, hhmm // 100, hhmm % 100, tzinfo=UTC)
             out.append(Event(t, f"{row.get('Location','')} {row.get('State','')} {hhmm:04d}",
@@ -224,6 +248,10 @@ def main() -> int:
     p.add_argument("--convective-date")
     p.add_argument("--phenomena", default="TO")
     p.add_argument("--kinds", default="TVS,MESO,ROT")
+    p.add_argument("--report-kind", default="tornado", choices=("tornado", "wind", "hail"),
+                   help="which SPC report section --reports scores")
+    p.add_argument("--min-size-in", type=float, default=0.0,
+                   help="hail reports below this size (inches) are dropped from truth")
     p.add_argument("--lead-min", type=float, default=0.0)
     p.add_argument("--lead-max", type=float, default=45.0)
     p.add_argument("--radius-km", type=float, default=15.0)
@@ -242,7 +270,7 @@ def main() -> int:
         if not args.convective_date:
             p.error("--convective-date is required with --reports")
         cd = dt.date.fromisoformat(args.convective_date)
-        events += load_reports(args.reports, cd)
+        events += load_reports(args.reports, cd, args.report_kind, args.min_size_in)
     if args.radar:
         try:
             rlat, rlon = (float(x) for x in args.radar.split(","))

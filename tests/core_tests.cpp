@@ -11,6 +11,8 @@
 #include "core/odim_reader.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "core/circulation_detector.hpp"
+#include "core/hail_detector.hpp"
+#include "core/debris_detector.hpp"
 #include "core/shear_grid.hpp"
 #include "core/storm_tracker.hpp"
 #include "core/volume_brick.hpp"
@@ -1242,6 +1244,237 @@ void testCirculationMisalignedAndGapVeto() {
     assert(detectCirculations(wide, wideGrid, 35.333, -97.278, 370.0, {}).empty());
 }
 
+// --- Hail cores (VIL density) synthetic tests ---
+// Geometry matches the circulation synthetics: firstGate 10000 m, spacing
+// 250 m, 200 gates. VIL/ET18 use the derived-product encoding (scale 10,
+// offset 2); ET is kft MSL.
+
+DecodedRay syntheticHailRay(const float azimuth, const double vilKgPerM2,
+                            const double echoTopKft, const double reflectivityDbz,
+                            const std::size_t firstGate = 150, const std::size_t lastGate = 159) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = 1;
+    ray.elevationDegrees = 0.5F;
+    constexpr std::size_t gates = 200;
+    const auto reflIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto vilIndex = static_cast<std::size_t>(ProductKind::VerticallyIntegratedLiquid);
+    const auto etIndex = static_cast<std::size_t>(ProductKind::EchoTop);
+    ray.fields.at(reflIndex).assign(
+        gates, static_cast<std::uint16_t>(std::lround(10.0 * 2.0 + 66.0)));
+    for (std::size_t g = firstGate; g <= lastGate && g < gates; ++g) {
+        ray.fields.at(reflIndex)[g] =
+            static_cast<std::uint16_t>(std::lround(reflectivityDbz * 2.0 + 66.0));
+    }
+    ray.firstGateByProduct.at(reflIndex) = 10000;
+    ray.gateSpacingByProduct.at(reflIndex) = 250;
+    ray.scaleByProduct.at(reflIndex) = 2.0F;
+    ray.offsetByProduct.at(reflIndex) = 66.0F;
+    ray.fields.at(vilIndex).assign(gates, 2);  // 0.0 kg/m2 background
+    ray.firstGateByProduct.at(vilIndex) = 10000;
+    ray.gateSpacingByProduct.at(vilIndex) = 250;
+    ray.scaleByProduct.at(vilIndex) = 10.0F;
+    ray.offsetByProduct.at(vilIndex) = 2.0F;
+    ray.fields.at(etIndex).assign(gates, 2);  // 0.0 kft background
+    ray.firstGateByProduct.at(etIndex) = 10000;
+    ray.gateSpacingByProduct.at(etIndex) = 250;
+    ray.scaleByProduct.at(etIndex) = 10.0F;
+    ray.offsetByProduct.at(etIndex) = 2.0F;
+    for (std::size_t g = firstGate; g <= lastGate && g < gates; ++g) {
+        ray.fields.at(vilIndex)[g] =
+            static_cast<std::uint16_t>(std::lround(vilKgPerM2 * 10.0 + 2.0));
+        ray.fields.at(etIndex)[g] =
+            static_cast<std::uint16_t>(std::lround(echoTopKft * 10.0 + 2.0));
+    }
+    return ray;
+}
+
+void testHailTierBoundaries() {
+    assert(hailTier(3.49) == 0);
+    assert(hailTier(3.5) == 1);
+    assert(hailTier(3.99) == 1);
+    assert(hailTier(4.0) == 2);
+    assert(hailTier(4.49) == 2);
+    assert(hailTier(4.5) == 3);
+    assert(hailTier(9.0) == 3);
+    assert(hailTier(std::numeric_limits<double>::quiet_NaN()) == 0);
+    assert(!hailSizeHint(1).empty() && !hailSizeHint(3).empty());
+}
+
+void testHailCorePositive() {
+    // VIL 40 + ET 30 kft -> 40000/9144 = 4.37 g/m3, tier 2.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticHailRay(90.0F, 40.0, 30.0, 60.0));
+    const auto cores = detectHailCores(chunk, 35.333, -97.278, 370.0, {});
+    assert(cores.size() == 1);
+    assert(cores.front().tier == 2);
+    assert(std::abs(cores.front().maxVildGPerCubicMeter - 4.37) < 0.05);
+    assert(std::abs(cores.front().maxVilKgPerSquareMeter - 40.0) < 0.2);
+    assert(std::abs(cores.front().maxReflectivityDbz - 60.0) < 0.6);
+}
+
+void testHailVetoes() {
+    // Thin VIL divides into a huge quotient on a tiny top: guarded.
+    DecodedChunk thin;
+    thin.radarId = "KTLX";
+    thin.rays.push_back(syntheticHailRay(90.0F, 5.0, 30.0, 60.0));
+    assert(detectHailCores(thin, 35.333, -97.278, 370.0, {}).empty());
+    // Tiny echo top: geometry noise, not a storm column.
+    DecodedChunk shallow;
+    shallow.radarId = "KTLX";
+    shallow.rays.push_back(syntheticHailRay(90.0F, 40.0, 5.0, 60.0));
+    assert(detectHailCores(shallow, 35.333, -97.278, 370.0, {}).empty());
+    // High density math but stratiform reflectivity: guarded.
+    DecodedChunk weakRef;
+    weakRef.radarId = "KTLX";
+    weakRef.rays.push_back(syntheticHailRay(90.0F, 40.0, 30.0, 40.0));
+    assert(detectHailCores(weakRef, 35.333, -97.278, 370.0, {}).empty());
+    // Missing echo-top moment entirely: fail closed.
+    DecodedChunk noTop;
+    noTop.radarId = "KTLX";
+    noTop.rays.push_back(syntheticHailRay(90.0F, 40.0, 30.0, 60.0));
+    noTop.rays.front().fields.at(static_cast<std::size_t>(ProductKind::EchoTop)).clear();
+    assert(detectHailCores(noTop, 35.333, -97.278, 370.0, {}).empty());
+}
+
+void testHailClustering() {
+    // Two azimuth-separated cores survive; neighbors merge.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticHailRay(90.0F, 40.0, 30.0, 60.0));
+    chunk.rays.push_back(syntheticHailRay(91.0F, 45.0, 28.0, 62.0));
+    chunk.rays.push_back(syntheticHailRay(200.0F, 42.0, 29.0, 61.0));
+    const auto cores = detectHailCores(chunk, 35.333, -97.278, 370.0, {});
+    assert(cores.size() == 2);
+    // Strongest first.
+    assert(cores.front().maxVildGPerCubicMeter >= cores.back().maxVildGPerCubicMeter);
+}
+
+// --- Debris signature (TDS) synthetic tests ---
+// CC uses the 8-bit DRHO convention ((enc-1)/254); ZDR the DZDR one
+// ((enc-129)/16). Parents are placed at real gate geometry so the
+// neighborhood search has something to find.
+
+DecodedRay syntheticTdsRay(const float azimuth, const double cc, const double refDbz,
+                           const double zdrDb = 0.5) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = 1;
+    ray.elevationDegrees = 0.5F;
+    constexpr std::size_t gates = 200;
+    const auto reflIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto ccIndex = static_cast<std::size_t>(ProductKind::CorrelationCoefficient);
+    const auto zdrIndex = static_cast<std::size_t>(ProductKind::DifferentialReflectivity);
+    ray.fields.at(reflIndex).assign(
+        gates, static_cast<std::uint16_t>(std::lround(refDbz * 2.0 + 66.0)));
+    ray.firstGateByProduct.at(reflIndex) = 10000;
+    ray.gateSpacingByProduct.at(reflIndex) = 250;
+    ray.scaleByProduct.at(reflIndex) = 2.0F;
+    ray.offsetByProduct.at(reflIndex) = 66.0F;
+    ray.fields.at(ccIndex).assign(
+        gates, static_cast<std::uint16_t>(std::lround(cc * 254.0 + 1.0)));
+    ray.firstGateByProduct.at(ccIndex) = 10000;
+    ray.gateSpacingByProduct.at(ccIndex) = 250;
+    ray.scaleByProduct.at(ccIndex) = 254.0F;
+    ray.offsetByProduct.at(ccIndex) = 1.0F;
+    ray.fields.at(zdrIndex).assign(
+        gates, static_cast<std::uint16_t>(std::lround(zdrDb * 16.0 + 129.0)));
+    ray.firstGateByProduct.at(zdrIndex) = 10000;
+    ray.gateSpacingByProduct.at(zdrIndex) = 250;
+    ray.scaleByProduct.at(zdrIndex) = 16.0F;
+    ray.offsetByProduct.at(zdrIndex) = 129.0F;
+    return ray;
+}
+
+CirculationDetection syntheticTdsParent(double lat, double lon) {
+    CirculationDetection parent;
+    parent.kind = CirculationKind::TornadoVortex;
+    parent.latitudeDeg = lat;
+    parent.longitudeDeg = lon;
+    parent.maxDeltaVelocityMetersPerSecond = 45.0;
+    return parent;
+}
+
+void testTdsPositive() {
+    // Localized debris hole: inner rays at 0.65, surrounding rays at 0.96.
+    // Contrast gate (median-outer minus min-inner >= 0.05) passes.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticTdsRay(86.0F, 0.96, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(87.0F, 0.96, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(90.0F, 0.65, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(91.0F, 0.65, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(94.0F, 0.96, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(95.0F, 0.96, 55.0));
+    // Parent at gate-155 geometry on the 90.5-deg radial (~48 km slant).
+    const double slant = 10000.0 + 155.0 * 250.0;
+    const auto beam = standardBeamGeometry(slant, 0.5);
+    const auto pos = destinationPoint({35.333, -97.278}, 90.5, beam.surfaceDistanceMeters);
+    const auto dets = detectDebrisSignatures(
+        chunk, {syntheticTdsParent(pos.latitude, pos.longitude)}, 35.333, -97.278, 370.0, {});
+    assert(dets.size() == 1);
+    assert(std::abs(dets.front().minCorrelationCoefficient - 0.65) < 0.02);
+    assert(dets.front().maxReflectivityDbz >= 20.0);
+    assert(dets.front().hasDifferentialReflectivity);
+    assert(std::abs(dets.front().meanDifferentialReflectivityDb - 0.5) < 0.15);
+    assert(dets.front().parentKind == CirculationKind::TornadoVortex);
+}
+
+void testTdsContrastVeto() {
+    // Broad hail-shield depression (0.72 everywhere): under the CC line but
+    // with no compact hole, so the contrast gate holds it back. Disabling
+    // contrast recovers the old behavior (proves the gate did it).
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    for (const float az : {86.0F, 87.0F, 90.0F, 91.0F, 94.0F, 95.0F}) {
+        chunk.rays.push_back(syntheticTdsRay(az, 0.72, 55.0));
+    }
+    const double slant = 10000.0 + 155.0 * 250.0;
+    const auto beam = standardBeamGeometry(slant, 0.5);
+    const auto pos = destinationPoint({35.333, -97.278}, 90.5, beam.surfaceDistanceMeters);
+    const std::vector<CirculationDetection> parents{
+        syntheticTdsParent(pos.latitude, pos.longitude)};
+    assert(detectDebrisSignatures(chunk, parents, 35.333, -97.278, 370.0, {}).empty());
+    TdsConfig noContrast{};
+    noContrast.minContrast = 0.0;
+    assert(!detectDebrisSignatures(chunk, parents, 35.333, -97.278, 370.0, noContrast).empty());
+}
+
+void testTdsVetoes() {
+    const double slant = 10000.0 + 155.0 * 250.0;
+    const auto beam = standardBeamGeometry(slant, 0.5);
+    const auto pos = destinationPoint({35.333, -97.278}, 90.5, beam.surfaceDistanceMeters);
+    const std::vector<CirculationDetection> parents{
+        syntheticTdsParent(pos.latitude, pos.longitude)};
+    // Meteorological CC: no debris call.
+    DecodedChunk clean;
+    clean.radarId = "KTLX";
+    clean.rays.push_back(syntheticTdsRay(90.0F, 0.97, 55.0));
+    clean.rays.push_back(syntheticTdsRay(91.0F, 0.97, 55.0));
+    assert(detectDebrisSignatures(clean, parents, 35.333, -97.278, 370.0, {}).empty());
+    // Low CC but weak echo: signal-quality floor holds.
+    DecodedChunk weak;
+    weak.radarId = "KTLX";
+    weak.rays.push_back(syntheticTdsRay(90.0F, 0.60, 10.0));
+    weak.rays.push_back(syntheticTdsRay(91.0F, 0.60, 10.0));
+    assert(detectDebrisSignatures(weak, parents, 35.333, -97.278, 370.0, {}).empty());
+    // No CC moment at all (single-pol): never a guess.
+    DecodedChunk noCc;
+    noCc.radarId = "KTLX";
+    noCc.rays.push_back(syntheticCoupletRay(90.0F, 1, 0.5F, 55.0));
+    noCc.rays.push_back(syntheticCoupletRay(91.0F, 1, 0.5F, 55.0));
+    assert(detectDebrisSignatures(noCc, parents, 35.333, -97.278, 370.0, {}).empty());
+    // No parent circulation: CC drops alone are hail or clutter, not debris.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticTdsRay(90.0F, 0.65, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(91.0F, 0.65, 55.0));
+    assert(detectDebrisSignatures(chunk, {}, 35.333, -97.278, 370.0, {}).empty());
+}
+
 
 
 void testDecodedRayLegacyGeometryMaxGates() {
@@ -1460,6 +1693,13 @@ int main() {
     testCirculationShallowVeto();
     testShearWatchQuietUniformFlow();
     testCirculationMisalignedAndGapVeto();
+    testHailTierBoundaries();
+    testHailCorePositive();
+    testHailVetoes();
+    testHailClustering();
+    testTdsPositive();
+    testTdsContrastVeto();
+    testTdsVetoes();
     testDecodedRayLegacyGeometryMaxGates();
     std::cout << "core tests passed\n";
 }

@@ -714,6 +714,9 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         // Fresh radar, fresh storms: persistence must not carry markers over.
         circulationTracks_.clear();
         circulations_.clear();
+        tdsTracks_.clear();
+        tdsDetections_.clear();
+        hailCores_.clear();
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -831,6 +834,26 @@ int RadarMapCanvas::circulationCount() const {
     return static_cast<int>(circulations_.size());
 }
 
+void RadarMapCanvas::setHailVisible(const bool visible) {
+    if (hailVisible_ == visible) return;
+    hailVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::hailCoreCount() const {
+    return static_cast<int>(hailCores_.size());
+}
+
+void RadarMapCanvas::setTdsVisible(const bool visible) {
+    if (tdsVisible_ == visible) return;
+    tdsVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::tdsCount() const {
+    return static_cast<int>(tdsDetections_.size());
+}
+
 void RadarMapCanvas::setStormTrailVisible(const bool visible) {
     if (stormTrailVisible_ == visible) return;
     stormTrailVisible_ = visible;
@@ -874,6 +897,8 @@ void RadarMapCanvas::invalidateLightningFusion() {
     ++lightningFusionGeneration_;
     radarFeatures_.clear();
     lightningAssociations_.clear();
+    hailCores_.clear();
+    tdsDetections_.clear();
     lightningFusionComputedGeneration_ = 0;
 }
 
@@ -912,13 +937,22 @@ void RadarMapCanvas::rebuildLightningFusion() {
                                                                longitude, antennaElevM,
                                                                CirculationConfig{}, nullptr, &watch)
                                           : std::vector<CirculationDetection>{};
+            // Hail + debris ride the same worker: VIL/ET18 arrive on the
+            // published chunk from the derived-products pass, and TDS hangs
+            // off the raw (unpersisted) couplets. Display persistence for
+            // TDS happens on the GUI thread below, next to circulations.
+            auto hailCores = detectHailCores(*chunk, latitude, longitude, antennaElevM);
+            auto tds = dealiased ? detectDebrisSignatures(*chunk, circulations, latitude,
+                                                           longitude, antennaElevM)
+                                 : std::vector<TdsDetection>{};
             if (!guard) return;
             QMetaObject::invokeMethod(
                 guard,
                 [guard, generation, features = std::move(features),
                  associations = std::move(associations),
                  circulations = std::move(circulations),
-                 watch = std::move(watch)]() mutable {
+                 watch = std::move(watch), hailCores = std::move(hailCores),
+                 tds = std::move(tds)]() mutable {
                     if (!guard) return;
                     guard->lightningFusionBuildPending_ = false;
                     if (generation == guard->lightningFusionGeneration_) {
@@ -926,6 +960,8 @@ void RadarMapCanvas::rebuildLightningFusion() {
                         guard->lightningAssociations_ = std::move(associations);
                         guard->shearWatch_ = std::move(watch);
                         guard->persistCirculations(std::move(circulations));
+                        guard->hailCores_ = std::move(hailCores);
+                        guard->persistTds(std::move(tds));
                         guard->lightningFusionComputedGeneration_ = generation;
                         guard->refreshPinnedLightningInfo();
                 // Per-storm tracks: fold the whole feature set into the
@@ -995,6 +1031,59 @@ void RadarMapCanvas::persistCirculations(std::vector<CirculationDetection> fresh
     }
     std::sort(circulations_.begin(), circulations_.end(), [](const auto& a, const auto& b) {
         return a.maxDeltaVelocityMetersPerSecond > b.maxDeltaVelocityMetersPerSecond;
+    });
+}
+
+void RadarMapCanvas::persistTds(std::vector<TdsDetection> fresh) {
+    // Same 2-hit rule as circulations: a one-volume CC dip is hail or
+    // clutter until it repeats at the same place.
+    constexpr double kMatchKm = 8.0;
+    constexpr int kMinHitsToShow = 2;
+    constexpr int kMaxMisses = 2;
+    constexpr std::size_t kMaxTracks = 12;
+    std::vector<char> used(fresh.size(), false);
+    for (auto& track : tdsTracks_) {
+        double best = -1.0;
+        double bestDist = 0.0;
+        for (std::size_t i = 0; i < fresh.size(); ++i) {
+            if (used[i]) continue;
+            const double dist =
+                haversineMeters(track.detection.latitudeDeg, track.detection.longitudeDeg,
+                                fresh[i].latitudeDeg, fresh[i].longitudeDeg);
+            if (dist / 1000.0 <= kMatchKm && (best < 0.0 || dist < bestDist)) {
+                best = static_cast<double>(i);
+                bestDist = dist;
+            }
+        }
+        if (best >= 0.0) {
+            track.detection = std::move(fresh[static_cast<std::size_t>(best)]);
+            track.hits += 1;
+            track.misses = 0;
+            used[static_cast<std::size_t>(best)] = true;
+        } else {
+            track.misses += 1;
+        }
+    }
+    std::erase_if(tdsTracks_,
+                  [](const PersistedTds& track) { return track.misses > kMaxMisses; });
+    for (std::size_t i = 0; i < fresh.size(); ++i) {
+        if (!used[i]) tdsTracks_.push_back({std::move(fresh[i]), 1, 0});
+    }
+    while (tdsTracks_.size() > kMaxTracks) {
+        const auto victim =
+            std::min_element(tdsTracks_.begin(), tdsTracks_.end(),
+                             [](const PersistedTds& a, const PersistedTds& b) {
+                                 if (a.hits != b.hits) return a.hits < b.hits;
+                                 return a.misses > b.misses;
+                             });
+        tdsTracks_.erase(victim);
+    }
+    tdsDetections_.clear();
+    for (const auto& track : tdsTracks_) {
+        if (track.hits >= kMinHitsToShow) tdsDetections_.push_back(track.detection);
+    }
+    std::sort(tdsDetections_.begin(), tdsDetections_.end(), [](const auto& a, const auto& b) {
+        return a.minCorrelationCoefficient < b.minCorrelationCoefficient;
     });
 }
 
@@ -2434,6 +2523,8 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
     paintStormTrail(painter);
     paintShearOverlay(painter);
     paintCirculationMarkers(painter);
+    paintHailCores(painter);
+    paintTdsMarkers(painter);
 
     if (!lightningVisible_) return;
 
@@ -2620,6 +2711,68 @@ void RadarMapCanvas::paintCirculationMarkers(QPainter& painter) {
                     .arg(tvs ? QStringLiteral("TVS") : QStringLiteral("MESO"))
                     .arg(det.maxDeltaVelocityMetersPerSecond, 0, 'f', 0)
                     .arg(det.depthMeters / 1000.0, 0, 'f', 1));
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintHailCores(QPainter& painter) {
+    if (!hailVisible_ || hailCores_.empty()) return;
+    // VIL-density cores: cyan hexagon, labeled with density plus a guidance
+    // size range. The label is a range on purpose: VIL density correlates
+    // with hail size but never measures a diameter.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& core : hailCores_) {
+        const auto point = screenPoint(core.latitudeDeg, core.longitudeDeg);
+        if (!rect().adjusted(-60, -60, 60, 60).contains(point.toPoint())) continue;
+        const QColor c = core.tier >= 3   ? QColor(255, 80, 200)
+                         : core.tier == 2 ? QColor(64, 224, 255)
+                                          : QColor(120, 180, 220);
+        QPolygonF marker;
+        for (int k = 0; k < 6; ++k) {
+            const double a = 3.14159265358979323846 / 3.0 * k + 3.14159265358979323846 / 6.0;
+            marker << point + QPointF(9.0 * std::cos(a), 9.0 * std::sin(a));
+        }
+        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 70));
+        painter.setPen(QPen(c, 2.5));
+        painter.drawPolygon(marker);
+        if (zoom_ >= 5) {
+            painter.setPen(QColor(210, 240, 255));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            const auto hint = hailSizeHint(core.tier);
+            painter.drawText(
+                QRectF(point.x() + 13, point.y() - 20, 240, 36), Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("HAIL %1 g/m3 ~%2")
+                    .arg(core.maxVildGPerCubicMeter, 0, 'f', 1)
+                    .arg(QString::fromUtf8(hint.data(), static_cast<int>(hint.size()))));
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintTdsMarkers(QPainter& painter) {
+    if (!tdsVisible_ || tdsDetections_.empty()) return;
+    // Debris ball: brown ring with the CC value. Only persisted (2+ volume)
+    // detections reach this list. Confirmation, not prediction: debris is
+    // already lofted by the time this draws.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& det : tdsDetections_) {
+        const auto point = screenPoint(det.latitudeDeg, det.longitudeDeg);
+        if (!rect().adjusted(-60, -60, 60, 60).contains(point.toPoint())) continue;
+        const QColor c(139, 90, 43);
+        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 110));
+        painter.setPen(QPen(QColor(255, 200, 140), 2.5));
+        painter.drawEllipse(point, 9.0, 9.0);
+        painter.setPen(QPen(QColor(255, 200, 140), 1.5));
+        painter.drawEllipse(point, 13.0, 13.0);
+        if (zoom_ >= 5) {
+            painter.setPen(QColor(255, 225, 190));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(
+                QRectF(point.x() + 15, point.y() - 20, 200, 36), Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("TDS CC %1").arg(det.minCorrelationCoefficient, 0, 'f', 2));
         }
     }
     painter.restore();
@@ -2905,6 +3058,25 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         painter.setPen(QColor(255, 45, 45));
         painter.drawText(QRectF(20, 120, 120, 16), Qt::AlignLeft | Qt::AlignVCenter,
                          QStringLiteral("▲ TVS %1 · ◆ MESO %2").arg(tvs).arg(meso));
+    }
+    if ((hailVisible_ && !hailCores_.empty()) || (tdsVisible_ && !tdsDetections_.empty())) {
+        const QRectF extraPanel(12, 140, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
+        painter.setBrush(QColor(8, 15, 19, 205));
+        painter.drawRoundedRect(extraPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        int x = 20;
+        if (hailVisible_ && !hailCores_.empty()) {
+            painter.setPen(QColor(64, 224, 255));
+            painter.drawText(QRectF(x, 142, 130, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("⬢ HAIL %1").arg(static_cast<int>(hailCores_.size())));
+            x += 90;
+        }
+        if (tdsVisible_ && !tdsDetections_.empty()) {
+            painter.setPen(QColor(255, 200, 140));
+            painter.drawText(QRectF(x, 142, 130, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("● TDS %1").arg(static_cast<int>(tdsDetections_.size())));
+        }
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving

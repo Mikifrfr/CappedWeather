@@ -45,7 +45,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 
 ### Analysis
 
-- TVS / mesocyclone markers (NSSL-style couplet heuristic), rotation/shear overlay, and per-storm tracks with +10/+20/+30 min extrapolation. Guidance only, never warnings ([validation](docs/rotation-validation.md)).
+- TVS / mesocyclone markers (NSSL-style couplet heuristic), rotation/shear overlay, VIL-density hail cores with guidance size ranges, and polarimetric debris confirmation at live couplets. Per-storm tracks with +10/+20/+30 min extrapolation. Guidance only, never warnings ([rotation validation](docs/rotation-validation.md), [hail/TDS validation](docs/severe-hail-tds-validation.md)).
 - Measure (great-circle range/bearing), beam height, scan diagnostics, and modeless multi-tilt cross-sections with CSV export.
 - Scoped Archive-II case loading (local files or an AWS time window) and a GR-compatible placefile subset ([limits](docs/placefiles-and-archives.md)).
 
