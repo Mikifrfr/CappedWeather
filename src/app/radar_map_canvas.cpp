@@ -3763,9 +3763,11 @@ VolumeCamera volumeCameraFor(const VolumeBrick& brick, const double orbitAzimuth
                      target[2] - camera.eye[2]};
     const double fwdLen = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
     for (int axis = 0; axis < 3; ++axis) camera.forward[axis] = fwd[axis] / fwdLen;
-    // right = normalize(cross(forward, worldUp)); degenerate only when looking
-    // straight down, which the elevation clamp never allows.
-    double right[3] = {-camera.forward[1], camera.forward[0], 0.0};
+    // right = normalize(cross(forward, worldUp)): east on the right when
+    // looking north. The sign matters: a negated right flips up with it and
+    // the whole view renders upside down (north down, east left). Degenerate
+    // only when looking straight down, which the elevation clamp never allows.
+    double right[3] = {camera.forward[1], -camera.forward[0], 0.0};
     double rightLen = std::sqrt(right[0] * right[0] + right[1] * right[1]);
     if (rightLen < 1e-9) {
         right[0] = 1.0;
@@ -3887,7 +3889,7 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 auto* scan = reinterpret_cast<QRgb*>(image.scanLine(y));
                 for (int x = 0; x < renderWidth; ++x) {
                     const double px = ((static_cast<double>(x) + 0.5) / renderWidth * 2.0 - 1.0) * aspect;
-                    const double py = 1.0 - ((static_cast<double>(y) + 0.5) / renderHeight * 2.0 - 1.0);
+                    const double py = 1.0 - (static_cast<double>(y) + 0.5) / renderHeight * 2.0;
                     double dir[3] = {
                         camera.forward[0] * camera.focal + camera.right[0] * px + camera.up[0] * py,
                         camera.forward[1] * camera.focal + camera.right[1] * px + camera.up[1] * py,
