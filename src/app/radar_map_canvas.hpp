@@ -355,7 +355,9 @@ private:
     // camera. Reuses the overlay worker pattern (request ids abort stale
     // renders) so orbiting never stacks up full-frame marches.
     void rebuildVolumeRender();
+    void rebuildVolumeRender(bool fast);
     void paintVolume3d(QPainter& painter);
+    void paintVolumeGrid(QPainter& painter);
     QString elidedStatusText() const;
     void invalidateStatusText();
     void updateProbe(const QPointF& point);
@@ -517,14 +519,22 @@ private:
     // overlay so fast orbits cancel stale marches instead of queueing them.
     bool volume3d_ = false;
     bool volumeDragging_ = false;
+    bool volumePanDragging_ = false; // middle-drag moves the focus point
     std::shared_ptr<const VolumeBrick> brick_;
     std::shared_ptr<const DecodedChunk> brickChunk_;
     ProductKind brickProduct_ = ProductKind::Reflectivity;
     QImage volumeImage_;
     QSize volumeImageLogicalSize_;
     double volumeOrbitAzimuth_ = 180.0; // degrees, 180 = looking north from the south
-    double volumeOrbitElevation_ = 24.0; // degrees above the horizon
-    double volumeDistance_ = 420000.0; // meters, eye distance from brick center
+    double volumeOrbitElevation_ = 30.0; // degrees above the horizon
+    double volumeDistance_ = 380000.0; // meters, eye distance from brick center
+    double volumeTarget_[3] = {0.0, 0.0, 7000.0}; // meters ENU, middle-drag moves it
+    // Camera the cached image was marched with; the orientation grid draws
+    // with the same values so echo and grid never disagree mid-orbit.
+    double volumeImageAzimuth_ = 180.0;
+    double volumeImageElevation_ = 30.0;
+    double volumeImageDistance_ = 380000.0;
+    double volumeImageTarget_[3] = {0.0, 0.0, 7000.0};
     double volumeRenderMs_ = 0.0;
     std::atomic<int> volumeRequestId_{0};
     int radarOpacity_ = 80;
