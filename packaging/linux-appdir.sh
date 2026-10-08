@@ -5,6 +5,13 @@
 #
 # Usage: sh packaging/linux-appdir.sh [build_dir] [output_tgz]
 #
+# Local WSL verification (Ubuntu, Qt at /root/Qt): the repo is private and
+# WSL root has no GitHub credentials, so `git pull` inside WSL silently
+# goes nowhere. Sync from Windows instead, then build in WSL:
+#   git archive --format=tar -o /tmp/main.tar main   # on Windows
+#   # in WSL: wipe tree except .git, extract tarball over it,
+#   # cmake -S . -B build-wsl -DCMAKE_BUILD_TYPE=Release && build && ctest
+#
 # Expects the CappedWeather target already built in <build_dir> with Qt 6
 # (CMAKE_PREFIX_PATH pointing at the aqt gcc_64 install) plus system
 # netCDF-C and HDF5. Bundles Qt + shared deps with linuxdeploy +
