@@ -30,6 +30,9 @@
 #include <iostream>
 #include <iterator>
 #include <random>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -1366,6 +1369,46 @@ void testVolumeBrick() {
     assert(!intersectVolumeBox(brick, eye, away).has_value());
 }
 
+void testOdimParallelDecode() {
+    // Regression for the hdf5.dll AVs: ODIM decodes fan out across the pool
+    // while GLM netCDF reads run on theirs, all inside one non-threadsafe
+    // HDF5. Decode the DWD fixture from several threads at once; every copy
+    // must come back identical.
+    if (!odimReaderAvailable()) return;
+    const auto bytes = readFixtureBytes("odim_deneu_dbzh.h5");
+    if (bytes.empty()) {
+        std::cout << "note: deneu fixture missing, skipping parallel asserts\n";
+        return;
+    }
+    constexpr int kThreads = 4;
+    constexpr int kIters = 5;
+    std::mutex mutex;
+    std::vector<std::size_t> rayCounts;
+    std::vector<double> firstAzimuths;
+    std::atomic<int> failures{0};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&] {
+            for (int i = 0; i < kIters; ++i) {
+                std::string error;
+                const auto chunk = readOdimPvol(bytes, "deneu", &error);
+                if (!chunk.has_value() || chunk->rays.empty()) {
+                    failures.fetch_add(1);
+                    return;
+                }
+                const std::lock_guard<std::mutex> guard(mutex);
+                rayCounts.push_back(chunk->rays.size());
+                firstAzimuths.push_back(chunk->rays.front().azimuthDegrees);
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    assert(failures.load() == 0);
+    assert(rayCounts.size() == static_cast<std::size_t>(kThreads * kIters));
+    for (const auto count : rayCounts) assert(count == rayCounts.front());
+    for (const auto azimuth : firstAzimuths) assert(azimuth == firstAzimuths.front());
+}
+
 int main() {
     testProducts();
     testDerivedProducts();
@@ -1395,6 +1438,7 @@ int main() {
     testGlmReaderBuildContract();
     testOdimReader();
     testOdimAzimuthConvention();
+    testOdimParallelDecode();
     testRadarLightningFusion();
     testRadarLightningFusionSplitCut();
     testSlantRangeVerticalBeam();

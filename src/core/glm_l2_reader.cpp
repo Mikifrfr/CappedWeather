@@ -1,4 +1,5 @@
 #include "core/glm_l2_reader.hpp"
+#include "core/hdf5_serial.hpp"
 
 #include <cstdio>
 #include <mutex>
@@ -119,11 +120,10 @@ bool readVarScaled(const int ncid, const char* name, const std::size_t count,
 
 std::optional<std::vector<LightningFlash>> readGlmL2Lcfa(const std::string& path) {
 #ifdef CAPPEDWEATHER_HAS_NETCDF
-    // netCDF builds vary in thread safety (same reason odim_reader serializes
-    // HDF5). GLM currently decodes on a 1-thread pool, but guard the core
-    // reader itself so a future pool widening cannot corrupt library state.
-    static std::mutex glmNetcdfMutex;
-    const std::lock_guard<std::mutex> lock(glmNetcdfMutex);
+    // Shared process-wide lock: netCDF-4 rides on the same non-threadsafe
+    // HDF5 as the ODIM reader, which decodes on a different pool.
+    const Hdf5SerialLock hdf5Lock;
+    (void)hdf5Lock;
     int ncid = -1;
     if (nc_open(path.c_str(), NC_NOWRITE, &ncid) != NC_NOERR) {
         return std::nullopt;

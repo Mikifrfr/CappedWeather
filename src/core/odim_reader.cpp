@@ -1,4 +1,5 @@
 #include "core/odim_reader.hpp"
+#include "core/hdf5_serial.hpp"
 
 #ifdef CAPPEDWEATHER_HAS_HDF5
 #include <hdf5.h>
@@ -350,14 +351,11 @@ bool odimReaderAvailable() {
 std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes, std::string radarId,
                                          std::string* error) {
 #ifdef CAPPEDWEATHER_HAS_HDF5
-    // The HDF5 C library here is built WITHOUT thread safety
-    // (H5_HAVE_THREADSAFE off), yet volumes decode on a thread pool where
-    // SCAN sites fan out to ~10 concurrent files. Serialize every HDF5 call
-    // site-wide: downloads stay parallel, decodes stay off the UI thread,
-    // they just take the lock one at a time. Concurrent H5* calls otherwise
-    // corrupt global library state and crash (seen as AV on DETUR).
-    static std::mutex odimHdf5Mutex;
-    const std::lock_guard<std::mutex> hdf5Lock(odimHdf5Mutex);
+    // Shared process-wide HDF5 lock (see core/hdf5_serial.hpp): a separate
+    // ODIM-only mutex is not enough because GLM netCDF-4 reads enter the
+    // same non-threadsafe hdf5.dll from another pool.
+    const Hdf5SerialLock hdf5Lock;
+    (void)hdf5Lock;
     DecodedChunk chunk;
     chunk.radarId = std::move(radarId);
     if (!hasHdf5Signature(bytes)) {
