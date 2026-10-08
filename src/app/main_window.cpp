@@ -2691,6 +2691,8 @@ void MainWindow::rebuildTiltCombo() {
         tiltCombo_->clear();
         tiltCombo_->addItem(QStringLiteral("Waiting for decoded tilts"));
         tiltCombo_->setEnabled(false);
+        tiltValueButton_->setToolTip(
+            QStringLiteral("Pick a radar and load a volume first; tilts list here"));
         map_->setElevationFilter(std::nullopt);
         rebuildTiltGrid();
         return;
@@ -2703,6 +2705,8 @@ void MainWindow::rebuildTiltCombo() {
         tiltCombo_->clear();
         tiltCombo_->addItem(QStringLiteral("Waiting for decoded tilts"));
         tiltCombo_->setEnabled(false);
+        tiltValueButton_->setToolTip(
+            QStringLiteral("Volume data unavailable; reselect the radar or reload"));
         map_->setElevationFilter(std::nullopt);
         rebuildTiltGrid();
         return;
@@ -2748,6 +2752,9 @@ void MainWindow::rebuildTiltCombo() {
         if (tilt.number == previousElevation) selectedIndex = tiltCombo_->count() - 1;
     }
     tiltCombo_->setEnabled(!tilts.empty());
+    tiltValueButton_->setToolTip(!tilts.empty()
+                                     ? QStringLiteral("Click for the full tilt list (PgUp/PgDn steps)")
+                                     : QStringLiteral("This volume carries no tilts for the product"));
     if (!tilts.empty()) {
         if (selectedIndex < 0) selectedIndex = 0;
         tiltCombo_->setCurrentIndex(selectedIndex);

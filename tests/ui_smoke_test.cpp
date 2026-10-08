@@ -1807,6 +1807,39 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "Non-MCD page should fail closed with an error\n";
         return 1;
     }
+    // Spill budget tail-drop must carry the timeline index along: erasing
+    // the front shifts every volume down, and a stale frameIndex would
+    // point at the next volume over. Null chunks keep this disk-free.
+    {
+        RadarSession session;
+        session.radarId = QStringLiteral("KTLX");
+        for (int i = 0; i < 14; ++i) {
+            RadarFrame frame;
+            frame.volumeId = QStringLiteral("v%1").arg(i);
+            session.history.push_back(std::move(frame));
+        }
+        session.frameIndex = 13;
+        enforceSessionSpillBudget(session, 2);
+        if (session.history.size() != 10 || session.frameIndex != 9 ||
+            session.history.at(static_cast<std::size_t>(session.frameIndex)).volumeId !=
+                QStringLiteral("v13")) {
+            std::cerr << "Tail-drop should shift frameIndex with the erased front\n";
+            return 1;
+        }
+        // Index pinned at the front clamps instead of underflowing.
+        for (int i = 14; i < 16; ++i) {
+            RadarFrame frame;
+            frame.volumeId = QStringLiteral("v%1").arg(i);
+            session.history.push_back(std::move(frame));
+        }
+        session.frameIndex = 0;
+        enforceSessionSpillBudget(session, 2);
+        if (session.history.size() != 10 || session.frameIndex != 0 ||
+            session.history.front().volumeId != QStringLiteral("v6")) {
+            std::cerr << "Tail-drop at index 0 should clamp, not underflow\n";
+            return 1;
+        }
+    }
     const QByteArray meteoEmpty = R"XML(<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"><id>tag:meteoalarm.org,2021-02-19:NL</id></feed>)XML";
     // The legacy Atom path is retired (visservice below carries geometry);
