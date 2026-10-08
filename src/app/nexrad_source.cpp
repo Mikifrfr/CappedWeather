@@ -323,6 +323,16 @@ void NexradSource::volumeListingFinished(QNetworkReply* reply) {
     }
 
     if (downloadedVolumeIds_.value(context.radarId).contains(context.volumePrefix)) {
+        // Live polls ask for exactly one volume: if the newest is already on
+        // disk, the feed has nothing new, so stop instead of walking backward
+        // into history (every poll would otherwise download one more old
+        // volume, complete with decode + timeline publish, forever). Deeper
+        // backfills (requestedCount > 1) still walk.
+        if (context.requestedCount <= 1) {
+            finishRadar(context.radarId);
+            emit statusChanged(context.radarId, QStringLiteral("up to date"));
+            return;
+        }
         startVolumeListing(context.radarId, context.volumePrefixes, context.candidateIndex + 1,
                            context.requestedCount, context.completedCount);
         return;

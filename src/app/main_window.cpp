@@ -4480,13 +4480,18 @@ RadarHealthState MainWindow::classifyHealth() const {
     // 5-10 min old at completion (scan + S3 upload + poll + download), so
     // live stations flipped Stale/Offline on every slow volume. NEXRAD
     // cadence is 4-10 min, so 15 min without any arrival means the feed, not
-    // the clock, is the problem.
-    if (lastArrivalTime_.isValid() && lastArrivalTime_.secsTo(now) <= 900)
-        return RadarHealthState::Online;
-    if (!lastVolumeTime_.isValid()) return RadarHealthState::Stale;
-    const auto ageSec = lastVolumeTime_.secsTo(now);
-    if (ageSec <= 300) return RadarHealthState::Online;     // <= 5 min
-    if (ageSec <= 900) return RadarHealthState::Stale;      // 5-15 min
+    // the clock, is the problem. But arrival alone is not enough either: a
+    // dead feed's first backfill arrives "now" carrying days-old data, so
+    // Online also requires the data itself to be fresh (30 min bound leaves
+    // 2x margin over the slowest healthy pipeline).
+    const auto arrivalAge =
+        lastArrivalTime_.isValid() ? lastArrivalTime_.secsTo(now) : std::numeric_limits<qint64>::max();
+    const auto dataAge =
+        lastVolumeTime_.isValid() ? lastVolumeTime_.secsTo(now) : std::numeric_limits<qint64>::max();
+    if (arrivalAge <= 900 && dataAge <= 1800) return RadarHealthState::Online;
+    if (dataAge == std::numeric_limits<qint64>::max()) return RadarHealthState::Stale;
+    if (dataAge <= 300) return RadarHealthState::Online;     // <= 5 min
+    if (dataAge <= 900) return RadarHealthState::Stale;      // 5-15 min
     return RadarHealthState::Offline;
 }
 
