@@ -3725,8 +3725,8 @@ void RadarMapCanvas::setVolume3dMode(const bool enabled) {
         // Start from a readable oblique view instead of wherever the last
         // session left the camera.
         volumeOrbitAzimuth_ = 180.0;
-        volumeOrbitElevation_ = 30.0;
-        volumeDistance_ = 380000.0;
+        volumeOrbitElevation_ = 40.0;
+        volumeDistance_ = 420000.0;
         volumeTarget_[0] = 0.0;
         volumeTarget_[1] = 0.0;
         volumeTarget_[2] = 7000.0;
@@ -3904,16 +3904,24 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                         const auto sample = sampleBrickNearest(
                             *brickNow, camera.eye[0] + dir[0] * t, camera.eye[1] + dir[1] * t,
                             camera.eye[2] + dir[2] * t);
-                        if (sample.has_value() && *sample > 0.02F) {
-                            const Rgba color = evaluateTransfer(stops, *sample);
-                            // Smoothstep alpha ramp: weak-echo haze stays faint
-                            // instead of washing out the cores.
-                            float gate = std::clamp((*sample - 0.05F) / 0.20F, 0.0F, 1.0F);
-                            gate = gate * gate * (3.0F - 2.0F * gate) * opacityScale;
-                            r += (1.0F - a) * color.r * gate;
-                            g += (1.0F - a) * color.g * gate;
-                            b += (1.0F - a) * color.b * gate;
-                            a += (1.0F - a) * gate;
+                        if (sample.has_value()) {
+                            // Alpha runs on intensity, color on value: weak
+                            // echo is skipped entirely so hundreds of faint
+                            // gates along a ray cannot accumulate into a solid
+                            // blue wall. Velocity folds around zero (away and
+                            // toward read equally solid).
+                            float intensity = *sample;
+                            if (product == ProductKind::Velocity)
+                                intensity = std::fabs(*sample - 0.5F) * 2.0F;
+                            if (intensity >= 0.25F) {
+                                const Rgba color = evaluateTransfer(stops, *sample);
+                                float gate = std::clamp((intensity - 0.25F) / 0.40F, 0.0F, 1.0F);
+                                gate = gate * gate * (3.0F - 2.0F * gate) * opacityScale;
+                                r += (1.0F - a) * color.r * gate;
+                                g += (1.0F - a) * color.g * gate;
+                                b += (1.0F - a) * color.b * gate;
+                                a += (1.0F - a) * gate;
+                            }
                         }
                         t += stepMeters;
                         ++steps;
@@ -4008,14 +4016,14 @@ void RadarMapCanvas::paintVolumeGrid(QPainter& painter) {
         QPointF a, b;
         if (project(x0, y0, 0.0, &a) && project(x1, y1, 0.0, &b)) painter.drawLine(a, b);
     };
-    painter.setPen(QPen(QColor(92, 112, 122, 110), 1.0));
+    painter.setPen(QPen(QColor(92, 112, 122, 150), 1.0));
     for (int k = -3; k <= 3; ++k) {
         const double line = static_cast<double>(k) * 50000.0;
         segment(line, -150000.0, line, 150000.0);
         segment(-150000.0, line, 150000.0, line);
     }
     // Range rings at 50/100/150 km.
-    painter.setPen(QPen(QColor(140, 165, 178, 140), 1.0));
+    painter.setPen(QPen(QColor(150, 175, 188, 170), 1.0));
     for (const double radius : {50000.0, 100000.0, 150000.0}) {
         QPointF previous;
         bool havePrevious = false;
@@ -4031,16 +4039,29 @@ void RadarMapCanvas::paintVolumeGrid(QPainter& painter) {
             havePrevious = true;
         }
     }
-    // Site marker + north label.
+    // Site marker + height axis + north label.
     QPointF site;
     if (project(0.0, 0.0, 0.0, &site)) {
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(255, 214, 140));
-        painter.drawEllipse(site, 4.0, 4.0);
+        painter.drawEllipse(site, 5.0, 5.0);
         painter.setPen(QColor(255, 214, 140));
         painter.setFont(hudFont(8, QFont::DemiBold));
-        painter.drawText(QRectF(site.x() + 8.0, site.y() - 18.0, 120.0, 18.0),
+        painter.drawText(QRectF(site.x() + 9.0, site.y() - 18.0, 120.0, 18.0),
                          Qt::AlignLeft | Qt::AlignVCenter, selectedRadar_);
+        // Height axis out of the site: the one vertical cue in a pancake
+        // volume (300 km wide, 20 km tall).
+        QPointF top;
+        const double axisTop[3] = {0.0, 0.0, brick_->topMeters};
+        if (projectVolumePoint(camera, axisTop, w, h, &top)) {
+            painter.setPen(QPen(QColor(255, 214, 140, 170), 1.0));
+            painter.drawLine(site, top);
+            painter.setPen(QColor(255, 214, 140, 200));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(QRectF(top.x() + 6.0, top.y() - 16.0, 80.0, 16.0),
+                             Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("%1 km").arg(brick_->topMeters / 1000.0, 0, 'f', 0));
+        }
     }
     QPointF north;
     if (project(0.0, 168000.0, 0.0, &north)) {
@@ -4588,8 +4609,8 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
         const auto resetView = menu.addAction(tr("Reset 3D view"));
         connect(resetView, &QAction::triggered, this, [this] {
             volumeOrbitAzimuth_ = 180.0;
-            volumeOrbitElevation_ = 30.0;
-            volumeDistance_ = 380000.0;
+            volumeOrbitElevation_ = 40.0;
+            volumeDistance_ = 420000.0;
             volumeTarget_[0] = 0.0;
             volumeTarget_[1] = 0.0;
             volumeTarget_[2] = 7000.0;
