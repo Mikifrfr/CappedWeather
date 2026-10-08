@@ -20,6 +20,13 @@ ProcessedVelocity processVelocity(const DecodedChunk& chunk,
                                   const VelocityProcessingOptions options) {
     const auto velocityIndex = static_cast<std::size_t>(ProductKind::Velocity);
     const auto missing = std::numeric_limits<float>::quiet_NaN();
+    const auto rayNyquist = [&](const DecodedRay& ray) {
+        // True per-ray folding interval when the source carries it (ODIM
+        // how/NI); the panel default otherwise (NEXRAD has no per-ray NI).
+        return ray.nyquistMetersPerSecond > 0.0F
+                   ? static_cast<double>(ray.nyquistMetersPerSecond)
+                   : options.nyquistVelocityMetersPerSecond;
+    };
     ProcessedVelocity result(chunk.rays.size());
     for (std::size_t rayIndex = 0; rayIndex < chunk.rays.size(); ++rayIndex) {
         const auto& ray = chunk.rays[rayIndex];
@@ -28,8 +35,8 @@ ProcessedVelocity processVelocity(const DecodedChunk& chunk,
         auto& values = result[rayIndex];
         values.assign(encodedValues.size(), missing);
         double previous = missing;
-        const double interval = options.nyquistVelocityMetersPerSecond * 2.0;
-        const double nyquist = options.nyquistVelocityMetersPerSecond;
+        const double nyquist = rayNyquist(ray);
+        const double interval = nyquist * 2.0;
         for (std::size_t gate = 0; gate < encodedValues.size(); ++gate) {
             const auto native = nativeValue(encodedValues[gate], ray.scaleByProduct.at(velocityIndex),
                                             ray.offsetByProduct.at(velocityIndex));
@@ -79,8 +86,15 @@ ProcessedVelocity processVelocity(const DecodedChunk& chunk,
             auto& current = result[currentIndex];
             const auto& previous = result[previousIndex];
             const auto commonGates = std::min(current.size(), previous.size());
-            const double interval = options.nyquistVelocityMetersPerSecond * 2.0;
-            const double nyquist = options.nyquistVelocityMetersPerSecond;
+            // Same-tilt neighbors share a scan (and NI); prefer the pair's
+            // own interval, panel default only when both rays lack one.
+            const double pairNyquist = chunk.rays[currentIndex].nyquistMetersPerSecond > 0.0F
+                                           ? chunk.rays[currentIndex].nyquistMetersPerSecond
+                                           : (chunk.rays[previousIndex].nyquistMetersPerSecond > 0.0F
+                                                  ? chunk.rays[previousIndex].nyquistMetersPerSecond
+                                                  : options.nyquistVelocityMetersPerSecond);
+            const double interval = pairNyquist * 2.0;
+            const double nyquist = pairNyquist;
             for (std::size_t gate = 0; gate < commonGates; ++gate) {
                 if (!std::isfinite(current[gate]) || !std::isfinite(previous[gate])) continue;
                 // Conditional azimuthal unfold: same Nyquist-gated rule as

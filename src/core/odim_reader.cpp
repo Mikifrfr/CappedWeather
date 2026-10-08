@@ -155,6 +155,9 @@ struct OdimSweep {
     // undetect (below threshold) is tracked separately per gate.
     std::vector<double> values;
     std::vector<char> belowThreshold;
+    // Folding Nyquist (m/s) from the dataset how/NI attribute. 0 when the
+    // writer omits it: rays then fall back to the panel Nyquist downstream.
+    double nyquistMetersPerSecond = 0.0;
 };
 
 // Attribute array reader: ODIM writers store per-ray startazA/stopazA as
@@ -287,6 +290,16 @@ bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) 
                 readAttrDoubleArray(how.id, "startazA", rays, &startAz);
                 readAttrDoubleArray(how.id, "stopazA", rays, &stopAz);
                 haveScalarStart = readAttrDouble(how.id, "startazA", &scalarStart);
+                // Folding Nyquist for the velocity moment on this scan.
+                // Single-PRF C-band scans run as low as ~6 m/s; unfolding
+                // those at a 25 m/s panel default leaves fold boundaries in
+                // the grid, and fold boundaries pass meso gates at close
+                // range (HRGOL: NI 6.1, phantom MESO at 18 km).
+                double ni = 0.0;
+                if (readAttrDouble(how.id, "NI", &ni) && std::isfinite(ni) && ni > 0.0 &&
+                    ni < 100.0) {
+                    sweep->nyquistMetersPerSecond = ni;
+                }
             }
             for (std::size_t ray = 0; ray < rays; ++ray) {
                 double azimuth = 0.0;
@@ -456,6 +469,7 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
                 std::min<std::size_t>(geometry->gateCount, std::numeric_limits<std::uint16_t>::max()));
             decoded.firstGateMeters = firstGateMeters;
             decoded.gateSpacingMeters = spacingMeters;
+            decoded.nyquistMetersPerSecond = static_cast<float>(geometry->nyquistMetersPerSecond);
             if (elevation.hasReflectivity) {
                 const auto& sweep = elevation.reflectivity;
                 const auto gates = std::min(sweep.gateCount, static_cast<std::size_t>(decoded.gateCount));

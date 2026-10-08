@@ -28,6 +28,12 @@ struct DecodedRay {
     std::array<std::uint16_t, kProductCount> gateSpacingByProduct{};
     std::array<float, kProductCount> scaleByProduct{};
     std::array<float, kProductCount> offsetByProduct{};
+    // True folding Nyquist for this ray's velocity moment, when the source
+    // format carries it (ODIM how/NI per dataset). 0 = unknown: unfolding
+    // falls back to the panel Nyquist (correct for NEXRAD Message 31,
+    // which has no per-ray NI). C-band OPERA scans fold as low as ~6 m/s,
+    // so unfolding those at a 25 m/s panel default manufactures couplets.
+    float nyquistMetersPerSecond = 0.0F;
 
     bool has(ProductKind kind) const;
 };

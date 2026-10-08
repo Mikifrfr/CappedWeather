@@ -36,6 +36,12 @@ straight at ODIM polar volumes.
   reflectivity), VRADH (radial velocity). Dual-pol (CC, ZDR, PHI, KDP)
   is announced for 2027+. This maps exactly onto the existing TDWR
   pattern: three base moments, dual-pol auto-disabled.
+- Velocity folds at the scan's own Nyquist (`how/NI` per dataset, e.g.
+  HRGOL 6.1/8.3/16.0 m/s by tilt), not the panel default. Rays carry
+  their dataset NI into `DecodedRay` and unfolding uses it; unfolding
+  C-band single-PRF data at a 25 m/s default left fold boundaries in
+  the grid that passed meso gates at close range (phantom HRGOL
+  cluster, fixed 2026-10-08, zero couplets on the same file after).
 - Rolling 24 h cache only. There is no European equivalent of the AWS
   Level II archive on this bucket (long-term archive "2012–, TBD" is
   API-only). Timeline depth for Europe is limited to the last day.

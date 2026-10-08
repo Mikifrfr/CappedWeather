@@ -885,6 +885,27 @@ void testOdimAzimuthConvention() {
     }
 }
 
+void testOdimNyquistFromHow() {
+    // Regression: OPERA volumes used to unfold at the 25 m/s panel default
+    // while C-band scans fold as low as ~6 m/s (HRGOL NI 6.1/8.3), leaving
+    // fold boundaries in the grid that pass meso gates at close range.
+    // Rays must carry their dataset how/NI so unfolding uses the true fold.
+    if (!odimReaderAvailable()) return;
+    const auto deneu = readFixtureBytes("odim_deneu_dbzh.h5");
+    if (deneu.empty()) {
+        std::cout << "note: deneu fixture missing, skipping NI asserts\n";
+        return;
+    }
+    std::string error;
+    const auto chunk = readOdimPvol(deneu, "deneu", &error);
+    assert(chunk.has_value());
+    // DWD fixture dataset1 how/NI is 31.97 m/s.
+    for (const auto& ray : chunk->rays) {
+        assert(ray.nyquistMetersPerSecond > 0.0F);
+        assert(std::abs(ray.nyquistMetersPerSecond - 31.97F) < 0.05F);
+    }
+}
+
 void testSlantRangeVerticalBeam() {
     const double slant = slantRangeForSurfaceDistance(10000.0, 90.0);
     assert(std::isfinite(slant));
@@ -1134,8 +1155,27 @@ void testCirculationOverUnfoldVeto() {
     assert(!detectCirculations(chunk, grid, 35.333, -97.278, 370.0, noCap).empty());
 }
 
-void testVelocityConditionalUnfold() {
-    // Small gate-to-gate drift must not accumulate into stacked folds;
+void testVelocityRespectsRayNyquist() {
+    // HRGOL-style fold boundary at panel Nyquist 25: raw -5.9 / +5.9 passes
+    // through unfolded (delta 11.8: a phantom meso gate at close range).
+    // With the ray's true NI 6.1 the same pair unfolds to one interval.
+    DecodedRay ray;
+    ray.azimuthDegrees = 0.0F;
+    const auto index = static_cast<std::size_t>(ProductKind::Velocity);
+    ray.fields.at(index) = {117, 141};  // (-5.9, +5.9) at scale 2 / offset 129
+    ray.scaleByProduct.at(index) = 2.0F;
+    ray.offsetByProduct.at(index) = 129.0F;
+    DecodedChunk chunk{"HRGOL", {ray}, 1};
+    const auto folded =
+        processVelocity(chunk, {VelocityProcessingMode::Dealiased, 25.0, 0.0, 0.0, 90.0});
+    assert(std::abs(folded[0][0] - folded[0][1]) > 10.0);  // no unfold at NI 25
+    chunk.rays.front().nyquistMetersPerSecond = 6.1F;  // ODIM how/NI
+    const auto unfolded =
+        processVelocity(chunk, {VelocityProcessingMode::Dealiased, 25.0, 0.0, 0.0, 90.0});
+    assert(std::abs(unfolded[0][0] - unfolded[0][1]) < 1.0);  // one interval
+}
+
+void testVelocityConditionalUnfold() {    // Small gate-to-gate drift must not accumulate into stacked folds;
     // true folds (jump > Nyquist) still unfold; over-physical unfolds NaN.
     DecodedRay ray;
     ray.azimuthDegrees = 0.0F;
@@ -1671,6 +1711,7 @@ int main() {
     testGlmReaderBuildContract();
     testOdimReader();
     testOdimAzimuthConvention();
+    testOdimNyquistFromHow();
     testOdimParallelDecode();
     testRadarLightningFusion();
     testRadarLightningFusionSplitCut();
@@ -1687,6 +1728,7 @@ int main() {
     testCirculationDealiasAndWeakVeto();
     testCirculationOverUnfoldVeto();
     testVelocityConditionalUnfold();
+    testVelocityRespectsRayNyquist();
     testCirculationSameSign();
     testCirculationSingleTiltTvsOptIn();
     testShearGridFindsCouplet();
