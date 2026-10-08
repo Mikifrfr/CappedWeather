@@ -17,7 +17,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] Card keyboard focus and full font-scale chrome. Map HUD scales with the text preference; dock titles, badges, and tabs are still theme-pinned.
 
 ### Research (explicitly not next)
-- [ ] GPU volume rendering of live Level II.
+- [ ] GPU volume rendering of live Level II. Design in `docs/gpu-volume-rendering.md` (shared VolumeBrick, GL raymarcher plus CPU twin). Not started.
 - [ ] Storm-scale warn-on-forecast nowcasting. Motion extrapolation (+10/+20/+30 min) is done; ML needs infra plus labeled archives.
 - [ ] Level III / national mosaic as optional context. Level II stays first.
 - [ ] Broadcast / layout export packs. Out of scope unless product direction changes.

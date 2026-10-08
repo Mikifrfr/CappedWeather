@@ -13,6 +13,7 @@
 #include "core/circulation_detector.hpp"
 #include "core/shear_grid.hpp"
 #include "core/storm_tracker.hpp"
+#include "core/volume_brick.hpp"
 #include "core/volume_spill.hpp"
 #include "core/derived_products.hpp"
 
@@ -1292,6 +1293,79 @@ void testDecodedRayLegacyGeometryMaxGates() {
     assert(decoded.rays.front().gateCount == 5);
 }
 
+void testVolumeBrick() {
+    // One ray due east, low tilt, a single 50 dBZ gate in a sea of missing.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    DecodedRay ray;
+    ray.azimuthDegrees = 90.0F;
+    ray.elevationDegrees = 0.5F;
+    ray.elevationNumber = 1;
+    const auto pi = static_cast<std::size_t>(ProductKind::Reflectivity);
+    ray.fields.at(pi).assign(64, 0); // 0 encodes missing
+    ray.fields.at(pi).at(20) = static_cast<std::uint16_t>(50.0 * 2.0 + 66.0);
+    ray.firstGateByProduct.at(pi) = 0;
+    ray.gateSpacingByProduct.at(pi) = 1000;
+    ray.scaleByProduct.at(pi) = 2.0F;
+    ray.offsetByProduct.at(pi) = 66.0F;
+    chunk.rays.push_back(ray);
+
+    VolumeBrickDims dims;
+    dims.nx = 64;
+    dims.ny = 64;
+    dims.nz = 16;
+    const VolumeBrick brick = buildVolumeBrick(chunk, ProductKind::Reflectivity, dims);
+
+    // The hot gate lands on the east axis at the beam height the derived
+    // products would report for the same gate.
+    const double slant = gateCenterSlantRange(0, 1000, 20);
+    const EnuPoint expected = gateEnu(90.0, slant, 0.5);
+    assert(expected.x > 0.0);
+    assert(std::fabs(expected.y) < 1.0);
+    const auto sample = sampleBrickNearest(brick, expected.x, expected.y, expected.z);
+    assert(sample.has_value());
+    const double want = (50.0 - (-32.0)) / (95.0 - (-32.0)); // REF range clamp
+    assert(std::fabs(static_cast<double>(*sample) - want) < 0.01);
+
+    // Exactly one voxel lit; everything else is honest empty.
+    std::size_t lit = 0;
+    for (const auto flag : brick.present) lit += flag;
+    assert(lit == 1);
+    assert(!sampleBrickNearest(brick, -100000.0, -100000.0, 10000.0).has_value());
+    assert(!sampleBrickNearest(brick, 500000.0, 0.0, 0.0).has_value()); // outside box
+
+    // Same gate higher tilt sits higher (monotonic beam height).
+    const EnuPoint hi = gateEnu(90.0, slant, 5.0);
+    assert(hi.z > expected.z);
+
+    // All-missing rays leave a dark brick.
+    DecodedChunk empty = chunk;
+    std::fill(empty.rays.front().fields.at(pi).begin(), empty.rays.front().fields.at(pi).end(),
+              static_cast<std::uint16_t>(0));
+    const VolumeBrick dark = buildVolumeBrick(empty, ProductKind::Reflectivity, dims);
+    lit = 0;
+    for (const auto flag : dark.present) lit += flag;
+    assert(lit == 0);
+
+    // Transfer function: midpoint lerps, ends clamp, empty is transparent.
+    const std::vector<RgbaStop> stops = {{0.0F, 0.0F, 0.0F, 0.0F, 0.0F},
+                                         {1.0F, 1.0F, 1.0F, 1.0F, 1.0F}};
+    const Rgba mid = evaluateTransfer(stops, 0.5F);
+    assert(std::fabs(mid.r - 0.5F) < 1e-5 && std::fabs(mid.a - 0.5F) < 1e-5);
+    assert(evaluateTransfer(stops, -1.0F).a == 0.0F);
+    assert(evaluateTransfer(stops, 2.0F).a == 1.0F);
+    assert(evaluateTransfer({}, 0.5F).a == 0.0F);
+
+    // Ray-box: from the south looking north enters then exits; away misses.
+    const double eye[3] = {0.0, -300000.0, 5000.0};
+    const double toward[3] = {0.0, 1.0, 0.0};
+    const auto hit = intersectVolumeBox(brick, eye, toward);
+    assert(hit.has_value());
+    assert(hit->tEnter > 0.0 && hit->tExit > hit->tEnter);
+    const double away[3] = {0.0, -1.0, 0.0};
+    assert(!intersectVolumeBox(brick, eye, away).has_value());
+}
+
 int main() {
     testProducts();
     testDerivedProducts();
@@ -1299,6 +1373,7 @@ int main() {
     testDerivedProductsRequireVolumeDepth();
     testDerivedSupportGate();
     testStormTracker();
+    testVolumeBrick();
     testVolumeSpillRoundTrip();
     testDerivedProductsSupportNegativeFirstGate();
     testCatalog();

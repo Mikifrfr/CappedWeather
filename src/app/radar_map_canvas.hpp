@@ -10,6 +10,7 @@
 #include "core/storm_tracker.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/placefile.hpp"
+#include "core/volume_brick.hpp"
 
 #include <QColor>
 #include <QDateTime>
@@ -37,6 +38,7 @@ class QNativeGestureEvent;
 class QPaintEvent;
 class QPainter;
 class QShowEvent;
+class QResizeEvent;
 class QTimer;
 class QWheelEvent;
 class QContextMenuEvent;
@@ -194,6 +196,11 @@ public:
     void setMeasureMode(bool enabled);
     void setCrossSectionMode(bool enabled);
     bool crossSectionMode() const { return crossSectionMode_; }
+    // M1 3D preview (CPU backend): any panel flips between the 2D map and a
+    // ray-marched view of its own current volume/product. The RHI backend
+    // lands later behind the same toggle; the brick and camera are shared.
+    void setVolume3dMode(bool enabled);
+    [[nodiscard]] bool volume3dMode() const { return volume3d_; }
     void setVolumeQuality(int decodedChunks, int totalChunks, int failedChunks,
                           std::size_t rejectedMessages = 0, std::size_t rejectedBlocks = 0);
     void setLoading(bool loading, const QString& message = {});
@@ -268,6 +275,9 @@ signals:
     // can stay in sync with the canvas.
     void measureModeToggled(bool enabled);
     void crossSectionModeToggled(bool enabled);
+    // Emitted when the context menu flips the 3D preview so menus/toolbars
+    // can stay in sync with the canvas.
+    void volume3dModeToggled(bool enabled);
     // Emitted (debounced, same path as the local probe) when the cursor
     // samples a geographic position; MainWindow fans it out to the other
     // panels for the linked readout. probeHidden clears those readouts.
@@ -284,6 +294,7 @@ protected:
     void enterEvent(QEnterEvent* event) override;
     void leaveEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
 
@@ -340,6 +351,11 @@ private:
     void paintStationCard(QPainter& painter);
     void paintMeasurement(QPainter& painter);
     void paintLoadingChip(QPainter& painter);
+    // M1 3D preview: CPU raymarch of the panel's VolumeBrick with an orbit
+    // camera. Reuses the overlay worker pattern (request ids abort stale
+    // renders) so orbiting never stacks up full-frame marches.
+    void rebuildVolumeRender();
+    void paintVolume3d(QPainter& painter);
     QString elidedStatusText() const;
     void invalidateStatusText();
     void updateProbe(const QPointF& point);
@@ -495,6 +511,22 @@ private:
     double proximityRadiusKm_ = 200.0;
     PaletteKind palette_ = PaletteKind::Capped;
     QVector<PaletteStop> customPalette_;
+    // M1 3D preview state: orbit camera plus the panel's brick and its last
+    // CPU render. Brick rebuilds only when chunk/product change; camera moves
+    // re-march the cached brick. Same request-id abort pattern as the echo
+    // overlay so fast orbits cancel stale marches instead of queueing them.
+    bool volume3d_ = false;
+    bool volumeDragging_ = false;
+    std::shared_ptr<const VolumeBrick> brick_;
+    std::shared_ptr<const DecodedChunk> brickChunk_;
+    ProductKind brickProduct_ = ProductKind::Reflectivity;
+    QImage volumeImage_;
+    QSize volumeImageLogicalSize_;
+    double volumeOrbitAzimuth_ = 180.0; // degrees, 180 = looking north from the south
+    double volumeOrbitElevation_ = 24.0; // degrees above the horizon
+    double volumeDistance_ = 420000.0; // meters, eye distance from brick center
+    double volumeRenderMs_ = 0.0;
+    std::atomic<int> volumeRequestId_{0};
     int radarOpacity_ = 80;
     int warningOpacity_ = 90;
     bool warningsOnTop_ = true;

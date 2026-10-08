@@ -27,12 +27,14 @@
 #include <QPinchGesture>
 #include <QNativeGestureEvent>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QThreadPool>
 #include <QToolTip>
 #include <QStandardPaths>
 #include <QSettings>
 #include <QSet>
 #include <QShowEvent>
+#include <QResizeEvent>
 #include <QtMath>
 
 #include <algorithm>
@@ -736,6 +738,7 @@ void RadarMapCanvas::setProduct(const ProductKind product) {
     rebuildProbeIndex();
     invalidateOverlay(true);
     refreshScanDiagnostics();
+    if (volume3d_) rebuildVolumeRender();
     update();
 }
 
@@ -761,6 +764,7 @@ void RadarMapCanvas::setDecodedChunk(std::shared_ptr<const DecodedChunk> chunk, 
     rebuildProbeIndex();
     refreshScanDiagnostics();
     setLoading(false);
+    if (volume3d_) rebuildVolumeRender();
     update();
 }
 
@@ -1055,6 +1059,7 @@ void RadarMapCanvas::setProximityFilter(std::optional<QPointF> anchor, double ra
 void RadarMapCanvas::setPalette(const PaletteKind palette) {
     palette_ = palette;
     invalidateOverlay();
+    if (volume3d_) rebuildVolumeRender();
     update();
 }
 
@@ -1064,11 +1069,14 @@ void RadarMapCanvas::setCustomPalette(QVector<PaletteStop> stops) {
     });
     customPalette_ = std::move(stops);
     invalidateOverlay();
+    if (volume3d_) rebuildVolumeRender();
+    update();
 }
 
 void RadarMapCanvas::setRadarOpacity(const int percent) {
     radarOpacity_ = std::clamp(percent, 10, 100);
     invalidateOverlay();
+    if (volume3d_) rebuildVolumeRender();
     update();
 }
 
@@ -3710,8 +3718,245 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
 
 // TODO: future extraction point — move radar sweep rasterization out of the
 // canvas into a RadarRasterizer (offscreen tile + sweep compositor) without moving code yet.
+void RadarMapCanvas::setVolume3dMode(const bool enabled) {
+    if (volume3d_ == enabled) return;
+    volume3d_ = enabled;
+    if (volume3d_) {
+        // Start from a readable oblique view instead of wherever the last
+        // session left the camera.
+        volumeOrbitAzimuth_ = 180.0;
+        volumeOrbitElevation_ = 24.0;
+        volumeDistance_ = 420000.0;
+        rebuildVolumeRender();
+    }
+    update();
+    emit volume3dModeToggled(volume3d_);
+}
+
+namespace {
+
+// Orbit camera around the brick center. Kept file-local and plain-math so
+// the future RHI backend can mirror it exactly (same eye, same rays).
+struct VolumeCamera {
+    double eye[3] = {0.0, 0.0, 0.0};
+    double forward[3] = {0.0, 0.0, 0.0};
+    double right[3] = {0.0, 0.0, 0.0};
+    double up[3] = {0.0, 0.0, 0.0};
+    double focal = 1.0;
+};
+
+VolumeCamera volumeCameraFor(const VolumeBrick& brick, const double orbitAzimuthDeg,
+                             const double orbitElevationDeg, const double distanceMeters) {
+    VolumeCamera camera;
+    double target[3] = {0.0, 0.0, brick.topMeters * 0.35};
+    const double azimuth = orbitAzimuthDeg * kPi / 180.0;
+    const double elevation = orbitElevationDeg * kPi / 180.0;
+    const double cosEl = std::cos(elevation);
+    camera.eye[0] = target[0] + distanceMeters * cosEl * std::sin(azimuth);
+    camera.eye[1] = target[1] + distanceMeters * cosEl * std::cos(azimuth);
+    camera.eye[2] = target[2] + distanceMeters * std::sin(elevation);
+    double fwd[3] = {target[0] - camera.eye[0], target[1] - camera.eye[1],
+                     target[2] - camera.eye[2]};
+    const double fwdLen = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+    for (int axis = 0; axis < 3; ++axis) camera.forward[axis] = fwd[axis] / fwdLen;
+    // right = normalize(cross(forward, worldUp)); degenerate only when looking
+    // straight down, which the elevation clamp never allows.
+    double right[3] = {-camera.forward[1], camera.forward[0], 0.0};
+    double rightLen = std::sqrt(right[0] * right[0] + right[1] * right[1]);
+    if (rightLen < 1e-9) {
+        right[0] = 1.0;
+        right[1] = 0.0;
+        rightLen = 1.0;
+    }
+    for (int axis = 0; axis < 3; ++axis) camera.right[axis] = right[axis] / rightLen;
+    camera.up[0] = camera.right[1] * camera.forward[2] - camera.right[2] * camera.forward[1];
+    camera.up[1] = camera.right[2] * camera.forward[0] - camera.right[0] * camera.forward[2];
+    camera.up[2] = camera.right[0] * camera.forward[1] - camera.right[1] * camera.forward[0];
+    camera.focal = 1.0 / std::tan(22.5 * kPi / 180.0); // 45-degree vertical FOV
+    return camera;
+}
+
+} // namespace
+
+void RadarMapCanvas::rebuildVolumeRender() {
+    if (!volume3d_ || width() <= 0 || height() <= 0) return;
+    const auto requestId = volumeRequestId_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto chunk = chunk_;
+    const auto product = product_;
+    const auto palette = palette_;
+    const auto customPalette = customPalette_;
+    const auto opacity = radarOpacity_;
+    const auto brick = brick_;
+    const auto brickChunk = brickChunk_;
+    const auto brickProduct = brickProduct_;
+    const QSize logicalSize = size();
+    const auto orbitAzimuth = volumeOrbitAzimuth_;
+    const auto orbitElevation = volumeOrbitElevation_;
+    const auto orbitDistance = volumeDistance_;
+    const QPointer<RadarMapCanvas> guard(this);
+    QThreadPool::globalInstance()->start(
+        [guard, requestId, chunk, product, palette, customPalette, opacity, brick, brickChunk,
+         brickProduct, logicalSize, orbitAzimuth, orbitElevation, orbitDistance] {
+            auto stale = [&] {
+                return !guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed);
+            };
+            const auto publishEmpty = [&] {
+                if (stale()) return;
+                QMetaObject::invokeMethod(guard, [guard, requestId, chunk, product] {
+                    if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
+                        return;
+                    guard->brick_.reset();
+                    guard->brickChunk_ = chunk;
+                    guard->brickProduct_ = product;
+                    guard->volumeImage_ = QImage();
+                    guard->update();
+                }, Qt::QueuedConnection);
+            };
+            // Derived grids (Echo Tops, VIL) are 2D products: no volume to march.
+            if (isDerivedProduct(product) || !chunk || chunk->rays.empty()) {
+                publishEmpty();
+                return;
+            }
+            std::shared_ptr<const VolumeBrick> brickNow = brick;
+            if (!brickNow || brickChunk != chunk || brickProduct != product) {
+                VolumeBrick fresh = buildVolumeBrick(*chunk, product);
+                brickNow = std::make_shared<const VolumeBrick>(std::move(fresh));
+            }
+            if (stale()) return;
+            // Transfer stops sampled from the live palette so 2D and 3D agree
+            // on color. Alpha stays a fixed ramp here (the RHI shader mirrors
+            // it) scaled by the echo opacity.
+            std::vector<RgbaStop> stops;
+            stops.reserve(48);
+            for (int stop = 0; stop < 48; ++stop) {
+                const double normalized = static_cast<double>(stop) / 47.0;
+                const QColor color = productColor(product, normalized, palette, 100, customPalette);
+                stops.push_back({static_cast<float>(normalized), static_cast<float>(color.redF()),
+                                 static_cast<float>(color.greenF()),
+                                 static_cast<float>(color.blueF()), 1.0F});
+            }
+            const int renderWidth = std::max(1, logicalSize.width() / 2);
+            const int renderHeight = std::max(1, logicalSize.height() / 2);
+            QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
+            image.fill(Qt::transparent);
+            const VolumeCamera camera = volumeCameraFor(*brickNow, orbitAzimuth, orbitElevation,
+                                                        orbitDistance);
+            const double voxelMeters =
+                std::min({2.0 * brickNow->halfExtentMeters / brickNow->nx,
+                          2.0 * brickNow->halfExtentMeters / brickNow->ny,
+                          brickNow->topMeters / brickNow->nz});
+            const double stepMeters = voxelMeters * 1.25;
+            const double aspect = static_cast<double>(renderWidth) / renderHeight;
+            const float opacityScale = static_cast<float>(opacity) / 100.0F;
+            QElapsedTimer timer;
+            timer.start();
+            for (int y = 0; y < renderHeight; ++y) {
+                if ((y & 15) == 0 && stale()) return;
+                auto* scan = reinterpret_cast<QRgb*>(image.scanLine(y));
+                for (int x = 0; x < renderWidth; ++x) {
+                    const double px = ((static_cast<double>(x) + 0.5) / renderWidth * 2.0 - 1.0) * aspect;
+                    const double py = 1.0 - ((static_cast<double>(y) + 0.5) / renderHeight * 2.0 - 1.0);
+                    double dir[3] = {
+                        camera.forward[0] * camera.focal + camera.right[0] * px + camera.up[0] * py,
+                        camera.forward[1] * camera.focal + camera.right[1] * px + camera.up[1] * py,
+                        camera.forward[2] * camera.focal + camera.right[2] * px + camera.up[2] * py,
+                    };
+                    const double dirLen = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                    for (int axis = 0; axis < 3; ++axis) dir[axis] /= dirLen;
+                    const auto hit = intersectVolumeBox(*brickNow, camera.eye, dir);
+                    if (!hit.has_value() || hit->tExit <= 0.0) continue;
+                    double t = std::max(hit->tEnter, 0.0);
+                    float r = 0.0F, g = 0.0F, b = 0.0F, a = 0.0F;
+                    int steps = 0;
+                    while (t < hit->tExit && a < 0.98F && steps < 400) {
+                        const auto sample = sampleBrickNearest(
+                            *brickNow, camera.eye[0] + dir[0] * t, camera.eye[1] + dir[1] * t,
+                            camera.eye[2] + dir[2] * t);
+                        if (sample.has_value() && *sample > 0.02F) {
+                            const Rgba color = evaluateTransfer(stops, *sample);
+                            float gate = (*sample - 0.03F) / 0.25F;
+                            gate = std::clamp(gate, 0.0F, 1.0F) * opacityScale;
+                            r += (1.0F - a) * color.r * gate;
+                            g += (1.0F - a) * color.g * gate;
+                            b += (1.0F - a) * color.b * gate;
+                            a += (1.0F - a) * gate;
+                        }
+                        t += stepMeters;
+                        ++steps;
+                    }
+                    if (a <= 0.0F) continue;
+                    scan[x] = qRgba(static_cast<int>(std::clamp(r, 0.0F, 1.0F) * 255.0F),
+                                    static_cast<int>(std::clamp(g, 0.0F, 1.0F) * 255.0F),
+                                    static_cast<int>(std::clamp(b, 0.0F, 1.0F) * 255.0F),
+                                    static_cast<int>(std::clamp(a, 0.0F, 1.0F) * 255.0F));
+                }
+            }
+            const double renderMs = static_cast<double>(timer.elapsed());
+            if (stale()) return;
+            QMetaObject::invokeMethod(guard, [guard, requestId, brickNow,
+                                             image = std::move(image), renderMs, logicalSize] {
+                if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
+                    return;
+                guard->brick_ = brickNow;
+                guard->brickChunk_ = guard->chunk_;
+                guard->brickProduct_ = guard->product_;
+                guard->volumeImage_ = image;
+                guard->volumeImageLogicalSize_ = logicalSize;
+                guard->volumeRenderMs_ = renderMs;
+                guard->update();
+            }, Qt::QueuedConnection);
+        });
+}
+
+void RadarMapCanvas::paintVolume3d(QPainter& painter) {
+    painter.fillRect(rect(), QColor(8, 13, 16));
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    if (!volumeImage_.isNull()) {
+        QSize fitted = volumeImage_.size();
+        fitted.scale(size(), Qt::KeepAspectRatio);
+        const QRect target((width() - fitted.width()) / 2, (height() - fitted.height()) / 2,
+                           fitted.width(), fitted.height());
+        painter.drawImage(target, volumeImage_);
+    } else {
+        painter.setPen(QColor(200, 215, 220));
+        painter.setFont(hudFont(10));
+        QString message = tr("Building 3D volume...");
+        if (!chunk_ || chunk_->rays.empty())
+            message = tr("No volume loaded");
+        else if (isDerivedProduct(product_))
+            message = tr("3D needs a base product (REF, VEL, ...)");
+        painter.drawText(rect(), Qt::AlignCenter, message);
+    }
+    const auto& descriptor = productDescriptor(product_);
+    const QString shortName =
+        QString::fromUtf8(descriptor.shortName.data(),
+                          static_cast<int>(descriptor.shortName.size()));
+    painter.setFont(hudFont(8, QFont::DemiBold));
+    painter.setPen(QColor(232, 238, 240));
+    painter.setBrush(QColor(8, 15, 19, 205));
+    const QRectF chip(12.0, 10.0, 330.0, 22.0);
+    painter.drawRoundedRect(chip, 4, 4);
+    const QString label =
+        QStringLiteral("3D preview (CPU)  %1 %2  %3 ms")
+            .arg(selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_)
+            .arg(shortName)
+            .arg(static_cast<int>(volumeRenderMs_));
+    painter.drawText(chip.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
+                     painter.fontMetrics().elidedText(label, Qt::ElideRight,
+                                                      static_cast<int>(chip.width()) - 16));
+    painter.setFont(hudFont(8));
+    painter.setPen(QColor(160, 175, 182));
+    painter.drawText(QRectF(12.0, height() - 30.0, width() - 24.0, 20.0),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     tr("Drag orbits - wheel zooms - right-click exits 3D"));
+}
+
 void RadarMapCanvas::paintEvent(QPaintEvent*) {
     QPainter painter(this);
+    if (volume3d_) {
+        paintVolume3d(painter);
+        return;
+    }
     painter.fillRect(rect(), QColor(18, 24, 28));
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
@@ -3856,6 +4101,19 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
 
 void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
     emit activated();
+    if (volume3d_) {
+        // 3D preview owns the mouse: left-drag orbits, everything else falls
+        // through to the context menu. Map tools stay parked while in 3D.
+        if (event->button() == Qt::LeftButton) {
+            volumeDragging_ = true;
+            lastMousePosition_ = event->pos();
+            setCursor(Qt::ClosedHandCursor);
+            event->accept();
+            return;
+        }
+        QWidget::mousePressEvent(event);
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position())) {
             const QRectF closeRect(pinnedInfoCardRect_.right() - 34.0,
@@ -3897,6 +4155,25 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
 }
 
 void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
+    if (volume3d_) {
+        if (volumeDragging_) {
+            const auto delta = event->pos() - lastMousePosition_;
+            if (!delta.isNull()) {
+                volumeOrbitAzimuth_ += static_cast<double>(delta.x()) * 0.3;
+                if (volumeOrbitAzimuth_ >= 360.0) volumeOrbitAzimuth_ -= 360.0;
+                if (volumeOrbitAzimuth_ < 0.0) volumeOrbitAzimuth_ += 360.0;
+                volumeOrbitElevation_ =
+                    std::clamp(volumeOrbitElevation_ - static_cast<double>(delta.y()) * 0.2,
+                               4.0, 85.0);
+                lastMousePosition_ = event->pos();
+                rebuildVolumeRender(); // stale marches abort by request id
+            }
+            event->accept();
+            return;
+        }
+        event->accept();
+        return;
+    }
     if (draggingPinnedInfoCard_) {
         pinnedInfoCardPosition_ = event->position() - pinnedInfoDragOffset_;
         pinnedInfoCardPosition_.setX(std::clamp(
@@ -3950,6 +4227,16 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
+    if (volume3d_) {
+        if (event->button() == Qt::LeftButton && volumeDragging_) {
+            volumeDragging_ = false;
+            setCursor(Qt::ArrowCursor);
+            event->accept();
+            return;
+        }
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
     if (event->button() == Qt::LeftButton && draggingPinnedInfoCard_) {
         draggingPinnedInfoCard_ = false;
         setCursor((measureMode_ || crossSectionMode_) ? Qt::CrossCursor : Qt::ArrowCursor);
@@ -4048,6 +4335,23 @@ bool RadarMapCanvas::handleNativeGestureEvent(QNativeGestureEvent* gesture) {
 }
 
 void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
+    if (volume3d_) {
+        // Dolly the orbit camera. Same fractional-delta normalization as the
+        // map zoom so precision trackpads work here too.
+        const auto angleDelta = static_cast<double>(event->angleDelta().y());
+        const auto pixelDelta = static_cast<double>(event->pixelDelta().y());
+        double steps = angleDelta / 120.0;
+        if (steps == 0.0) {
+            if (pixelDelta == 0.0) return;
+            steps = pixelDelta / 40.0;
+        }
+        const auto delta = std::clamp(steps, -4.0, 4.0);
+        if (delta == 0.0) return;
+        volumeDistance_ = std::clamp(volumeDistance_ * std::pow(1.12, -delta), 60000.0, 1200000.0);
+        rebuildVolumeRender();
+        event->accept();
+        return;
+    }
     if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position()) &&
         pinnedInfoContentHeight_ > pinnedInfoBodyRect_.height()) {
         const auto maximumScroll = static_cast<double>(std::max(
@@ -4144,7 +4448,29 @@ void RadarMapCanvas::showEvent(QShowEvent* event) {
     update();
 }
 
+void RadarMapCanvas::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    // The 3D preview marches at half the panel size, so a resize invalidates
+    // the cached image. 2D overlays handle resizes through their own caches.
+    if (volume3d_) rebuildVolumeRender();
+}
+
 void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
+    if (volume3d_) {
+        QMenu menu(this);
+        const auto resetView = menu.addAction(tr("Reset 3D view"));
+        connect(resetView, &QAction::triggered, this, [this] {
+            volumeOrbitAzimuth_ = 180.0;
+            volumeOrbitElevation_ = 24.0;
+            volumeDistance_ = 420000.0;
+            rebuildVolumeRender();
+        });
+        const auto backTo2d = menu.addAction(tr("Back to 2D map"));
+        connect(backTo2d, &QAction::triggered, this, [this] { setVolume3dMode(false); });
+        menu.exec(event->globalPos());
+        event->accept();
+        return;
+    }
     // Translate the right-click into a canvas-space point and build a menu
     // tailored to whatever the cursor is over. Right-click on a station mark
     // offers a "Select this radar" path; right-click on the map offers
@@ -4212,6 +4538,12 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     }
 
     menu.addSeparator();
+    const auto volume3dAction = menu.addAction(tr("3D volume preview (CPU)"));
+    volume3dAction->setCheckable(true);
+    volume3dAction->setChecked(false);
+    connect(volume3dAction, &QAction::toggled, this, [this](bool enabled) {
+        setVolume3dMode(enabled);
+    });
     const auto measureAction = menu.addAction(tr("Measure (two-click)"));
     measureAction->setCheckable(true);
     measureAction->setChecked(measureMode_);
@@ -4293,6 +4625,11 @@ void RadarMapCanvas::clearViewHistory() {
 
 void RadarMapCanvas::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
+        if (volume3d_ && pinnedInfo_.isEmpty() && !measureMode_ && !crossSectionMode_) {
+            setVolume3dMode(false);
+            event->accept();
+            return;
+        }
         if (!pinnedInfo_.isEmpty()) {
             clearPinnedOverlay();
             event->accept();

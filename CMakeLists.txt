@@ -60,6 +60,7 @@ add_library(cappedweather_core STATIC
     src/core/glm_l2_reader.cpp
     src/core/radar_lightning_fusion.cpp
     src/core/storm_tracker.cpp
+    src/core/volume_brick.cpp
     src/core/volume_spill.cpp
 )
 
