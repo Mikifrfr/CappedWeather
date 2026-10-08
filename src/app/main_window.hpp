@@ -97,7 +97,7 @@ private slots:
     void chunkDecoded(const QString& radarId, const QString& volumeId, const QString& key,
                       std::shared_ptr<DecodedChunk> decoded, const QDateTime& receivedAt);
     void volumeReady(const QString& radarId, const QString& volumeId, int chunkCount,
-                     int failedChunks, const QDateTime& receivedAt);
+                     int failedChunks, const QDateTime& receivedAt, bool live = true);
     void showFrame(int index);
     void advanceFrame();
 
@@ -116,7 +116,7 @@ private:
                             std::shared_ptr<DecodedChunk> decoded);
     void finalizeVolumeReady(const QString& radarId, const QString& volumeId, int chunkCount,
                              int failedChunks, const QDateTime& receivedAt,
-                             std::shared_ptr<DecodedChunk> volume);
+                             std::shared_ptr<DecodedChunk> volume, bool live = true);
     // Background derived-product swap: replaces a published base frame's
     // chunk once ET18/VIL finish off the critical path.
     void swapDerivedVolume(const QString& radarId, const QString& volumeId,
@@ -307,7 +307,8 @@ private:
     QLabel* healthLabel_ = nullptr;
     QTimer* healthTimer_ = nullptr;
     RadarHealthState radarHealthState_ = RadarHealthState::Unknown;
-    QDateTime lastVolumeTime_;
+    QDateTime lastVolumeTime_;  // data time of the newest live volume seen
+    QDateTime lastArrivalTime_; // wall-clock arrival of that volume
     NexradSource* source_ = nullptr;
     OperaSource* operaSource_ = nullptr;
     GlmSource* glmSource_ = nullptr;

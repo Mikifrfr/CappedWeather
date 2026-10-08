@@ -559,13 +559,21 @@ MainWindow::MainWindow(QWidget* parent)
     connect(source_, &NexradSource::volumeStarted, this, &MainWindow::volumeStarted);
     connect(source_, &NexradSource::volumeProgress, this, &MainWindow::volumeProgress);
     connect(source_, &NexradSource::chunkDecoded, this, &MainWindow::chunkDecoded);
-    connect(source_, &NexradSource::volumeReady, this, &MainWindow::volumeReady);
+    connect(source_, &NexradSource::volumeReady, this,
+            [this](const QString& radarId, const QString& volumeId, int chunkCount,
+                   int failedChunks, const QDateTime& receivedAt) {
+                volumeReady(radarId, volumeId, chunkCount, failedChunks, receivedAt, true);
+            });
     connect(operaSource_, &OperaSource::statusChanged, this, &MainWindow::sourceStatusChanged);
     connect(operaSource_, &OperaSource::requestFailed, this, &MainWindow::sourceFailed);
     connect(operaSource_, &OperaSource::volumeStarted, this, &MainWindow::volumeStarted);
     connect(operaSource_, &OperaSource::volumeProgress, this, &MainWindow::volumeProgress);
     connect(operaSource_, &OperaSource::chunkDecoded, this, &MainWindow::chunkDecoded);
-    connect(operaSource_, &OperaSource::volumeReady, this, &MainWindow::volumeReady);
+    connect(operaSource_, &OperaSource::volumeReady, this,
+            [this](const QString& radarId, const QString& volumeId, int chunkCount,
+                   int failedChunks, const QDateTime& receivedAt) {
+                volumeReady(radarId, volumeId, chunkCount, failedChunks, receivedAt, true);
+            });
     connect(archiveSource_, &ArchiveSource::statusChanged, this, &MainWindow::sourceStatusChanged);
     connect(archiveSource_, &ArchiveSource::requestFailed, this,
             [this](const QString& radarId, const QString& message) {
@@ -577,7 +585,13 @@ MainWindow::MainWindow(QWidget* parent)
     connect(archiveSource_, &ArchiveSource::volumeStarted, this, &MainWindow::volumeStarted);
     connect(archiveSource_, &ArchiveSource::volumeProgress, this, &MainWindow::volumeProgress);
     connect(archiveSource_, &ArchiveSource::chunkDecoded, this, &MainWindow::chunkDecoded);
-    connect(archiveSource_, &ArchiveSource::volumeReady, this, &MainWindow::volumeReady);
+    connect(archiveSource_, &ArchiveSource::volumeReady, this,
+            [this](const QString& radarId, const QString& volumeId, int chunkCount,
+                   int failedChunks, const QDateTime& receivedAt) {
+                // Case loads assemble through the same pipeline but must not
+                // move the live health clocks: their timestamps are history.
+                volumeReady(radarId, volumeId, chunkCount, failedChunks, receivedAt, false);
+            });
     connect(overlaySource_, &WeatherOverlaySource::overlaysReady, this,
             [this](QVector<WeatherWarning> warnings, QVector<StormReport> reports, const QDateTime&) {
                 for (auto* panel : maps_) panel->setWeatherOverlays(warnings, reports);
@@ -2052,6 +2066,7 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     const auto existed = radarSessions_.contains(radarId);
     const auto session = sessionFor(radarId);
     lastVolumeTime_ = {};
+    lastArrivalTime_ = {};
     consecutiveFailures_ = 0;
     updateOfflineBanner();
     setRadarHealth(RadarHealthState::Stale, QStringLiteral("Loading %1...").arg(radarId));
@@ -2270,7 +2285,7 @@ void MainWindow::chunkDecoded(const QString& radarId, const QString& volumeId, c
 }
 
 void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, const int chunkCount,
-                             const int failedChunks, const QDateTime& receivedAt) {
+                             const int failedChunks, const QDateTime& receivedAt, const bool live) {
     const auto session = sessionFor(radarId, false);
     if (!session || volumeId != session->pendingVolumeId) return;
     session->pendingVolumeNetworkReady = true;
@@ -2297,7 +2312,7 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
     double radarElevationMeters = 0.0;
     const auto radarRow = model_->rowForRadar(radarId);
     if (radarRow >= 0) radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
-    finalizeVolumeReady(radarId, volumeId, chunkCount, failedChunks, receivedAt, volume);
+    finalizeVolumeReady(radarId, volumeId, chunkCount, failedChunks, receivedAt, volume, live);
     // Derive only pays off for multi-tilt reflectivity volumes; single-tilt
     // TDWR/SCAN pieces can never grow Echo Tops, so skip the copy entirely.
     const bool multiTilt = chunkSupportsDerivedProducts(*volume);
@@ -2374,7 +2389,7 @@ void MainWindow::enforceSpillBudget(RadarSession& session,
 void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volumeId,
                                      const int chunkCount, const int failedChunks,
                                      const QDateTime& receivedAt,
-                                     std::shared_ptr<DecodedChunk> volume) {
+                                     std::shared_ptr<DecodedChunk> volume, const bool live) {
     const auto session = sessionFor(radarId, false);
     if (!session) return;
     const auto isCurrentVolume = volumeId == session->pendingVolumeId;
@@ -2466,7 +2481,14 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
         QTimer::singleShot(0, this, [this] { playButton_->setChecked(true); });
     }
     if (radarId == selectedRadarId_) {
-        if (!lastVolumeTime_.isValid() || receivedAt > lastVolumeTime_) lastVolumeTime_ = receivedAt;
+        // Health tracks the live pipeline only: archive case loads carry
+        // days-old timestamps and must not paint the station Offline, and
+        // backfilled history older than the newest frame must not move the
+        // arrival clock either.
+        if (live && (!lastVolumeTime_.isValid() || receivedAt > lastVolumeTime_)) {
+            lastVolumeTime_ = receivedAt;
+            lastArrivalTime_ = QDateTime::currentDateTimeUtc();
+        }
         recomputeRadarHealth();
         consecutiveFailures_ = 0;
         updateOfflineBanner();
@@ -4452,15 +4474,42 @@ void MainWindow::setRadarHealth(RadarHealthState state, const QString& tooltip) 
 RadarHealthState MainWindow::classifyHealth() const {
     if (selectedRadarId_.isEmpty()) return RadarHealthState::Unknown;
     if (radarStatus_.contains(QStringLiteral("error"), Qt::CaseInsensitive)) return RadarHealthState::Offline;
+    const auto now = QDateTime::currentDateTimeUtc();
+    // Arrival recency answers "is the pipeline delivering". Grading on data
+    // age alone punished healthy radars: a fresh NEXRAD volume is routinely
+    // 5-10 min old at completion (scan + S3 upload + poll + download), so
+    // live stations flipped Stale/Offline on every slow volume. NEXRAD
+    // cadence is 4-10 min, so 15 min without any arrival means the feed, not
+    // the clock, is the problem.
+    if (lastArrivalTime_.isValid() && lastArrivalTime_.secsTo(now) <= 900)
+        return RadarHealthState::Online;
     if (!lastVolumeTime_.isValid()) return RadarHealthState::Stale;
-    const auto ageSec = lastVolumeTime_.secsTo(QDateTime::currentDateTimeUtc());
+    const auto ageSec = lastVolumeTime_.secsTo(now);
     if (ageSec <= 300) return RadarHealthState::Online;     // <= 5 min
     if (ageSec <= 900) return RadarHealthState::Stale;      // 5-15 min
     return RadarHealthState::Offline;
 }
 
+QString healthAgeText(const qint64 seconds) {
+    const auto age = std::max<qint64>(0, seconds);
+    if (age < 60) return QStringLiteral("%1s").arg(age);
+    if (age < 3600) return QStringLiteral("%1m").arg(age / 60);
+    return QStringLiteral("%1h %2m").arg(age / 3600).arg((age % 3600) / 60);
+}
+
 void MainWindow::recomputeRadarHealth() {
-    setRadarHealth(classifyHealth());
+    // The dot answers "is data flowing"; the tooltip says how old the data
+    // behind it is, so a station serving old-but-arriving volumes reads
+    // Online with an honest age instead of a confusing Offline.
+    QString tip;
+    if (lastVolumeTime_.isValid()) {
+        const auto now = QDateTime::currentDateTimeUtc();
+        tip = QStringLiteral("Latest scan %1 ago").arg(healthAgeText(lastVolumeTime_.secsTo(now)));
+        if (lastArrivalTime_.isValid())
+            tip += QStringLiteral(" · received %1 ago")
+                       .arg(healthAgeText(lastArrivalTime_.secsTo(now)));
+    }
+    setRadarHealth(classifyHealth(), tip);
 }
 
 bool MainWindow::isOperaRadar(const QString& radarId) const {
