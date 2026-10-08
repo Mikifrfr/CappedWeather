@@ -3226,6 +3226,21 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             painter.drawText(QRectF(x, 164, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("MCD %1").arg(static_cast<int>(mcds_.size())));
         }
+    } else if (spcOutlookVisible_ || mcdVisible_) {
+        // Quiet-day confirmation: layers are on, feeds answered, nothing
+        // issued. Without this the map gives zero feedback and reads as
+        // a broken feed.
+        const QRectF spcPanel(12, 162, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 60), 1));
+        painter.setBrush(QColor(8, 15, 19, 150));
+        painter.drawRoundedRect(spcPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(QColor(148, 163, 184));
+        QStringList quiet;
+        if (spcOutlookVisible_) quiet.push_back(QStringLiteral("SPC: quiet"));
+        if (mcdVisible_) quiet.push_back(QStringLiteral("MCD: none"));
+        painter.drawText(QRectF(20, 164, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                         quiet.join(QStringLiteral(" · ")));
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -4023,20 +4038,44 @@ RadarMapCanvas::ProbeSample RadarMapCanvas::sampleAtGeo(const QPointF& lonLat) c
     const auto nearestRayIndex = nearest->second;
     const auto* nearestRay = &chunk_->rays.at(nearestRayIndex);
     if (!nearestRay || nearestDifference > std::max(1.5, nearestRay->azimuthResolutionDegrees * 1.5)) {
+        sample.valueText = QStringLiteral("No ray at this bearing");
+        sample.groundRangeMeters = location.distanceMeters;
+        sample.azimuthDegrees = sample.azimuthDegrees;
+        sample.valid = true;
         return sample;
     }
     const auto index = static_cast<std::size_t>(product_);
     const auto spacing = nearestRay->gateSpacingByProduct.at(index);
-    if (spacing == 0) return sample;
+    if (spacing == 0) {
+        sample.valueText = QStringLiteral("Product unavailable here");
+        sample.groundRangeMeters = location.distanceMeters;
+        sample.valid = true;
+        return sample;
+    }
     const auto firstGate = nearestRay->firstGateByProduct.at(index);
     const auto slantRangeMeters = slantRangeForSurfaceDistance(sample.groundRangeMeters,
                                                                nearestRay->elevationDegrees);
     const auto& values = nearestRay->fields.at(index);
     const auto gate = gateIndexForSlantRange(slantRangeMeters, firstGate, spacing, values.size());
-    if (!gate) return sample;
+    if (!gate) {
+        sample.groundRangeMeters = location.distanceMeters;
+        sample.azimuthDegrees = nearestRay->azimuthDegrees;
+        const double maxSlant = static_cast<double>(firstGate) +
+                                static_cast<double>(spacing) * static_cast<double>(values.size());
+        sample.valueText = slantRangeMeters < static_cast<double>(firstGate)
+                               ? QStringLiteral("Inside the blind range")
+                               : slantRangeMeters > maxSlant
+                                     ? QStringLiteral("Beyond radar range")
+                                     : QStringLiteral("No gate at this range");
+        sample.valid = true;
+        return sample;
+    }
     const auto encoded = values.at(*gate);
     if (encoded == 0) {
-        sample.valueText = QStringLiteral("Below threshold");
+        // Derived fields encode missing as 0: above the CAPPI height or
+        // outside the volume is "no data", never "below threshold".
+        sample.valueText = isDerivedProduct(product_) ? QStringLiteral("No data at this gate")
+                                                      : QStringLiteral("Below threshold");
     } else if (encoded == 1) {
         sample.valueText = QStringLiteral("Range folded");
     } else {
@@ -4057,7 +4096,7 @@ RadarMapCanvas::ProbeSample RadarMapCanvas::sampleAtGeo(const QPointF& lonLat) c
                         .arg(unit.isEmpty() ? QString{} : QStringLiteral(" "))
                         .arg(unit);
         } else {
-            sample.valueText = QStringLiteral("No data");
+            sample.valueText = QStringLiteral("No data at this gate");
         }
     }
     sample.elevationDegrees = nearestRay->elevationDegrees;
@@ -4078,6 +4117,19 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
     const auto geographic = geographicPoint(point);
     const auto sample = sampleAtGeo(QPointF(geographic.x(), geographic.y()));
     if (!sample.valid) {
+        update();
+        return;
+    }
+    // Reason-only samples (no gate under the cursor) carry no tilt/beam:
+    // show the reason with range instead of a bogus 0.0 tilt.
+    if (sample.beamMslMeters == 0.0 && sample.elevationDegrees == 0.0 &&
+        (sample.valueText.startsWith(QStringLiteral("No ")) ||
+         sample.valueText.startsWith(QStringLiteral("Inside")) ||
+         sample.valueText.startsWith(QStringLiteral("Beyond")) ||
+         sample.valueText.startsWith(QStringLiteral("Product")))) {
+        probeText_ = QStringLiteral("%1 | %2 km")
+                         .arg(sample.valueText)
+                         .arg(sample.groundRangeMeters / 1000.0, 0, 'f', 1);
         update();
         return;
     }

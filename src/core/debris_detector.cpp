@@ -39,11 +39,16 @@ std::vector<TdsDetection> detectDebrisSignatures(
 
     std::vector<TdsDetection> out;
     for (const auto& parent : parents) {
+        // NaN vortex fix must fail closed: without this the NaN range
+        // bypasses the range gate below (all NaN comparisons are false)
+        // and NaN distances read as inner-disc hits.
+        if (!std::isfinite(parent.latitudeDeg) || !std::isfinite(parent.longitudeDeg)) continue;
         const auto rb =
             rangeAndBearing({radarLatitudeDeg, radarLongitudeDeg},
                             {parent.latitudeDeg, parent.longitudeDeg});
+        if (!std::isfinite(rb.distanceMeters) || !std::isfinite(rb.bearingDegrees)) continue;
         const double rangeKm = rb.distanceMeters / 1000.0;
-        if (rangeKm <= 0.0 || rangeKm > config.maxRangeKm) continue;
+        if (!std::isfinite(rangeKm) || rangeKm <= 0.0 || rangeKm > config.maxRangeKm) continue;
         // Azimuth window: search disc as seen from the radar, plus margin.
         // Sized for the 2x contrast annulus; the exact disc/annulus split
         // happens per gate below by true distance from the vortex fix.

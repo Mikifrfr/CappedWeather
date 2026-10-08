@@ -143,7 +143,11 @@ std::vector<GateLookup> buildGateLookup(const std::int16_t outputFirstGate,
                                      .surfaceDistanceMeters;
         const auto sourceSlantRange = slantRangeForSurfaceDistance(groundRange,
                                                                     sourceElevationDegrees);
+        // Zero spacing divides into inf; non-finite geometry feeds
+        // undefined llround below. Leave the gate unmapped instead.
+        if (sourceSpacing == 0 || !std::isfinite(sourceSlantRange)) continue;
         const auto sourceGatePosition = (sourceSlantRange - sourceFirstGate) / sourceSpacing;
+        if (!std::isfinite(sourceGatePosition)) continue;
         const auto sourceGate = static_cast<long long>(std::llround(sourceGatePosition));
         const auto height = standardBeamGeometry(sourceSlantRange, sourceElevationDegrees)
                                 .heightAboveRadarMeters +

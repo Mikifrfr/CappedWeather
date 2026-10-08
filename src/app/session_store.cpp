@@ -12,17 +12,27 @@
 namespace cappedweather {
 
 QString spillFilePath(const QString& radarId, const QString& volumeId) {
-    QString safe;
-    safe.reserve(volumeId.size());
-    for (const auto ch : volumeId) {
-        safe.push_back(ch.isLetterOrNumber() || ch == QLatin1Char('-') || ch == QLatin1Char('_') ||
-                               ch == QLatin1Char('.')
-                           ? ch
-                           : QLatin1Char('_'));
-    }
-    if (safe.isEmpty()) safe = QStringLiteral("volume");
-    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
-           QStringLiteral("/volumes/") + radarId + QLatin1Char('/') + safe +
+    const auto sanitize = [](const QString& raw, const QString& fallback) {
+        QString safe;
+        safe.reserve(raw.size());
+        for (const auto ch : raw) {
+            safe.push_back(ch.isLetterOrNumber() || ch == QLatin1Char('-') || ch == QLatin1Char('_') ||
+                                   ch == QLatin1Char('.')
+                               ? ch
+                               : QLatin1Char('_'));
+        }
+        if (safe.isEmpty()) safe = fallback;
+        return safe;
+    };
+    const QString safeRadar = sanitize(radarId, QStringLiteral("radar"));
+    const QString safe = sanitize(volumeId, QStringLiteral("volume"));
+    const auto base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    // Empty CacheLocation (portable/offline profiles): return a path that
+    // fails visibly at spill time instead of writing toward filesystem root.
+    // Callers treat spill failure as keep-resident, so RAM pressure beats
+    // silent loss.
+    if (base.isEmpty()) return {};
+    return base + QStringLiteral("/volumes/") + safeRadar + QLatin1Char('/') + safe +
            QStringLiteral(".cwdv");
 }
 
@@ -58,6 +68,7 @@ void enforceSessionSpillBudget(RadarSession& session, int maximumHistoryFrames, 
         if (resident <= ramWindow || oldestResident < 0) break;
         auto& frame = session.history[static_cast<std::size_t>(oldestResident)];
         const auto path = spillFilePath(session.radarId, frame.volumeId);
+        if (path.isEmpty()) break;  // no cache location: keep resident
         QDir().mkpath(QFileInfo(path).absolutePath());
         // A failed spill (disk full) keeps the frame resident and stops:
         // growing RAM beats losing the volume.
@@ -69,6 +80,15 @@ void enforceSessionSpillBudget(RadarSession& session, int maximumHistoryFrames, 
         auto& front = session.history.front();
         if (!front.spilledPath.isEmpty()) QFile::remove(front.spilledPath);
         session.history.erase(session.history.begin());
+        // Erasing the front shifts every index down by one. Without this
+        // the timeline keeps pointing at the next volume over.
+        if (session.frameIndex > 0) {
+            --session.frameIndex;
+        } else if (session.frameIndex == 0) {
+            session.frameIndex = session.history.empty() ? -1 : 0;
+        }
+        if (session.frameIndex >= static_cast<int>(session.history.size()))
+            session.frameIndex = static_cast<int>(session.history.size()) - 1;
     }
 }
 

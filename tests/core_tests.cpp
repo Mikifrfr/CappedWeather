@@ -1429,6 +1429,17 @@ void testHailVetoes() {
     assert(detectHailCores(noTop, 35.333, -97.278, 370.0, {}).empty());
 }
 
+void testHailZeroTopNeverDivides() {
+    // Zero echo top with the floor zeroed out: the old code divided into
+    // inf VILD and pushed a phantom core. Must stay empty.
+    DecodedChunk zeroTop;
+    zeroTop.radarId = "KTLX";
+    zeroTop.rays.push_back(syntheticHailRay(90.0F, 40.0, 0.0, 60.0));
+    HailConfig noFloor{};
+    noFloor.minEchoTopMeters = 0.0;
+    assert(detectHailCores(zeroTop, 35.333, -97.278, 370.0, noFloor).empty());
+}
+
 void testHailClustering() {
     // Two azimuth-separated cores survive; neighbors merge.
     DecodedChunk chunk;
@@ -1563,6 +1574,22 @@ void testTdsVetoes() {
     chunk.rays.push_back(syntheticTdsRay(90.0F, 0.65, 55.0));
     chunk.rays.push_back(syntheticTdsRay(91.0F, 0.65, 55.0));
     assert(detectDebrisSignatures(chunk, {}, 35.333, -97.278, 370.0, {}).empty());
+}
+
+void testTdsNanParentFailsClosed() {
+    // NaN vortex fix must not bypass the range gate (all NaN comparisons
+    // are false) and must never emit a phantom detection.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticTdsRay(90.0F, 0.60, 55.0));
+    chunk.rays.push_back(syntheticTdsRay(91.0F, 0.60, 55.0));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<CirculationDetection> parents{
+        syntheticTdsParent(nan, nan)};
+    assert(detectDebrisSignatures(chunk, parents, 35.333, -97.278, 370.0, {}).empty());
+    const std::vector<CirculationDetection> halfNan{
+        syntheticTdsParent(35.5, nan)};
+    assert(detectDebrisSignatures(chunk, halfNan, 35.333, -97.278, 370.0, {}).empty());
 }
 
 
@@ -1790,10 +1817,12 @@ int main() {
     testHailTierBoundaries();
     testHailCorePositive();
     testHailVetoes();
+    testHailZeroTopNeverDivides();
     testHailClustering();
     testTdsPositive();
     testTdsContrastVeto();
     testTdsVetoes();
+    testTdsNanParentFailsClosed();
     testDecodedRayLegacyGeometryMaxGates();
     std::cout << "core tests passed\n";
 }

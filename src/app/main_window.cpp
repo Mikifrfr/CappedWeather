@@ -311,7 +311,12 @@ QString productChipTooltip(const ProductKind kind) {
                              .arg(QString::fromUtf8(descriptor.label.data()),
                                   QString::fromUtf8(descriptor.unit.data()),
                                   QString::fromUtf8(descriptor.shortName.data()));
-    return wrapTooltipText(head + QStringLiteral("\n") + productExplainer(kind));
+    auto text = head + QStringLiteral("\n") + productExplainer(kind);
+    if (kind == ProductKind::Cappi)
+        text += QStringLiteral("\nAltitude selector appears below when CAPPI is active.");
+    if (kind == ProductKind::CompositeReflectivity)
+        text += QStringLiteral("\nColumn maximum over all tilts; reads hotter than any single tilt.");
+    return wrapTooltipText(text);
 }
 
 // Reflectivity ramp swatch for the palette selector. Plain QWidget (no
@@ -1149,14 +1154,14 @@ void MainWindow::buildUi() {
     tiltMinus_ = new QToolButton(controlBody);
     tiltMinus_->setObjectName(QStringLiteral("tiltMinusButton"));
     tiltMinus_->setText(QStringLiteral("−"));
-    tiltMinus_->setToolTip(QStringLiteral("Previous tilt"));
+    tiltMinus_->setToolTip(QStringLiteral("Previous tilt (PgUp)"));
     tiltPlus_ = new QToolButton(controlBody);
     tiltPlus_->setObjectName(QStringLiteral("tiltPlusButton"));
     tiltPlus_->setText(QStringLiteral("+"));
-    tiltPlus_->setToolTip(QStringLiteral("Next tilt"));
+    tiltPlus_->setToolTip(QStringLiteral("Next tilt (PgDn)"));
     tiltValueButton_ = new QToolButton(controlBody);
     tiltValueButton_->setObjectName(QStringLiteral("tiltValueButton"));
-    tiltValueButton_->setToolTip(QStringLiteral("Click for the full tilt list"));
+    tiltValueButton_->setToolTip(QStringLiteral("Click for the full tilt list (PgUp/PgDn steps)"));
     tiltValueButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     tiltStepper->addWidget(tiltMinus_);
     tiltStepper->addWidget(tiltValueButton_, 1);
@@ -1214,7 +1219,7 @@ void MainWindow::buildUi() {
     cappiHeightCombo_->addItem(QStringLiteral("4 km"), 4000);
     cappiHeightCombo_->addItem(QStringLiteral("5 km"), 5000);
     cappiHeightCombo_->addItem(QStringLiteral("7 km"), 7000);
-    cappiHeightCombo_->setToolTip(QStringLiteral("Constant altitude for the CAPPI product, meters above sea level"));
+    cappiHeightCombo_->setToolTip(QStringLiteral("Constant altitude, meters above sea level. Below the lowest beam shows the lowest tilt; above the scan top shows no data."));
     cappiBoxLayout->addWidget(cappiHeightCombo_);
     productGroup->addWidget(cappiBox_);
     cappiBox_->hide();
@@ -1627,7 +1632,7 @@ void MainWindow::buildUi() {
     velocityModeCombo_->setObjectName(QStringLiteral("velocityModeCombo"));
     velocityModeCombo_->addItems({QStringLiteral("Native velocity"), QStringLiteral("Dealiased velocity"),
                                   QStringLiteral("Storm-relative velocity")});
-    velocityModeCombo_->setToolTip(QStringLiteral("Velocity processing for the active panel"));
+    velocityModeCombo_->setToolTip(QStringLiteral("Native: as sent. Dealiased: unfolds folding past Nyquist. Storm-relative: subtracts storm motion."));
     velocityBoxLayout->addWidget(velocityModeCombo_);
     nyquistSpin_ = new QDoubleSpinBox(controlBody);
     nyquistSpin_->setRange(1.0, 80.0);
@@ -2456,13 +2461,16 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
                                  });
     // Evicted while deriving (history cap) or superseded: nothing to swap.
     if (it == session->history.end()) return;
-    it->cappiHeightM = cappiHeightM;
     if (it->chunk) {
         it->chunk = std::move(derived);
+        it->cappiHeightM = cappiHeightM;
     } else if (!it->spilledPath.isEmpty()) {
         // Frame spilled mid-derive: persist the derived superset over the
-        // base spill so a later scrub still gets ET/VIL. Best effort.
-        spillVolume(*derived, it->spilledPath.toStdString());
+        // base spill so a later scrub still gets ET/VIL. Tag the altitude
+        // only when the spill lands: a failed write must not mark stale
+        // base data as fresh.
+        if (!spillVolume(*derived, it->spilledPath.toStdString())) return;
+        it->cappiHeightM = cappiHeightM;
         return;
     } else {
         return;
@@ -3957,7 +3965,22 @@ void MainWindow::syncProductChips() {
         QSignalBlocker blocker(productChips_.at(i));
         productChips_.at(i)->setChecked(i == current);
         const auto* item = itemModel ? itemModel->item(i) : nullptr;
-        productChips_.at(i)->setEnabled(!item || item->isEnabled());
+        const bool enabled = !item || item->isEnabled();
+        productChips_.at(i)->setEnabled(enabled);
+        // A greyed chip without a reason reads as broken. Derived moments
+        // need a multi-tilt volume (still deriving in background); native
+        // moments mean the site simply has no such data (OPERA single-pol).
+        auto tip = productChipTooltip(static_cast<ProductKind>(
+            productCombo_->itemData(i).toInt()));
+        if (!enabled) {
+            const auto kind =
+                static_cast<ProductKind>(productCombo_->itemData(i).toInt());
+            tip += isDerivedProduct(kind)
+                       ? QStringLiteral("\nNot in this volume yet: needs a complete "
+                                        "multi-tilt scan (derives in background).")
+                       : QStringLiteral("\nNot in this volume: the site sent no such moment.");
+        }
+        productChips_.at(i)->setToolTip(tip);
     }
     if (activeProductLabel_ && current >= 0 && current < productCombo_->count()) {
         const auto& descriptor = productDescriptors()[static_cast<std::size_t>(current)];
@@ -4017,13 +4040,21 @@ void MainWindow::refreshLayerBadges() {
     if (placefilesBadge_) placefilesBadge_->setText(QString::number(map_->placefileElementCount()));
     if (spcOutlookBadge_) {
         const auto n = map_->spcOutlookCount();
-        spcOutlookBadge_->setText(!spcOutlookCheck_ || !spcOutlookCheck_->isChecked() ? QStringLiteral("off")
-                                  : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+        const bool on = spcOutlookCheck_ && spcOutlookCheck_->isChecked();
+        spcOutlookBadge_->setText(!on ? QStringLiteral("off") : n > 0 ? QString::number(n)
+                                                                      : QStringLiteral("quiet"));
+        spcOutlookBadge_->setToolTip(!on ? QStringLiteral("SPC outlook layer is off")
+                                     : n > 0 ? QStringLiteral("Day 1 + 2 outlook areas on the map")
+                                             : QStringLiteral("Layer is on; no outlook areas issued right now"));
     }
     if (mcdBadge_) {
         const auto n = map_->mcdCount();
-        mcdBadge_->setText(!mcdCheck_ || !mcdCheck_->isChecked() ? QStringLiteral("off")
-                          : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+        const bool on = mcdCheck_ && mcdCheck_->isChecked();
+        mcdBadge_->setText(!on ? QStringLiteral("off") : n > 0 ? QString::number(n)
+                                                               : QStringLiteral("quiet"));
+        mcdBadge_->setToolTip(!on ? QStringLiteral("MCD layer is off")
+                              : n > 0 ? QStringLiteral("Active mesoscale discussions on the map")
+                                      : QStringLiteral("Layer is on; no MCDs in effect right now"));
     }
     if (lightningBadge_) {
         if (!cappedweather::glmL2ReaderAvailable() || !lightningCheck_ ||
@@ -4108,6 +4139,11 @@ void MainWindow::refreshWarningList() {
     }
     if (order.size() > kInboxCap)
         warningList_->addItem(QStringLiteral("… plus %1 more (zoom in or filter)").arg(order.size() - kInboxCap));
+    if (order.isEmpty()) {
+        auto* empty = new QListWidgetItem(QStringLiteral("No active warnings"), warningList_);
+        empty->setFlags(empty->flags() & ~Qt::ItemIsSelectable);
+        empty->setToolTip(QStringLiteral("The NWS feed answered and there is nothing to show."));
+    }
     warningList_->setUpdatesEnabled(true);
 }
 

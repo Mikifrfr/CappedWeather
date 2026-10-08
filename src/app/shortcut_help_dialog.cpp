@@ -45,7 +45,7 @@ void ShortcutHelpDialog::populateShortcutsInto(QTextEdit* text) {
         {"+ / -",        "Zoom in / out"},
         {"R",            "Recenter on selected radar"},
         {"L",            "Jump to LIVE (latest volume)"},
-        {"1 - 9, 0",      "Switch product (REF, VEL, SW, ZDR, CC, PHI, ET18, VIL, CREF, CAPPI)"},
+        {"1 - 9, 0",      "Switch product: 1 REF, 2 VEL, 3 SW, 4 ZDR, 5 CC, 6 PHI, 7 ET18, 8 VIL, 9 CREF, 0 CAPPI"},
         {"P",            "Lock / unlock pinned card"},
         {"B",            "Bookmark / unbookmark current frame"},
         {"Ctrl+K",       "Command palette (radar, product, layout, action)"},

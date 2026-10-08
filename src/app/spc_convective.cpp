@@ -292,6 +292,7 @@ void SpcConvectiveSource::fetchOutlooks() {
     if (outlooksPending_) return;
     outlooksPending_ = true;
     outlooks_.clear();
+    outlooksError_.clear();
     struct Pending {
         int day = 0;
         QNetworkReply* reply = nullptr;
@@ -301,12 +302,24 @@ void SpcConvectiveSource::fetchOutlooks() {
         const bool ok = reply->error() == QNetworkReply::NoError;
         const int code =
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (ok && code != 404) {
+        // HTTP errors ride NoError at the QNetworkReply level, so a 500
+        // HTML page must not parse as "0 areas" success. 404 stays quiet
+        // (SPC's normal no-outlook state); other non-2xx surfaces.
+        if (ok && (code == 0 || (code >= 200 && code < 300))) {
             QString error;
             const auto features = parseSpcOutlookGeoJson(reply->readAll(), day, &error);
-            if (error.isEmpty()) outlooks_.append(features);
+            if (error.isEmpty()) {
+                outlooks_.append(features);
+            } else {
+                outlooksError_ = error;
+            }
+        } else if (ok && code == 404) {
+            // quiet, not an error
+        } else if (ok) {
+            outlooksError_ = QStringLiteral("Day %1 HTTP %2").arg(day).arg(code);
+        } else {
+            outlooksError_ = reply->errorString();
         }
-        // 404 is SPC's normal "no outlook" state: quiet, not an error.
         reply->deleteLater();
         pending->erase(std::remove_if(pending->begin(), pending->end(),
                                       [reply](const Pending& p) { return p.reply == reply; }),
@@ -314,7 +327,12 @@ void SpcConvectiveSource::fetchOutlooks() {
         if (pending->isEmpty()) {
             outlooksPending_ = false;
             emit outlooksReady(outlooks_);
-            emit statusChanged(QStringLiteral("SPC outlooks: %1 areas").arg(outlooks_.size()));
+            if (outlooksError_.isEmpty())
+                emit statusChanged(QStringLiteral("SPC outlooks: %1 areas").arg(outlooks_.size()));
+            else
+                emit statusChanged(QStringLiteral("SPC outlooks: %1 areas (%2)")
+                                       .arg(outlooks_.size())
+                                       .arg(outlooksError_));
         }
     };
     // One manager per source: this source must work without the warnings
@@ -366,6 +384,7 @@ void SpcConvectiveSource::requestMcdPages(QVector<SpcMcdCandidate> candidates) {
     }
     mcds_.clear();
     auto remaining = std::make_shared<int>(candidates.size());
+    auto failed = std::make_shared<int>(0);
     const auto now = QDateTime::currentDateTimeUtc();
     for (const auto& candidate : candidates) {
         QUrl url(candidate.link);
@@ -374,23 +393,40 @@ void SpcConvectiveSource::requestMcdPages(QVector<SpcMcdCandidate> candidates) {
         auto* reply = network_.get(makeRequest(url, QStringLiteral("text/html"),
                                                QStringLiteral(" SPC MCD client")));
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, remaining, now] {
+                [this, reply, remaining, failed, now] {
                     reply->deleteLater();
                     if (reply->error() == QNetworkReply::NoError) {
                         QString error;
                         auto mcd = parseMcdPage(reply->readAll(), &error);
-                        // Keep only live discussions with a drawable polygon.
+                        // Keep only live discussions with a drawable polygon
+                        // and a real valid window. Undated pages fail closed:
+                        // showing an expired MCD as live is worse than idle.
                         if (error.isEmpty() && mcd.exterior.size() >= 4 &&
-                            (!mcd.validTo.isValid() || mcd.validTo > now)) {
+                            mcd.validTo.isValid() && mcd.validTo > now) {
                             mcds_.push_back(std::move(mcd));
+                        } else if (!error.isEmpty()) {
+                            ++(*failed);
+                        } else if (!mcd.validTo.isValid()) {
+                            ++(*failed);
                         }
+                    } else {
+                        ++(*failed);
                     }
                     if (--(*remaining) == 0) {
                         mcdsPending_ = false;
                         std::sort(mcds_.begin(), mcds_.end(),
                                   [](const SpcMcd& a, const SpcMcd& b) { return a.number < b.number; });
                         emit mcdsReady(mcds_);
-                        emit statusChanged(QStringLiteral("SPC MCDs: %1 active").arg(mcds_.size()));
+                        if (*failed > 0 && mcds_.isEmpty())
+                            emit statusChanged(QStringLiteral("SPC MCDs: %1 failed to load")
+                                                   .arg(*failed));
+                        else if (*failed > 0)
+                            emit statusChanged(QStringLiteral("SPC MCDs: %1 active (%2 unreadable)")
+                                                   .arg(mcds_.size())
+                                                   .arg(*failed));
+                        else
+                            emit statusChanged(
+                                QStringLiteral("SPC MCDs: %1 active").arg(mcds_.size()));
                     }
                 });
     }

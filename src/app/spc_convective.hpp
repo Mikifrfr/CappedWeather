@@ -95,6 +95,7 @@ private:
     bool mcdsPending_ = false;
     QVector<SpcOutlookFeature> outlooks_;
     QVector<SpcMcd> mcds_;
+    QString outlooksError_;
     QNetworkAccessManager network_;
 };
 

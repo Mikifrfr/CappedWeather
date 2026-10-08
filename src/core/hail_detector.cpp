@@ -61,9 +61,12 @@ std::vector<HailCore> detectHailCores(const DecodedChunk& chunk,
             if (!vil || !etKft) continue;
             if (*vil < config.minVilKgPerSquareMeter) continue;
             const double topMeters = *etKft * 304.8;
-            if (topMeters < config.minEchoTopMeters) continue;
+            // Zero/negative/non-finite tops divide into inf/NaN densities
+            // that sail past the threshold below. Geometry noise, not hail.
+            if (!std::isfinite(topMeters) || topMeters < config.minEchoTopMeters) continue;
+            if (topMeters <= 0.0) continue;
             const double vild = *vil * 1000.0 / topMeters;
-            if (vild < config.minVildGPerCubicMeter) continue;
+            if (!std::isfinite(vild) || vild < config.minVildGPerCubicMeter) continue;
             const auto ref = nativeValue(reflField[gate], ray.scaleByProduct.at(reflIndex),
                                          ray.offsetByProduct.at(reflIndex));
             if (!ref || *ref < config.minReflectivityDbz) continue;
@@ -72,6 +75,7 @@ std::vector<HailCore> detectHailCores(const DecodedChunk& chunk,
             const auto beam = standardBeamGeometry(slant, ray.elevationDegrees);
             const auto pos = destinationPoint({radarLatitudeDeg, radarLongitudeDeg},
                                               ray.azimuthDegrees, beam.surfaceDistanceMeters);
+            if (!std::isfinite(pos.latitude) || !std::isfinite(pos.longitude)) continue;
             candidates.push_back({pos.latitude, pos.longitude, vild, *vil, topMeters, *ref});
         }
     }

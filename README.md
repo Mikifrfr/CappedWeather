@@ -31,7 +31,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 
 ### Radar & products
 
-- Six native Level II moments (REF, VEL, SW, ZDR, RHOHV, PHIDP) plus derived 18 dBZ Echo Tops, VIL, composite reflectivity, and CAPPI from real multi-tilt volumes ([formulas & limits](docs/derived-products.md)).
+- Six native Level II moments (REF, VEL, SW, ZDR, RHOHV, PHIDP) plus derived 18 dBZ Echo Tops, VIL, composite reflectivity, and CAPPI from real multi-tilt volumes ([formulas & limits](docs/derived-products.md)). Products live in the left-dock grid (keys 1-9, 0); picking CAPPI reveals its altitude box (2-7 km MSL) underneath.
 - 1×1, 1×2, 2×1, 2×2 layouts; every panel owns its radar, product, tilt, and velocity mode.
 - Native, dealiased, and storm-relative velocity; TDWR and single-pol OPERA sites auto-disable missing dual-pol products.
 - Operational, Capped, and color-safe palettes plus importable `native_value,#RRGGBB` custom palettes.
