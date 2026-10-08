@@ -4,6 +4,7 @@
 #include "core/circulation_detector.hpp"
 #include "core/debris_detector.hpp"
 #include "core/hail_detector.hpp"
+#include "app/spc_convective.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 #include "core/velocity_processing.hpp"
@@ -153,6 +154,14 @@ public:
     void setStormReportsVisible(bool visible);
     void setStormReportKindVisible(StormReportKind kind, bool visible);
     void setWarningFilter(const QString& filter);
+    void setSpcOutlooks(QVector<SpcOutlookFeature> outlooks);
+    void setSpcOutlookVisible(bool visible);
+    [[nodiscard]] bool spcOutlookVisible() const { return spcOutlookVisible_; }
+    [[nodiscard]] int spcOutlookCount() const;
+    void setMcds(QVector<SpcMcd> mcds);
+    void setMcdVisible(bool visible);
+    [[nodiscard]] bool mcdVisible() const { return mcdVisible_; }
+    [[nodiscard]] int mcdCount() const;
     // Per-panel overlay overrides. When `hasOverrides` is false, the global
     // toggles from MainWindow drive visibility (the default for every panel).
     // When `hasOverrides` is true, the four bools apply to this panel alone.
@@ -313,6 +322,8 @@ private:
         StormReport,
         Lightning,
         Placefile,
+        SpcOutlook,
+        SpcMcd,
         // A frozen cursor readout. "Inspect at cursor" used to write the same
         // transient text the hover uses, so the next mouse move silently wiped
         // it and the action looked broken. Pinning it makes it readable, and
@@ -419,6 +430,13 @@ private:
     QVector<WeatherWarning> warnings_;
     QVector<StormReport> stormReports_;
     QVector<PlacefileDocument> placefiles_;
+    // SPC convective context: Day 1/2 categorical outlooks (background fill)
+    // and active mesoscale discussions (dashed outlines). Vector-painted per
+    // frame like placefiles: a handful of polygons, no raster cache needed.
+    QVector<SpcOutlookFeature> spcOutlooks_;
+    QVector<SpcMcd> mcds_;
+    void paintSpcOutlook(QPainter& painter);
+    void paintMcdOverlays(QPainter& painter);
     std::vector<LightningCellSnapshot> lightningCells_;
     std::vector<RadarStormFeature> radarFeatures_;
     std::vector<LightningRadarAssociation> lightningAssociations_;
@@ -519,6 +537,8 @@ private:
     bool loading_ = false;
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;
+    bool spcOutlookVisible_ = true;
+    bool mcdVisible_ = true;
     bool placefilesVisible_ = true;
     bool lightningVisible_ = true;
     bool lightningFusionVisible_ = true;

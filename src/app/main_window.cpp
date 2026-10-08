@@ -8,6 +8,7 @@
 #include "app/radar_list_model.hpp"
 #include "app/session_store.hpp"
 #include "app/weather_overlay_source.hpp"
+#include "app/spc_convective.hpp"
 #include "app/placefile_source.hpp"
 #include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
@@ -157,6 +158,10 @@ QColor productChipColor(const ProductKind kind) {
             return QColor(QStringLiteral("#94a3b8"));
         case ProductKind::VerticallyIntegratedLiquid:
             return QColor(QStringLiteral("#2dd4bf"));
+        case ProductKind::CompositeReflectivity:
+            return QColor(QStringLiteral("#4ade80"));
+        case ProductKind::Cappi:
+            return QColor(QStringLiteral("#a3e635"));
     }
     return QColor(QStringLiteral("#8b94a5"));
 }
@@ -225,6 +230,10 @@ QString productShortBlurb(const ProductKind kind) {
             return QStringLiteral("Highest 18 dBZ altitude: updraft strength");
         case ProductKind::VerticallyIntegratedLiquid:
             return QStringLiteral("Column liquid: hail and downburst potential");
+        case ProductKind::CompositeReflectivity:
+            return QStringLiteral("Strongest echo in the column, all tilts");
+        case ProductKind::Cappi:
+            return QStringLiteral("Reflectivity at one constant altitude");
     }
     return {};
 }
@@ -276,6 +285,18 @@ QString productExplainer(const ProductKind kind) {
                 "Radar-estimated liquid in the column. High values flag hail and "
                 "downburst potential, but hail contaminates the estimate (capped at "
                 "56 dBZ). Derived from the volume, not measured directly.");
+        case ProductKind::CompositeReflectivity:
+            return QStringLiteral(
+                "Strongest reflectivity found at any tilt over each point: storm "
+                "structure and hail cores at a glance. Reads hotter than any "
+                "single tilt by construction. Derived from the volume, not "
+                "measured directly.");
+        case ProductKind::Cappi:
+            return QStringLiteral(
+                "Reflectivity interpolated to one constant altitude (MSL, set "
+                "below): compares storms without tilt geometry getting in the "
+                "way. Below the lowest beam it shows the lowest tilt; above "
+                "the scan top there is no data. Derived, not measured directly.");
     }
     return {};
 }
@@ -342,6 +363,7 @@ MainWindow::MainWindow(QWidget* parent)
       operaSource_(new OperaSource(this)),
       glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
+      spcSource_(new SpcConvectiveSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
       alertCenter_(new AlertCenter(this)),
@@ -450,6 +472,7 @@ MainWindow::MainWindow(QWidget* parent)
         updateCrossSectionAvailability();
         rebuildTiltCombo();
         updateVelocityControls();
+        refreshCappiBox();
     });
     connect(tiltCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](const int index) {
         if (index >= 0 && tiltCombo_->itemData(index).isValid()) {
@@ -458,6 +481,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(refreshTimer_, &QTimer::timeout, this, &MainWindow::requestSelectedRadar);
     connect(overlayRefreshTimer_, &QTimer::timeout, overlaySource_, &WeatherOverlaySource::refresh);
+    connect(overlayRefreshTimer_, &QTimer::timeout, spcSource_, &SpcConvectiveSource::refresh);
     connect(animationTimer_, &QTimer::timeout, this, &MainWindow::advanceFrame);
     healthTimer_->setInterval(30'000); // 30 s — enough resolution to flip Online/Stale
     healthTimer_->setSingleShot(false);
@@ -549,6 +573,14 @@ MainWindow::MainWindow(QWidget* parent)
     connect(placefilesCheck_, &QCheckBox::toggled, this, [this](const bool visible) {
         for (auto* panel : maps_) panel->setPlacefilesVisible(visible);
     });
+    connect(spcOutlookCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setSpcOutlookVisible(visible);
+        refreshLayerBadges();
+    });
+    connect(mcdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setMcdVisible(visible);
+        refreshLayerBadges();
+    });
     connect(addPlacefileButton_, &QToolButton::clicked, this, &MainWindow::openLocalPlacefile);
     connect(addPlacefileUrlButton_, &QToolButton::clicked, this, &MainWindow::addPlacefileUrl);
     connect(clearPlacefilesButton_, &QToolButton::clicked, this, &MainWindow::clearPlacefiles);
@@ -611,6 +643,19 @@ MainWindow::MainWindow(QWidget* parent)
             });
     connect(overlaySource_, &WeatherOverlaySource::statusChanged, this, [this](const QString& status) {
         overlayStatus_ = status;
+        updateUnifiedStatus();
+    });
+    connect(spcSource_, &SpcConvectiveSource::outlooksReady, this,
+            [this](QVector<SpcOutlookFeature> outlooks) {
+                for (auto* panel : maps_) panel->setSpcOutlooks(outlooks);
+                refreshLayerBadges();
+            });
+    connect(spcSource_, &SpcConvectiveSource::mcdsReady, this, [this](QVector<SpcMcd> mcds) {
+        for (auto* panel : maps_) panel->setMcds(mcds);
+        refreshLayerBadges();
+    });
+    connect(spcSource_, &SpcConvectiveSource::statusChanged, this, [this](const QString& status) {
+        spcStatus_ = status;
         updateUnifiedStatus();
     });
     connect(glmSource_, &GlmSource::cellsUpdated, this,
@@ -720,8 +765,10 @@ MainWindow::MainWindow(QWidget* parent)
     addShortcut(QKeySequence(Qt::Key_L), [this] { liveButton_->setChecked(true); });
     addShortcut(QKeySequence(Qt::Key_B), [this] { toggleFrameBookmark(); });
     addShortcut(QKeySequence(QStringLiteral("Ctrl+K")), [this] { showCommandPalette(); });
-    for (int product = 0; product < productCombo_->count() && product < 9; ++product) {
-        addShortcut(QKeySequence(Qt::Key_1 + product), [this, product] { productCombo_->setCurrentIndex(product); });
+    // Products 1-9 take digit keys, the 10th takes 0 (GR-style).
+    for (int product = 0; product < productCombo_->count() && product < 10; ++product) {
+        const auto key = product < 9 ? Qt::Key_1 + product : Qt::Key_0;
+        addShortcut(QKeySequence(key), [this, product] { productCombo_->setCurrentIndex(product); });
     }
     addShortcut(QKeySequence(QStringLiteral("?")), [this] {
         auto* dialog = new ShortcutHelpDialog(this);
@@ -773,6 +820,7 @@ MainWindow::MainWindow(QWidget* parent)
     refreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/radarRefreshSeconds"), 60).toInt(),
                                     30, 600) * 1000);
     overlaySource_->refresh();
+    spcSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
     glmSource_->configure(glmConfigFromSettings());
@@ -1147,6 +1195,34 @@ void MainWindow::buildUi() {
     velocityBoxLayout->addWidget(velocityCaption);
     productGroup->addWidget(velocityBox_);
     velocityBox_->hide();
+    // CAPPI altitude selector: same contextual pattern as the velocity box,
+    // visible only while the active panel views CAPPI. The height is a
+    // global MSL setting (the derived field lives on the shared chunk),
+    // so changing it re-derives histories in the background.
+    cappiBox_ = new QWidget(controlBody);
+    cappiBox_->setObjectName(QStringLiteral("cappiBox"));
+    auto* cappiBoxLayout = new QVBoxLayout(cappiBox_);
+    cappiBoxLayout->setContentsMargins(0, 0, 0, 0);
+    cappiBoxLayout->setSpacing(4);
+    auto* cappiCaption = new QLabel(QStringLiteral("CAPPI height (MSL)"), controlBody);
+    cappiCaption->setObjectName(QStringLiteral("groupCaption"));
+    cappiBoxLayout->addWidget(cappiCaption);
+    cappiHeightCombo_ = new QComboBox(controlBody);
+    cappiHeightCombo_->setObjectName(QStringLiteral("cappiHeightCombo"));
+    cappiHeightCombo_->addItem(QStringLiteral("2 km"), 2000);
+    cappiHeightCombo_->addItem(QStringLiteral("3 km"), 3000);
+    cappiHeightCombo_->addItem(QStringLiteral("4 km"), 4000);
+    cappiHeightCombo_->addItem(QStringLiteral("5 km"), 5000);
+    cappiHeightCombo_->addItem(QStringLiteral("7 km"), 7000);
+    cappiHeightCombo_->setToolTip(QStringLiteral("Constant altitude for the CAPPI product, meters above sea level"));
+    cappiBoxLayout->addWidget(cappiHeightCombo_);
+    productGroup->addWidget(cappiBox_);
+    cappiBox_->hide();
+    connect(cappiHeightCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](const int index) {
+                if (index >= 0 && cappiHeightCombo_->itemData(index).isValid())
+                    setCappiHeightM(cappiHeightCombo_->itemData(index).toDouble());
+            });
 
     auto* layersGroup = makeGroup(layersPageLayout, QStringLiteral("Layers"), QStringLiteral("layers"));
     auto* displayGroup = makeGroup(displayPageLayout, QStringLiteral("Display"), QStringLiteral("display"));
@@ -1251,6 +1327,14 @@ void MainWindow::buildUi() {
                  QStringLiteral("Chaser and spotter feeds"), placefilesBadge_,
                  QStringLiteral("placefilesBadge"), true,
                  QStringLiteral("Show loaded GR-compatible placefile markers and boundaries"));
+    makeLayerRow(spcOutlookCheck_, QStringLiteral("SPC outlook"), QStringLiteral("spcOutlookCheck"),
+                 QStringLiteral("Day 1 + 2 categorical risk"), spcOutlookBadge_,
+                 QStringLiteral("spcOutlookBadge"), true,
+                 QStringLiteral("Storm Prediction Center Day 1 and Day 2 categorical outlooks in official colors. Context, not a warning."));
+    makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
+                 QStringLiteral("Active mesoscale discussions"), mcdBadge_,
+                 QStringLiteral("mcdBadge"), true,
+                 QStringLiteral("Active SPC mesoscale discussions with watch probability. Tornado and severe watches already arrive through NWS alerts."));
     auto* placefileRow = new QHBoxLayout();
     placefileRow->setSpacing(4);
     // Share the row evenly and allow shrinking. These three default to their
@@ -2337,29 +2421,31 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
     if (!multiTilt || session->derivingVolumeIds.contains(volumeId)) return;
     session->derivingVolumeIds.insert(volumeId);
     const QPointer<MainWindow> guard(this);
+    const double cappiHeightM = cappiHeightM_;
     QThreadPool::globalInstance()->start(
-        [guard, volume, radarId, volumeId, radarElevationMeters] {
+        [guard, volume, radarId, volumeId, radarElevationMeters, cappiHeightM] {
             // Deep copy on the pool thread (never on the GUI thread), then
             // derive in place. The published base frame stays immutable and
             // readable the whole time.
             auto derived = std::make_shared<DecodedChunk>(*volume);
-            appendDerivedProducts(*derived, radarElevationMeters);
+            appendDerivedProducts(*derived, radarElevationMeters, cappiHeightM);
             if (!guard) return;
             QMetaObject::invokeMethod(
                 guard.data(),
-                [guard, radarId, volumeId, derived] {
-                    if (guard) guard->swapDerivedVolume(radarId, volumeId, derived);
+                [guard, radarId, volumeId, derived, cappiHeightM] {
+                    if (guard) guard->swapDerivedVolume(radarId, volumeId, derived, cappiHeightM);
                 },
                 Qt::QueuedConnection);
         });
     if (radarId == selectedRadarId()) {
-        radarStatus_ = QStringLiteral("%1 live · Echo Tops + VIL deriving in background").arg(radarId);
+        radarStatus_ = QStringLiteral("%1 live · derived products (ET/VIL/CREF/CAPPI) in background").arg(radarId);
         updateUnifiedStatus();
     }
 }
 
 void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volumeId,
-                                   std::shared_ptr<DecodedChunk> derived) {
+                                   std::shared_ptr<DecodedChunk> derived,
+                                   const double cappiHeightM) {
     const auto session = sessionFor(radarId, false);
     if (!session) return;
     session->derivingVolumeIds.remove(volumeId);
@@ -2370,6 +2456,7 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
                                  });
     // Evicted while deriving (history cap) or superseded: nothing to swap.
     if (it == session->history.end()) return;
+    it->cappiHeightM = cappiHeightM;
     if (it->chunk) {
         it->chunk = std::move(derived);
     } else if (!it->spilledPath.isEmpty()) {
@@ -2725,6 +2812,29 @@ void MainWindow::showFrame(const int index) {
                                 panelFrame.chunkCount, panelFrame.failedChunks,
                                 panelChunk->rejectedMessages, panelChunk->rejectedBlocks);
     }
+    // Lazy CAPPI refresh: spilled frames faulted back in may carry a field
+    // derived at a previous altitude. Re-derive in the background instead
+    // of showing a silently wrong height; the swap refreshes the display.
+    for (auto* panel : maps_) {
+        const auto panelSession = sessionFor(panel->radarId(), false);
+        if (!panelSession || panelSession->frameIndex < 0 ||
+            panelSession->frameIndex >= static_cast<int>(panelSession->history.size()))
+            continue;
+        const auto& shown = panelSession->history.at(static_cast<std::size_t>(panelSession->frameIndex));
+        if (!shown.chunk) continue;
+        const bool hasCappi = std::any_of(
+            shown.chunk->rays.cbegin(), shown.chunk->rays.cend(),
+            [](const DecodedRay& ray) { return ray.has(ProductKind::Cappi); });
+        if (!hasCappi) continue;
+        if (!std::isnan(shown.cappiHeightM) && shown.cappiHeightM == cappiHeightM_) continue;
+        double radarElevationMeters = 0.0;
+        if (model_) {
+            const auto radarRow = model_->rowForRadar(panel->radarId());
+            if (radarRow >= 0) radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
+        }
+        launchFrameRederive(panel->radarId(), shown.volumeId, shown.chunk, radarElevationMeters,
+                             cappiHeightM_);
+    }
     updateProductAvailability();
     rebuildTiltCombo();
     const auto ageSeconds = std::max<qint64>(0, frame.dataTime.secsTo(QDateTime::currentDateTimeUtc()));
@@ -2903,6 +3013,20 @@ void MainWindow::restoreSettings() {
     for (auto* panel : maps_) panel->setCustomPalette(customStops);
     productCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("view/product"), 0).toInt(),
                                               0, productCombo_->count() - 1));
+    // Snap a foreign height (older builds, hand edits) to the nearest preset.
+    {
+        const double saved = settings.value(QStringLiteral("view/cappiHeightM"), 3000.0).toDouble();
+        double best = 3000.0;
+        double bestDistance = std::abs(saved - best);
+        for (const double preset : {2000.0, 3000.0, 4000.0, 5000.0, 7000.0}) {
+            const double distance = std::abs(preset - saved);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = preset;
+            }
+        }
+        cappiHeightM_ = best;
+    }
     paletteCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("view/palette"), 1).toInt(),
                                               0, paletteCombo_->count() - 1));
     refreshPalettePreview();
@@ -2937,12 +3061,16 @@ void MainWindow::restoreSettings() {
         panel->setTvsVisible(tvsCheck_->isChecked());
         panel->setHailVisible(hailCoreCheck_->isChecked());
         panel->setTdsVisible(tdsCheck_->isChecked());
+        panel->setSpcOutlookVisible(spcOutlookCheck_->isChecked());
+        panel->setMcdVisible(mcdCheck_->isChecked());
     }
     if (lightningCheck_->isEnabled())
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
     if (lightningFusionCheck_->isEnabled())
         lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
     placefilesCheck_->setChecked(settings.value(QStringLiteral("overlays/placefiles"), true).toBool());
+    spcOutlookCheck_->setChecked(settings.value(QStringLiteral("overlays/spcOutlook"), true).toBool());
+    mcdCheck_->setChecked(settings.value(QStringLiteral("overlays/mcd"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
     // speed combo. After the P1 round 2 expansion, 1x is at index 1, 2x at 2,
     // 4x at 3, and we added 0.5x, 8x, 16x at 0, 4, 5.
@@ -2971,6 +3099,7 @@ void MainWindow::saveSettings() const {
     if (controlDock_ && controlDock_->isVisible())
         settings.setValue(QStringLiteral("window/controlDockWidth"), controlDock_->width());
     settings.setValue(QStringLiteral("view/product"), productCombo_->currentIndex());
+    settings.setValue(QStringLiteral("view/cappiHeightM"), cappiHeightM_);
     settings.setValue(QStringLiteral("view/palette"), paletteCombo_->currentIndex());
     QStringList customStops;
     for (const auto& stop : map_->customPalette())
@@ -2995,6 +3124,8 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/lightning"), lightningCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/lightningFusion"), lightningFusionCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/placefiles"), placefilesCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/spcOutlook"), spcOutlookCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
     settings.setValue(QStringLiteral("timeline/maximumFrames"), maximumHistoryFrames_);
     settings.setValue(QStringLiteral("timeline/historyVolumes"), historyVolumeCount_);
@@ -3776,6 +3907,7 @@ void MainWindow::activateMap(RadarMapCanvas* map) {
     updateProductAvailability();
     rebuildTiltCombo();
     updateVelocityControls();
+    refreshCappiBox();
     updatePlaybackControls();
     const auto session = activeSession();
     if (session && !session->history.empty()) {
@@ -3883,6 +4015,16 @@ void MainWindow::refreshLayerBadges() {
     if (warningsBadge_) warningsBadge_->setText(QString::number(map_->warningCount()));
     if (reportsBadge_) reportsBadge_->setText(QString::number(map_->stormReportCount()));
     if (placefilesBadge_) placefilesBadge_->setText(QString::number(map_->placefileElementCount()));
+    if (spcOutlookBadge_) {
+        const auto n = map_->spcOutlookCount();
+        spcOutlookBadge_->setText(!spcOutlookCheck_ || !spcOutlookCheck_->isChecked() ? QStringLiteral("off")
+                                  : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
+    if (mcdBadge_) {
+        const auto n = map_->mcdCount();
+        mcdBadge_->setText(!mcdCheck_ || !mcdCheck_->isChecked() ? QStringLiteral("off")
+                          : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
     if (lightningBadge_) {
         if (!cappedweather::glmL2ReaderAvailable() || !lightningCheck_ ||
             !lightningCheck_->isChecked()) {
@@ -4046,8 +4188,7 @@ void MainWindow::synchronizeMapView(RadarMapCanvas* source) {
     synchronizingMapView_ = false;
 }
 
-void MainWindow::updateVelocityControls() {
-    if (!velocityModeCombo_ || !map_) return;
+void MainWindow::updateVelocityControls() {    if (!velocityModeCombo_ || !map_) return;
     const auto velocityProduct = map_->product() == ProductKind::Velocity;
     if (velocityBox_) velocityBox_->setVisible(velocityProduct);
     velocityModeCombo_->setEnabled(velocityProduct);
@@ -4056,6 +4197,76 @@ void MainWindow::updateVelocityControls() {
     const auto stormRelative = velocityProduct && velocityModeCombo_->currentIndex() == 2;
     stormDirectionSpin_->setEnabled(stormRelative);
     stormSpeedSpin_->setEnabled(stormRelative);
+}
+
+void MainWindow::refreshCappiBox() {
+    if (!cappiBox_ || !cappiHeightCombo_ || !map_) return;
+    cappiBox_->setVisible(map_->product() == ProductKind::Cappi);
+    const QSignalBlocker blocker(cappiHeightCombo_);
+    const auto index = cappiHeightCombo_->findData(static_cast<int>(std::llround(cappiHeightM_)));
+    cappiHeightCombo_->setCurrentIndex(index >= 0 ? index : 1);
+}
+
+void MainWindow::setCappiHeightM(const double heightM) {
+    if (heightM <= 0.0 || heightM == cappiHeightM_) return;
+    cappiHeightM_ = heightM;
+    QSettings().setValue(QStringLiteral("view/cappiHeightM"), cappiHeightM_);
+    refreshCappiBox();
+    rederiveAllForCappiHeight();
+}
+
+void MainWindow::launchFrameRederive(const QString& radarId, const QString& volumeId,
+                                     std::shared_ptr<DecodedChunk> base,
+                                     const double radarElevationMeters,
+                                     const double cappiHeightM) {
+    const auto session = sessionFor(radarId, false);
+    if (!session || !base || session->derivingVolumeIds.contains(volumeId)) return;
+    session->derivingVolumeIds.insert(volumeId);
+    const QPointer<MainWindow> guard(this);
+    QThreadPool::globalInstance()->start(
+        [guard, base, radarId, volumeId, radarElevationMeters, cappiHeightM] {
+            auto derived = std::make_shared<DecodedChunk>(*base);
+            appendDerivedProducts(*derived, radarElevationMeters, cappiHeightM);
+            if (!guard) return;
+            QMetaObject::invokeMethod(
+                guard.data(),
+                [guard, radarId, volumeId, derived, cappiHeightM] {
+                    if (guard) guard->swapDerivedVolume(radarId, volumeId, derived, cappiHeightM);
+                },
+                Qt::QueuedConnection);
+        });
+}
+
+void MainWindow::rederiveAllForCappiHeight() {
+    // Height change: every resident frame carrying a stale CAPPI field gets
+    // a background re-derive at the new altitude. Spilled frames are left
+    // on disk and re-derive lazily when scrubbed to (showFrame checks the
+    // per-frame tag). In-flight derives finish at their launch height;
+    // their tag marks them stale so they re-derive once, correctly.
+    for (const auto& radarId : radarSessions_.keys()) {
+        const auto session = sessionFor(radarId, false);
+        if (!session) continue;
+        double radarElevationMeters = 0.0;
+        const auto radarRow = model_ ? model_->rowForRadar(radarId) : -1;
+        if (model_ && radarRow >= 0)
+            radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
+        for (const auto& frame : session->history) {
+            if (!frame.chunk || frame.chunk->rays.empty()) continue;
+            const bool hasCappi = std::any_of(
+                frame.chunk->rays.cbegin(), frame.chunk->rays.cend(),
+                [](const DecodedRay& ray) { return ray.has(ProductKind::Cappi); });
+            if (!hasCappi) continue;
+            if (!std::isnan(frame.cappiHeightM) && frame.cappiHeightM == cappiHeightM_) continue;
+            launchFrameRederive(radarId, frame.volumeId, frame.chunk, radarElevationMeters,
+                                cappiHeightM_);
+        }
+    }
+    if (!selectedRadarId_.isEmpty()) {
+        radarStatus_ = QStringLiteral("%1 re-deriving CAPPI at %2 km")
+                           .arg(selectedRadarId_)
+                           .arg(cappiHeightM_ / 1000.0, 0, 'f', 0);
+        updateUnifiedStatus();
+    }
 }
 
 void MainWindow::updateCrossSectionAvailability() {

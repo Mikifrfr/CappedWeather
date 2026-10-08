@@ -11,6 +11,7 @@
 #include <QString>
 
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -26,6 +27,11 @@ struct RadarFrame {
     // on disk and faults back in when scrubbed to. Invariant: exactly
     // one of chunk / spilledPath is set for a live frame.
     QString spilledPath;
+    // MSL height (m) the frame's CAPPI field was derived at. NaN when the
+    // frame carries no CAPPI field. Compared against the global CAPPI
+    // height on display: a mismatch re-derives in the background instead
+    // of showing a silently wrong altitude.
+    double cappiHeightM = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct RadarSession {

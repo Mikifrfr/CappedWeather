@@ -54,13 +54,17 @@ void check(const bool condition, const char* expression, const char* file, const
 #define assert(expression) check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 void testProducts() {
-    assert(productDescriptors().size() == 8);
+    assert(productDescriptors().size() == 10);
     assert(productDescriptor(ProductKind::Reflectivity).unit == "dBZ");
     assert(productDescriptor(ProductKind::CorrelationCoefficient).maximum == 1.05);
     assert(productDescriptor(ProductKind::EchoTop).unit == "kft MSL");
     assert(productDescriptor(ProductKind::VerticallyIntegratedLiquid).unit == "kg/m2");
+    assert(productDescriptor(ProductKind::CompositeReflectivity).unit == "dBZ");
+    assert(productDescriptor(ProductKind::Cappi).unit == "dBZ");
     assert(isDerivedProduct(ProductKind::EchoTop));
     assert(isDerivedProduct(ProductKind::VerticallyIntegratedLiquid));
+    assert(isDerivedProduct(ProductKind::CompositeReflectivity));
+    assert(isDerivedProduct(ProductKind::Cappi));
     assert(!isDerivedProduct(ProductKind::Reflectivity));
 }
 
@@ -146,6 +150,52 @@ void testDerivedProductsRequireVolumeDepth() {
     assert(summary.outputRayCount == 0);
     assert(!chunk.rays.front().has(ProductKind::EchoTop));
     assert(!chunk.rays.front().has(ProductKind::VerticallyIntegratedLiquid));
+    assert(!chunk.rays.front().has(ProductKind::CompositeReflectivity));
+    assert(!chunk.rays.front().has(ProductKind::Cappi));
+}
+
+void testCrefIsColumnMax() {
+    // Low tilt hot (30), high tilt weak (10): CREF reads the low tilt.
+    DecodedChunk chunk;
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 2, 5.0F, 10.0));
+    const auto summary = appendDerivedProducts(chunk, 370.0);
+    assert(summary.crefGateCount > 0);
+    const auto crefIndex = static_cast<std::size_t>(ProductKind::CompositeReflectivity);
+    const auto& field = chunk.rays.front().fields.at(crefIndex);
+    assert(!field.empty());
+    const auto value = nativeValue(field.at(10), 2.0F, 66.0F);
+    assert(value && std::abs(*value - 30.0) < 0.6);
+    // Flip the profile: CREF follows the hot tilt aloft.
+    DecodedChunk flipped;
+    flipped.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 10.0));
+    flipped.rays.push_back(syntheticDerivedRay(90.0F, 2, 5.0F, 45.0));
+    appendDerivedProducts(flipped, 370.0);
+    const auto flippedValue =
+        nativeValue(flipped.rays.front().fields.at(crefIndex).at(10), 2.0F, 66.0F);
+    assert(flippedValue && std::abs(*flippedValue - 45.0) < 0.6);
+}
+
+void testCappiInterpolatesAndClamps() {
+    // Gate 10 sits near 10 km slant: ~0.46 km MSL on the 0.5-deg tilt,
+    // ~1.25 km MSL on the 5-deg tilt (radar at 370 m).
+    DecodedChunk chunk;
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 2, 5.0F, 10.0));
+    const auto cappiIndex = static_cast<std::size_t>(ProductKind::Cappi);
+    const auto read = [&chunk, cappiIndex](double heightM) {
+        appendDerivedProducts(chunk, 370.0, heightM);
+        return nativeValue(chunk.rays.front().fields.at(cappiIndex).at(10), 2.0F, 66.0F);
+    };
+    // Between the beams: interpolation, strictly inside (10, 30).
+    const auto mid = read(800.0);
+    assert(mid && *mid > 10.0 && *mid < 30.0);
+    // Below the lowest sample: clamped to the lowest tilt.
+    const auto low = read(100.0);
+    assert(low && std::abs(*low - 30.0) < 0.6);
+    // Above the scan top: missing, never invented.
+    appendDerivedProducts(chunk, 370.0, 20000.0);
+    assert(chunk.rays.front().fields.at(cappiIndex).at(10) <= 1);
 }
 
 void testDerivedSupportGate() {
@@ -1687,6 +1737,8 @@ int main() {
     testDerivedProducts();
     testDerivedEchoTopLowerBoundWithMissingUpperData();
     testDerivedProductsRequireVolumeDepth();
+    testCrefIsColumnMax();
+    testCappiInterpolatesAndClamps();
     testDerivedSupportGate();
     testStormTracker();
     testVolumeBrick();

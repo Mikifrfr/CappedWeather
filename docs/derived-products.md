@@ -1,12 +1,34 @@
-# Echo Tops and VIL derived products
+# Echo Tops, VIL, CREF, and CAPPI derived products
 
-CappedWeather derives two 2D products from each completed Level II reflectivity volume. They are intentionally volume-derived approximations, not byte-for-byte reproductions of proprietary GR or NEXRAD RPG products.
+CappedWeather derives four 2D products from each completed Level II reflectivity volume. They are intentionally volume-derived approximations, not byte-for-byte reproductions of proprietary GR or NEXRAD RPG products.
 
 ## Echo top (18 dBZ)
 
 For every gate in the lowest distinct reflectivity sweep, CappedWeather samples the nearest ray at the same azimuth and horizontal ground range in each higher sweep. Beam height uses the existing standard 4/3-earth geometry and includes the radar antenna elevation, so output is in **thousands of feet MSL (`kft MSL`)**.
 
 The echo top is the highest 18 dBZ crossing in the sampled vertical column. When a sample at or above 18 dBZ is followed by a weaker sample, the crossing height is linearly interpolated between the two beam centers. If the highest available sweep is still at or above 18 dBZ, the displayed height is a lower bound limited by the scan top.
+
+## Composite reflectivity (CREF)
+
+For every gate in the lowest distinct reflectivity sweep, CREF is the
+maximum reflectivity sampled across all tilts at the same azimuth and
+horizontal ground range (same sampling as Echo Tops/VIL, no adjacency
+rule: every sample is a real measurement). Encoded in dBZ with the base
+reflectivity packing, so palettes and the cursor probe agree with REF
+gate for gate. Reads hotter than any single tilt by construction.
+
+## CAPPI (constant-altitude PPI)
+
+Reflectivity linearly interpolated in dBZ between the adjacent-tilt
+pair bracketing the selected altitude (MSL, 2/3/4/5/7 km in the
+product panel; the altitude is a global setting, so every panel and
+every stored frame agrees). Below the lowest sample the column reads
+the lowest tilt (standard clamp); above the highest sample the gate is
+missing, never an invented top. Non-adjacent tilts never interpolate,
+same no-bridging rule as VIL. Changing the altitude re-derives resident
+histories in the background; spilled frames re-derive lazily when
+scrubbed to (each frame is tagged with its derivation altitude, so a
+stale height can never display silently).
 
 ## Vertically integrated liquid (VIL)
 

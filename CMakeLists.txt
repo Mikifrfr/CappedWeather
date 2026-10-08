@@ -204,6 +204,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/radar_list_model.hpp
             src/app/shortcut_help_dialog.cpp
             src/app/shortcut_help_dialog.hpp
+            src/app/spc_convective.cpp
+            src/app/spc_convective.hpp
             src/app/weather_overlay_source.cpp
             src/app/weather_overlay_source.hpp
         )

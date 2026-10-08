@@ -52,6 +52,7 @@ class RadarMapCanvas;
 class CrossSectionWidget;
 class RadarListModel;
 class WeatherOverlaySource;
+class SpcConvectiveSource;
 class PlacefileSource;
 class ArchiveSource;
 class AlertCenter;
@@ -120,7 +121,15 @@ private:
     // Background derived-product swap: replaces a published base frame's
     // chunk once ET18/VIL finish off the critical path.
     void swapDerivedVolume(const QString& radarId, const QString& volumeId,
-                           std::shared_ptr<DecodedChunk> derived);
+                           std::shared_ptr<DecodedChunk> derived, double cappiHeightM);
+    // CAPPI altitude (global MSL setting): re-derives resident histories in
+    // the background; spilled frames re-derive lazily on display.
+    void setCappiHeightM(double heightM);
+    void refreshCappiBox();
+    void rederiveAllForCappiHeight();
+    void launchFrameRederive(const QString& radarId, const QString& volumeId,
+                             std::shared_ptr<DecodedChunk> base, double radarElevationMeters,
+                             double cappiHeightM);
     void updateCrossSectionAvailability();
     void restoreSettings();
     void saveSettings() const;
@@ -218,6 +227,12 @@ private:
     QWidget* tiltGridBox_ = nullptr;
     QVector<QToolButton*> tiltGridButtons_;
     QWidget* velocityBox_ = nullptr;
+    // CAPPI altitude selector (global MSL height for the derived CAPPI
+    // field). Shown only while the active panel views CAPPI, like the
+    // velocity box shows only for VEL.
+    QWidget* cappiBox_ = nullptr;
+    QComboBox* cappiHeightCombo_ = nullptr;
+    double cappiHeightM_ = 3000.0;
     QComboBox* stationCombo_ = nullptr;
     QComboBox* warningFilterCombo_ = nullptr;
     QComboBox* paletteCombo_ = nullptr;
@@ -280,6 +295,10 @@ private:
     QLabel* hailCoreBadge_ = nullptr;
     QCheckBox* tdsCheck_ = nullptr;
     QLabel* tdsBadge_ = nullptr;
+    QCheckBox* spcOutlookCheck_ = nullptr;
+    QLabel* spcOutlookBadge_ = nullptr;
+    QCheckBox* mcdCheck_ = nullptr;
+    QLabel* mcdBadge_ = nullptr;
     QCheckBox* trailCheck_ = nullptr;
     QCheckBox* smoothingCheck_ = nullptr;
     QLabel* scanDiagnosticsLabel_ = nullptr;
@@ -317,6 +336,7 @@ private:
     OperaSource* operaSource_ = nullptr;
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
+    SpcConvectiveSource* spcSource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;
     ArchiveSource* archiveSource_ = nullptr;
     AlertCenter* alertCenter_ = nullptr;
@@ -326,6 +346,7 @@ private:
     QString selectedRadarId_;
     QString radarStatus_ = QStringLiteral("Pick a station → LIVE → timeline → overlays");
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
+    QString spcStatus_;
     QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");
     QStringList recentRadarIds_;
     QStringList remotePlacefileUrls_;

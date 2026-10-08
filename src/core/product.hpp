@@ -15,9 +15,11 @@ enum class ProductKind {
     DifferentialPhase,
     EchoTop,
     VerticallyIntegratedLiquid,
+    CompositeReflectivity,
+    Cappi,
 };
 
-inline constexpr std::size_t kProductCount = 8;
+inline constexpr std::size_t kProductCount = 10;
 
 struct ProductDescriptor {
     ProductKind kind;
@@ -35,7 +37,8 @@ const std::vector<ProductDescriptor>& productDescriptors();
 // productDescriptor() unless a missing descriptor is a programming error.
 const ProductDescriptor* tryProductDescriptor(ProductKind kind) noexcept;
 constexpr bool isDerivedProduct(const ProductKind kind) {
-    return kind == ProductKind::EchoTop || kind == ProductKind::VerticallyIntegratedLiquid;
+    return kind == ProductKind::EchoTop || kind == ProductKind::VerticallyIntegratedLiquid ||
+           kind == ProductKind::CompositeReflectivity || kind == ProductKind::Cappi;
 }
 
 } // namespace cappedweather

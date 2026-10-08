@@ -220,10 +220,23 @@ QColor productColor(const ProductKind product, const double normalized,
                 {20, QColor("#67c95c")}, {30, QColor("#e6d64a")}, {40, QColor("#f28b35")},
                 {60, QColor("#df365f")}, {80, QColor("#e9e4ff")},
             }, value, alpha);
+        case ProductKind::CompositeReflectivity:
+        case ProductKind::Cappi:
+            // dBZ-derived fields share REF packing by construction, so they
+            // share the REF stops gate for gate.
+            return discretePalette({
+                {-32, QColor("#646464")}, {-30, QColor("#04e9e7")}, {-25, QColor("#00b4d8")},
+                {-20, QColor("#019ff4")}, {-10, QColor("#0245f0")}, {0, QColor("#022cd8")},
+                {5, QColor("#019ff4")}, {15, QColor("#0300f4")}, {20, QColor("#02fd02")},
+                {30, QColor("#008e00")}, {40, QColor("#fdf802")}, {50, QColor("#fd9500")},
+                {55, QColor("#fd0000")}, {65, QColor("#bc00bc")}, {75, QColor("#f8f8f8")},
+            }, value, alpha);
         }
     }
     switch (product) {
     case ProductKind::Reflectivity:
+    case ProductKind::CompositeReflectivity:
+    case ProductKind::Cappi:
         return interpolatePalette({
             {0.00, QColor("#102b3a")}, {0.16, QColor("#146b78")},
             {0.30, QColor("#35c7b4")}, {0.44, QColor("#b7e75c")},
@@ -1105,6 +1118,36 @@ void RadarMapCanvas::setStormReportsVisible(const bool visible) {
     update();
 }
 
+void RadarMapCanvas::setSpcOutlooks(QVector<SpcOutlookFeature> outlooks) {
+    spcOutlooks_ = std::move(outlooks);
+    update();
+}
+
+void RadarMapCanvas::setSpcOutlookVisible(const bool visible) {
+    if (spcOutlookVisible_ == visible) return;
+    spcOutlookVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::spcOutlookCount() const {
+    return static_cast<int>(spcOutlooks_.size());
+}
+
+void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
+    mcds_ = std::move(mcds);
+    update();
+}
+
+void RadarMapCanvas::setMcdVisible(const bool visible) {
+    if (mcdVisible_ == visible) return;
+    mcdVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::mcdCount() const {
+    return static_cast<int>(mcds_.size());
+}
+
 void RadarMapCanvas::setStormReportKindVisible(const StormReportKind kind, const bool visible) {
     if (stormReportKindsVisible_.at(static_cast<std::size_t>(kind)) == visible) return;
     stormReportKindsVisible_.at(static_cast<std::size_t>(kind)) = visible;
@@ -1114,8 +1157,7 @@ void RadarMapCanvas::setStormReportKindVisible(const StormReportKind kind, const
     update();
 }
 
-void RadarMapCanvas::setWarningFilter(const QString& filter) {
-    if (warningFilter_ == filter) return;
+void RadarMapCanvas::setWarningFilter(const QString& filter) {    if (warningFilter_ == filter) return;
     warningFilter_ = filter;
     ++weatherGeneration_;
     weatherOverlayImage_ = {};
@@ -2458,6 +2500,86 @@ void RadarMapCanvas::paintWeatherOverlays(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintSpcOutlook(QPainter& painter) {
+    if (!spcOutlookVisible_ || spcOutlooks_.isEmpty()) return;
+    // Background context under warnings: official SPC fills at low alpha
+    // with the official outline. Day 2 draws first so Day 1 wins overlaps.
+    painter.save();    painter.setRenderHint(QPainter::Antialiasing, true);
+    QVector<const SpcOutlookFeature*> ordered;
+    for (const auto& feature : spcOutlooks_) ordered.push_back(&feature);
+    std::sort(ordered.begin(), ordered.end(), [](const SpcOutlookFeature* a, const SpcOutlookFeature* b) {
+        // Day 2 draws first so Day 1 wins overlaps; within a day higher
+        // severity paints last.
+        if (a->day != b->day) return a->day > b->day;
+        return a->dn < b->dn;
+    });
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto* feature : ordered) {
+        QColor fill(feature->fill.isEmpty() ? QStringLiteral("#94a3b8") : feature->fill);
+        QColor stroke(feature->stroke.isEmpty() ? QStringLiteral("#475569") : feature->stroke);
+        fill.setAlpha(34);
+        painter.setBrush(fill);
+        painter.setPen(QPen(stroke, 1.5));
+        for (const auto& ring : feature->rings) {
+            QPolygonF polygon;
+            polygon.reserve(ring.exterior.size());
+            for (const auto& lonLat : ring.exterior)
+                polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (!viewport.intersects(polygon.boundingRect())) continue;
+            painter.drawPolygon(polygon, Qt::OddEvenFill);
+            if (zoom_ >= 6 && !feature->label2.isEmpty()) {
+                double cx = 0.0, cy = 0.0;
+                for (const auto& point : polygon) {
+                    cx += point.x();
+                    cy += point.y();
+                }
+                cx /= std::max(1.0, static_cast<double>(polygon.size()));
+                cy /= std::max(1.0, static_cast<double>(polygon.size()));
+                painter.setPen(stroke);
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                painter.drawText(QRectF(cx - 90, cy - 10, 180, 20),
+                                 Qt::AlignCenter,
+                                 QStringLiteral("Day %1 %2").arg(feature->day).arg(feature->label2));
+            }
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {
+    if (!mcdVisible_ || mcds_.isEmpty()) return;
+    // Watch-area outlines above warnings: dashed violet, never filled enough
+    // to hide what is underneath. Labels carry the watch probability.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto& mcd : mcds_) {
+        if (mcd.exterior.size() < 4) continue;
+        QPolygonF polygon;
+        polygon.reserve(mcd.exterior.size());
+        for (const auto& lonLat : mcd.exterior) polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+        if (!viewport.intersects(polygon.boundingRect())) continue;
+        QColor violet(QStringLiteral("#c084fc"));
+        QColor fill = violet;
+        fill.setAlpha(22);
+        painter.setBrush(fill);
+        painter.setPen(QPen(violet, 2.0, Qt::DashLine));
+        painter.drawPolygon(polygon, Qt::OddEvenFill);
+        if (zoom_ >= 6) {
+            const auto bounds = polygon.boundingRect();
+            painter.setPen(QColor(233, 213, 255));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            const auto label = mcd.watchProbabilityPercent >= 0
+                                   ? QStringLiteral("MCD %1 · %2%").arg(mcd.number).arg(
+                                         mcd.watchProbabilityPercent)
+                                   : QStringLiteral("MCD %1").arg(mcd.number);
+            painter.drawText(QRectF(bounds.left(), bounds.top() - 18, bounds.width(), 16),
+                             Qt::AlignLeft | Qt::AlignVCenter, label);
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintPlacefiles(QPainter& painter) {
     if (!placefilesVisible_ || placefiles_.isEmpty() || width() <= 0 || height() <= 0) return;
     const auto edge = geographicPoint(QPointF(width(), height() / 2.0));
@@ -3076,6 +3198,33 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             painter.setPen(QColor(255, 200, 140));
             painter.drawText(QRectF(x, 142, 130, 16), Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("● TDS %1").arg(static_cast<int>(tdsDetections_.size())));
+        }
+    }
+    if ((spcOutlookVisible_ && !spcOutlooks_.isEmpty()) || (mcdVisible_ && !mcds_.isEmpty())) {
+        const QRectF spcPanel(12, 162, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
+        painter.setBrush(QColor(8, 15, 19, 205));
+        painter.drawRoundedRect(spcPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        int x = 20;
+        if (spcOutlookVisible_ && !spcOutlooks_.isEmpty()) {
+            // Highest Day 1 risk reads at a glance; the map shows the rest.
+            const SpcOutlookFeature* top = nullptr;
+            for (const auto& feature : spcOutlooks_) {
+                if (feature.day != 1) continue;
+                if (!top || feature.dn > top->dn) top = &feature;
+            }
+            painter.setPen(QColor(134, 239, 172));
+            painter.drawText(
+                QRectF(x, 164, 150, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                top ? QStringLiteral("SPC Day 1: %1").arg(top->label2.isEmpty() ? top->label : top->label2)
+                    : QStringLiteral("SPC Day 1+2"));
+            x += 140;
+        }
+        if (mcdVisible_ && !mcds_.isEmpty()) {
+            painter.setPen(QColor(216, 180, 254));
+            painter.drawText(QRectF(x, 164, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("MCD %1").arg(static_cast<int>(mcds_.size())));
         }
     }
 
@@ -3760,6 +3909,28 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
             };
         }
     }
+    if (mcdVisible_) {
+        for (const auto& mcd : mcds_) {
+            if (mcd.exterior.size() < 4) continue;
+            QPolygonF polygon;
+            for (const auto& lonLat : mcd.exterior) polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (!polygon.containsPoint(point, Qt::OddEvenFill)) continue;
+            const auto valid = mcd.validFrom.isValid() && mcd.validTo.isValid()
+                                   ? QStringLiteral("Valid (UTC): %1 - %2")
+                                         .arg(mcd.validFrom.toString(QStringLiteral("MMM d HH:mm")),
+                                              mcd.validTo.toString(QStringLiteral("MMM d HH:mm")))
+                                   : QStringLiteral("Valid: unknown");
+            const auto probability = mcd.watchProbabilityPercent >= 0
+                                         ? QStringLiteral("Watch issuance: %1%")
+                                               .arg(mcd.watchProbabilityPercent)
+                                         : QStringLiteral("Watch issuance: unstated");
+            return {QStringLiteral("MCD %1 | %2\n%3 | %4\n%5\n\n%6\n\n%7")
+                        .arg(mcd.number)
+                        .arg(mcd.areas, mcd.concerning, valid, probability, mcd.summary,
+                             mcd.discussion),
+                    PinnedInfoKind::SpcMcd, std::nullopt};
+        }
+    }
     if (warningsVisible_) {
         const auto center = mapCenterWorld();
         auto worldPointAtCursor = QPointF(center.x() + point.x() - width() / 2.0,
@@ -3781,6 +3952,38 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
                         .arg(warning.event, warning.severity, warning.headline, onset, expires,
                              warning.senderName, warning.description, warning.instruction);
             }
+        }
+    }
+    if (spcOutlookVisible_) {
+        // Lowest click priority: the outlook is background context, so
+        // warnings, reports, and MCDs all win the click above.
+        const SpcOutlookFeature* best = nullptr;
+        for (const auto& feature : spcOutlooks_) {
+            for (const auto& ring : feature.rings) {
+                QPolygonF polygon;
+                for (const auto& lonLat : ring.exterior)
+                    polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+                if (!polygon.containsPoint(point, Qt::OddEvenFill)) continue;
+                // Higher severity wins overlaps (ENH over SLGT over TSTM).
+                if (!best || feature.dn > best->dn ||
+                    (feature.dn == best->dn && feature.day < best->day))
+                    best = &feature;
+                break;
+            }
+        }
+        if (best) {
+            const auto window = best->valid.isValid() && best->expire.isValid()
+                                    ? QStringLiteral("Valid (UTC): %1 - %2")
+                                          .arg(best->valid.toString(QStringLiteral("MMM d HH:mm")),
+                                               best->expire.toString(QStringLiteral("MMM d HH:mm")))
+                                    : QStringLiteral("Valid: see SPC");
+            const auto issuer = best->forecaster.isEmpty()
+                                    ? QStringLiteral("SPC")
+                                    : QStringLiteral("SPC (%1)").arg(best->forecaster);
+            return {QStringLiteral("Day %1 outlook: %2\n%3\n%4")
+                        .arg(best->day)
+                        .arg(best->label2.isEmpty() ? best->label : best->label2, window, issuer),
+                    PinnedInfoKind::SpcOutlook, std::nullopt};
         }
     }
     return {};
@@ -4282,12 +4485,15 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     }
     requestVisibleTiles();
     if (warningsOnTop_) {
+        paintSpcOutlook(painter);
         paintRadarOverlay(painter);
         paintWeatherOverlays(painter);
     } else {
+        paintSpcOutlook(painter);
         paintWeatherOverlays(painter);
         paintRadarOverlay(painter);
     }
+    paintMcdOverlays(painter);
     paintPlacefiles(painter);
     paintLightningOverlay(painter);
 

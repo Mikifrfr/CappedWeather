@@ -2,6 +2,7 @@
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
 #include "app/weather_overlay_source.hpp"
+#include "app/spc_convective.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -596,8 +597,8 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
     // Product chips mirror the product combo.
     auto* products = window->findChild<QComboBox*>(QStringLiteral("productCombo"));
     const auto chips = window->findChildren<QToolButton*>(QStringLiteral("productChip"));
-    if (chips.size() != 8 || !products) {
-        *error = QStringLiteral("product chip grid should have 8 chips, got %1").arg(chips.size());
+    if (chips.size() != 10 || !products || chips.size() != products->count()) {
+        *error = QStringLiteral("product chip grid should have 10 chips, got %1").arg(chips.size());
         return false;
     }
     for (const auto* chip : chips) {
@@ -1296,6 +1297,7 @@ int main(int argc, char** argv) {
     if (auto* liveNexrad = window.findChild<NexradSource*>()) liveNexrad->disconnect();
     if (auto* liveOverlays = window.findChild<WeatherOverlaySource*>()) liveOverlays->disconnect();
     if (auto* liveGlm = window.findChild<GlmSource*>()) liveGlm->disconnect();
+    if (auto* liveSpc = window.findChild<SpcConvectiveSource*>()) liveSpc->disconnect();
 
     auto* map = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
     auto* secondMap = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
@@ -1327,9 +1329,11 @@ int main(int argc, char** argv) {
     const auto radarPanels = window.findChildren<RadarMapCanvas*>();
     auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
-    if (!map || !secondMap || !products || products->count() != 8 ||
+    if (!map || !secondMap || !products || products->count() != 10 ||
         products->findData(static_cast<int>(ProductKind::EchoTop)) < 0 ||
         products->findData(static_cast<int>(ProductKind::VerticallyIntegratedLiquid)) < 0 ||
+        products->findData(static_cast<int>(ProductKind::CompositeReflectivity)) < 0 ||
+        products->findData(static_cast<int>(ProductKind::Cappi)) < 0 ||
         !tiltCombo || !crossSectionButton || !frameSlider || !frameLabel || !playButton ||
         !snapshotButton || !timelineButton || !warningsCheck || !reportsCheck ||
         !lightningCheck || !lightningFusionCheck || !placefilesCheck ||
@@ -1729,6 +1733,78 @@ UnsupportedThing: ignored safely
         QByteArray{}, StormReportKind::Tornado, &parseError);
     if (!parseError.isEmpty() || !noReports.isEmpty()) {
         std::cerr << "Empty SPC report response should be a valid zero-report result\n";
+        return 1;
+    }
+    // SPC outlook GeoJSON: Day 1 TSTM + MDT, official colors, ISO windows.
+    const QByteArray outlook = R"JSON({"type":"FeatureCollection","features":[
+      {"type":"Feature","geometry":{"type":"MultiPolygon","coordinates":[[[[-100.0,35.0],[-99.0,35.0],[-99.0,36.0],[-100.0,35.0]]]]},
+       "properties":{"DN":2,"VALID":"202610081300","EXPIRE":"202610091200","ISSUE":"202610081246",
+         "VALID_ISO":"2026-10-08T13:00:00+00:00","EXPIRE_ISO":"2026-10-09T12:00:00+00:00","ISSUE_ISO":"2026-10-08T12:46:00+00:00",
+         "FORECASTER":"Guyer","LABEL":"TSTM","LABEL2":"General Thunderstorms Risk","stroke":"#55BB55","fill":"#C1E9C1"}},
+      {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-97.0,36.0],[-96.0,36.0],[-96.0,37.0],[-97.0,36.0]]]}},
+      {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-97.0,36.0],[-96.0,36.0],[-96.0,37.0],[-97.0,36.0]]]},"properties":{"DN":6,"LABEL":"MDT","LABEL2":"Moderate Risk"}}
+    ]})JSON";
+    const auto outlooks = parseSpcOutlookGeoJson(outlook, 1, &parseError);
+    if (!parseError.isEmpty() || outlooks.size() != 2 || outlooks.front().day != 1 ||
+        outlooks.front().label2 != QStringLiteral("General Thunderstorms Risk") ||
+        outlooks.front().rings.size() != 1 ||
+        outlooks.front().rings.front().exterior.size() != 4 ||
+        outlooks.front().valid !=
+            QDateTime(QDate(2026, 10, 8), QTime(13, 0), QTimeZone::UTC) ||
+        outlooks.back().dn != 6 ||
+        outlooks.back().label != QStringLiteral("MDT")) {
+        std::cerr << "SPC outlook parsing failed\n";
+        return 1;
+    }
+    // MCD RSS: one active discussion plus the quiet-state item (skipped).
+    const QByteArray mcdRss = R"XML(<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel>
+<item><title>Mesoscale Discussion 2346</title><link>https://www.spc.noaa.gov/products/md/md2346.html</link></item>
+<item><title>SPC - No MDs are in effect</title><link>https://www.spc.noaa.gov/products/md/</link></item>
+</channel></rss>)XML";
+    const auto candidates = parseMcdRss(mcdRss, &parseError);
+    if (!parseError.isEmpty() || candidates.size() != 1 || candidates.front().number != 2346) {
+        std::cerr << "MCD RSS parsing failed\n";
+        return 1;
+    }
+    const QByteArray mcdQuiet = R"XML(<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel>
+<item><title>SPC - No MDs are in effect as of Tue Oct 7 2026</title><link>https://www.spc.noaa.gov/products/md/</link></item>
+</channel></rss>)XML";
+    if (!parseMcdRss(mcdQuiet, &parseError).isEmpty()) {
+        std::cerr << "Quiet MCD RSS should parse to zero candidates\n";
+        return 1;
+    }
+    // MCD discussion page: all anchors present, positive-west longitudes.
+    const QByteArray mcdPage = R"HTML(<html><head><title>Storm Prediction Center Mesoscale Discussion 2346</title></head><body><pre>
+Mesoscale Discussion 2346
+NWS Storm Prediction Center Norman OK
+0204 PM CDT Tue Oct 06 2026
+Areas affected...west-central Florida Peninsula
+Concerning...Severe potential...Watch unlikely
+Valid 061904Z - 062100Z
+Probability of Watch Issuance...5 percent
+SUMMARY...The risk for a brief tornado will increase near Tampa Bay.
+DISCUSSION...A small supercell west of Tampa Bay may move onshore.
+..Leitman/Smith.. 10/06/2026
+ATTN...WFO...TBW...
+LAT...LON 28128331 28218317 28288300 28188269 28128331
+</pre></body></html>)HTML";
+    const auto mcd = parseMcdPage(mcdPage, &parseError);
+    if (!parseError.isEmpty() || mcd.number != 2346 ||
+        mcd.areas != QStringLiteral("west-central Florida Peninsula") ||
+        mcd.watchProbabilityPercent != 5 ||
+        mcd.validFrom != QDateTime(QDate(2026, 10, 6), QTime(19, 4), QTimeZone::UTC) ||
+        mcd.validTo != QDateTime(QDate(2026, 10, 6), QTime(21, 0), QTimeZone::UTC) ||
+        mcd.exterior.size() != 5 ||
+        std::abs(mcd.exterior.front().x() + 83.31) > 0.001 ||
+        std::abs(mcd.exterior.front().y() - 28.12) > 0.001) {
+        std::cerr << "MCD page parsing failed\n";
+        return 1;
+    }
+    if (!parseMcdPage(QByteArray("<html><body>no discussion here</body></html>"), &parseError).exterior.isEmpty() ||
+        parseError.isEmpty()) {
+        std::cerr << "Non-MCD page should fail closed with an error\n";
         return 1;
     }
     const QByteArray meteoEmpty = R"XML(<?xml version="1.0" encoding="UTF-8"?>

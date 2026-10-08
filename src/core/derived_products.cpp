@@ -178,8 +178,7 @@ std::optional<std::pair<double, bool>> echoTopMeters(const std::vector<VerticalS
                      false};
 }
 
-std::optional<double> vilKilogramsPerSquareMeter(const std::vector<VerticalSample>& samples) {
-    if (samples.size() < 2 ||
+std::optional<double> vilKilogramsPerSquareMeter(const std::vector<VerticalSample>& samples) {    if (samples.size() < 2 ||
         std::none_of(samples.cbegin(), samples.cend(), [](const auto& sample) {
             return sample.reflectivityDbz >= kVilMinimumSignalDbz;
         }))
@@ -207,6 +206,49 @@ std::optional<double> vilKilogramsPerSquareMeter(const std::vector<VerticalSampl
     if (!integratedLayer) return std::nullopt;
     const auto vil = 3.44e-6 * integral;
     return std::isfinite(vil) ? std::optional<double>(std::max(0.0, vil)) : std::nullopt;
+}
+
+// Column maximum: the strongest reflectivity seen at any tilt over the
+// same ground range. No adjacency rule: every sample is a real measurement.
+std::optional<double> compositeReflectivityDbz(const std::vector<VerticalSample>& samples) {
+    std::optional<double> best;
+    for (const auto& sample : samples) {
+        if (!best || sample.reflectivityDbz > *best) best = sample.reflectivityDbz;
+    }
+    return best;
+}
+
+// Constant-altitude interpolation at heightMslMeters. Linear in dBZ between
+// the adjacent-tilt pair bracketing the height (same no-bridging rule as
+// VIL: non-adjacent ordinals never interpolate). Below the lowest sample
+// the column reads the lowest value (standard CAPPI clamp); above the
+// highest sample there is no data, never an invented top.
+std::optional<double> cappiReflectivityDbz(const std::vector<VerticalSample>& samples,
+                                           const double heightMslMeters) {
+    if (samples.empty() || !std::isfinite(heightMslMeters)) return std::nullopt;
+    if (heightMslMeters <= samples.front().heightMslMeters)
+        return samples.front().reflectivityDbz;
+    for (std::size_t index = 1; index < samples.size(); ++index) {
+        const auto& lower = samples[index - 1];
+        const auto& upper = samples[index];
+        if (upper.tiltOrdinal != lower.tiltOrdinal + 1) continue;
+        if (heightMslMeters > upper.heightMslMeters) continue;
+        const auto span = upper.heightMslMeters - lower.heightMslMeters;
+        if (span <= 0.0) continue;
+        const auto fraction =
+            std::clamp((heightMslMeters - lower.heightMslMeters) / span, 0.0, 1.0);
+        return lower.reflectivityDbz + fraction * (upper.reflectivityDbz - lower.reflectivityDbz);
+    }
+    return std::nullopt;
+}
+
+// REF-convention packing for dBZ-derived fields so palettes, probes, and
+// the base moment agree exactly: encoded = round(dbz * 2 + 66), 0 = missing.
+std::uint16_t encodeReflectivityDbz(const double dbz) {
+    if (!std::isfinite(dbz)) return 0;
+    const auto encoded = std::llround(dbz * 2.0 + 66.0);
+    if (encoded < 2) return 0;
+    return static_cast<std::uint16_t>(std::clamp<long long>(encoded, 2, 65535));
 }
 
 } // namespace
@@ -247,7 +289,8 @@ bool chunkSupportsDerivedProducts(const DecodedChunk& chunk) {
 }
 
 DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
-                                            const double radarElevationMeters) {
+                                            const double radarElevationMeters,
+                                            const double cappiHeightMslMeters) {
     DerivedProductSummary summary;
     const auto tilts = reflectivityTilts(chunk);
     summary.sourceTiltCount = static_cast<int>(tilts.size());
@@ -256,6 +299,8 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
     const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
     const auto echoTopIndex = static_cast<std::size_t>(ProductKind::EchoTop);
     const auto vilIndex = static_cast<std::size_t>(ProductKind::VerticallyIntegratedLiquid);
+    const auto crefIndex = static_cast<std::size_t>(ProductKind::CompositeReflectivity);
+    const auto cappiIndex = static_cast<std::size_t>(ProductKind::Cappi);
     const auto& lowestTilt = tilts.front();
     std::map<LookupKey, std::vector<GateLookup>> lookupCache;
 
@@ -269,6 +314,8 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
         if (spacing == 0) continue;
         auto echoTops = std::vector<std::uint16_t>(reflectivity.size(), 0);
         auto vilValues = std::vector<std::uint16_t>(reflectivity.size(), 0);
+        auto crefValues = std::vector<std::uint16_t>(reflectivity.size(), 0);
+        auto cappiValues = std::vector<std::uint16_t>(reflectivity.size(), 0);
         std::vector<ColumnSource> sources;
         sources.reserve(tilts.size());
 
@@ -334,6 +381,14 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
                     vilValue = *vil;
                 }
             }
+            if (const auto cref = compositeReflectivityDbz(samples)) {
+                crefValues[gate] = encodeReflectivityDbz(*cref);
+                if (crefValues[gate] > 1) ++summary.crefGateCount;
+            }
+            if (const auto cappi = cappiReflectivityDbz(samples, cappiHeightMslMeters)) {
+                cappiValues[gate] = encodeReflectivityDbz(*cappi);
+                if (cappiValues[gate] > 1) ++summary.cappiGateCount;
+            }
             // VILD diagnostic only: no new product field is materialized.
             if (echoTopHeightMeters && vilValue) {
                 const double baseHeightMeters = samples.front().heightMslMeters;
@@ -356,6 +411,18 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
         outputRay.gateSpacingByProduct.at(vilIndex) = spacing;
         outputRay.scaleByProduct.at(vilIndex) = kDerivedScale;
         outputRay.offsetByProduct.at(vilIndex) = kDerivedOffset;
+        // dBZ-derived fields share the REF packing so rendering, probing,
+        // and palettes agree with the base moment gate for gate.
+        outputRay.fields.at(crefIndex) = std::move(crefValues);
+        outputRay.firstGateByProduct.at(crefIndex) = firstGate;
+        outputRay.gateSpacingByProduct.at(crefIndex) = spacing;
+        outputRay.scaleByProduct.at(crefIndex) = 2.0F;
+        outputRay.offsetByProduct.at(crefIndex) = 66.0F;
+        outputRay.fields.at(cappiIndex) = std::move(cappiValues);
+        outputRay.firstGateByProduct.at(cappiIndex) = firstGate;
+        outputRay.gateSpacingByProduct.at(cappiIndex) = spacing;
+        outputRay.scaleByProduct.at(cappiIndex) = 2.0F;
+        outputRay.offsetByProduct.at(cappiIndex) = 66.0F;
         ++summary.outputRayCount;
     }
     return summary;
