@@ -1578,18 +1578,24 @@ void testTdsVetoes() {
 
 void testTdsNanParentFailsClosed() {
     // NaN vortex fix must not bypass the range gate (all NaN comparisons
-    // are false) and must never emit a phantom detection.
+    // are false) and must never emit a phantom detection. Proved with
+    // contrast disabled: with the default contrast gate the empty outer
+    // annulus would screen it anyway, hiding the range-gate hole.
     DecodedChunk chunk;
     chunk.radarId = "KTLX";
     chunk.rays.push_back(syntheticTdsRay(90.0F, 0.60, 55.0));
     chunk.rays.push_back(syntheticTdsRay(91.0F, 0.60, 55.0));
+    TdsConfig noContrast{};
+    noContrast.minContrast = 0.0;
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const std::vector<CirculationDetection> parents{
         syntheticTdsParent(nan, nan)};
-    assert(detectDebrisSignatures(chunk, parents, 35.333, -97.278, 370.0, {}).empty());
+    assert(detectDebrisSignatures(chunk, parents, 35.333, -97.278, 370.0, noContrast).empty());
     const std::vector<CirculationDetection> halfNan{
         syntheticTdsParent(35.5, nan)};
-    assert(detectDebrisSignatures(chunk, halfNan, 35.333, -97.278, 370.0, {}).empty());
+    assert(detectDebrisSignatures(chunk, halfNan, 35.333, -97.278, 370.0, noContrast).empty());
+    // And with default contrast on, still clean.
+    assert(detectDebrisSignatures(chunk, parents, 35.333, -97.278, 370.0, {}).empty());
 }
 
 

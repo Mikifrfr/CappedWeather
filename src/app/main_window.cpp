@@ -2678,6 +2678,8 @@ void MainWindow::rebuildTiltCombo() {
         tiltCombo_->clear();
         tiltCombo_->addItem(QStringLiteral("All tilts (volume derived)"));
         tiltCombo_->setEnabled(false);
+        tiltValueButton_->setToolTip(
+            QStringLiteral("Derived products blend every tilt; no single-tilt view"));
         map_->setElevationFilter(std::nullopt);
         rebuildTiltGrid();
         return;
