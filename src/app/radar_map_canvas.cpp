@@ -3976,6 +3976,7 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
             message = tr("3D needs a base product (REF, VEL, ...)");
         painter.drawText(rect(), Qt::AlignCenter, message);
     }
+    if (brick_ && !volumeImage_.isNull()) paintVolumeGrid(painter);
     const auto& descriptor = productDescriptor(product_);
     const QString shortName =
         QString::fromUtf8(descriptor.shortName.data(),
