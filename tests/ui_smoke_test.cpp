@@ -1155,6 +1155,7 @@ static bool testPinnedCardKeyboard(QString* error) {
     }
     canvas.scrollPinnedCard(100000);  // Up past the top: clamps, never negative.
     if (!waitFor([&] { return canvas.infoCardScrollOffset() == 0.0; })) {
+        std::fprintf(stderr, "DEBUG offset=%f\n", canvas.infoCardScrollOffset());
         *error = QStringLiteral("Up past the top should clamp to zero");
         return false;
     }
