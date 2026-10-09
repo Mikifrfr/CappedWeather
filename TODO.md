@@ -26,6 +26,32 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] Level III / national mosaic as optional context. Level II stays first.
 - [ ] Broadcast / layout export packs. Out of scope unless product direction changes.
 
+## Proposed (researched, not committed)
+
+Ready to build (data live now, testable hermetically plus replay):
+- [ ] SPC fire-weather outlooks Day 1/2. Same GeoJSON pipeline as categorical outlooks, different files, official colors. Verify: parser tests on live-shaped payload plus layer screenshot.
+- [ ] ZDR columns as updraft markers. NEXRAD dual-pol is live now: ZDR above 1 dB over the freezing level inside 40+ dBZ cores, multi-tilt column required. Verify: synthetic columns plus replay volumes against literature thresholds, guidance-only like hail.
+- [ ] Bright-band / melting-layer ring. Quasi-circular low-CC band in stratiform echo gives freezing-level height per volume; feeds ZDR-column gating and hail logic. Verify: synthetic rings plus stratiform replay cases.
+- [ ] TBSS hail-spike detector. Down-radial weak-echo spike behind 60+ dBZ cores (three-body scatter), range/azimuth geometry only. Verify: synthetic spikes plus hail-case replays.
+- [ ] Bunkers storm motion from VAD. 0-6 km mean wind from the existing profile fit, standard left/right-mover math, feeds storm-relative velocity and SRH. Verify: synthetic winds plus sounding-day replay consistency.
+- [ ] Storm-relative helicity estimate. VAD profile plus Bunkers motion integrated 0-1 and 0-3 km, shown in the scan pop-out with the same quality flags. Verify: synthetic hodographs with closed-form SRH.
+- [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
+- [ ] TVS/meso markers into AlertCenter. Opt-in sink like warnings and lightning, always labeled guidance, honoring severity and suppression settings. Verify: hermetic ingest tests.
+- [ ] Hail swaths from tracks plus cores. Per-storm polygons accumulate along StormTracker paths where hail tiers persist, exportable like warnings. Verify: synthetic tracks plus case replays.
+- [ ] Precip-type map. Bright-band height crossed with METAR surface temps: rain/snow/mix shading where the low levels are sampled. Winter-only value, experimental label until scored.
+- [ ] Warning inbox expiry countdowns. Time-to-expire per item from the existing onset/expiry fields, sorted soonest-first. Verify: hermetic clock tests.
+- [ ] Basemap preset gallery. One-click custom templates (ECCC radar mosaic, IEM US mosaic) in Settings with attribution, documented in europe-sources/placefiles docs. Verify: tile-URL tests plus packed-tile screenshot.
+
+Research-gated (confirm open shape first, METAR/ECCC style):
+- [ ] NWS damage-assessment (DAT) tornado paths. Post-event survey polygons as an overlay layer; confirm the open endpoint shape first.
+- [ ] GOES satellite overlay. HRV/IR from the anonymous NOAA S3 buckets through the optional netCDF reader, remapped to the panel grid. Confirm product keys and sizes first.
+- [ ] HRRR simulated reflectivity. NOMADS or TDS NetCDF subset as a model-context overlay with valid-time labels, never mixed with observed echo. Confirm subset API first.
+- [ ] Observed soundings plus hodograph. IEM parsed-sounding JSON for 00Z/12Z sites, Skew-T-lite or hodograph pop-out feeding SRH ground truth. Confirm feed shape first.
+- [ ] NHC cyclone plus cone overlay. Open NHC GIS for active storms, same polygon machinery as warnings, seasonal value. Confirm endpoint first.
+- [ ] HMS fire/smoke overlay. NOAA open smoke/fire polygons for western sessions, same machinery as warnings. Confirm endpoint first.
+- [ ] WPC excessive-rainfall outlooks. Same SPC-style GeoJSON pattern from another office; confirm file layout first.
+- [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
+
 ## Non-goals (for now)
 - Full GR-style product scripting language
 - Matching proprietary basemap imagery
