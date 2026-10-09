@@ -1,5 +1,8 @@
 #include "app/case_pack.hpp"
 
+#include "app/session_store.hpp"
+#include "core/volume_spill.hpp"
+
 #include <QDataStream>
 #include <QDir>
 #include <QFile>
@@ -441,6 +444,51 @@ QStringList zipExtractFiles(const QString& zipPath, const QString& destDir, QStr
     }
     return extracted;
 #endif
+}
+
+bool populateImportedSession(RadarSession& session, const CaseManifest& manifest,
+                             const QString& unpackedDir, QString* error) {
+    if (error) error->clear();
+    const auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (session.radarId != manifest.radarId)
+        return fail(QStringLiteral("Pack radar %1 does not match session %2")
+                        .arg(manifest.radarId, session.radarId));
+    std::vector<RadarFrame> history;
+    QStringList stagedDests;
+    for (const auto& frame : manifest.frames) {
+        const QString staged = unpackedDir + QLatin1Char('/') + frame.file;
+        const QString dest = spillFilePath(session.radarId, frame.volumeId);
+        if (dest.isEmpty() || !QFile::exists(staged)) {
+            for (const auto& staged : stagedDests) QFile::remove(staged);
+            return fail(QStringLiteral("Packed volume %1 is missing or unstashable")
+                            .arg(frame.volumeId));
+        }
+        QDir().mkpath(QFileInfo(dest).absolutePath());
+        QFile::remove(dest);
+        if (!QFile::copy(staged, dest)) {
+            for (const auto& staged : stagedDests) QFile::remove(staged);
+            return fail(QStringLiteral("Could not stage %1").arg(frame.volumeId));
+        }
+        stagedDests.push_back(dest);
+        if (!loadSpilledVolume(dest.toStdString())) {
+            for (const auto& staged : stagedDests) QFile::remove(staged);
+            return fail(QStringLiteral("Packed volume %1 does not decode").arg(frame.volumeId));
+        }
+        RadarFrame loaded;
+        loaded.volumeId = frame.volumeId;
+        loaded.dataTime = frame.dataTime;
+        loaded.chunkCount = frame.chunkCount;
+        loaded.failedChunks = frame.failedChunks;
+        loaded.spilledPath = dest;
+        history.push_back(std::move(loaded));
+    }
+    session.history = std::move(history);
+    session.frameIndex = manifest.frameIndex;
+    session.followLatest = session.frameIndex == static_cast<int>(session.history.size()) - 1;
+    return true;
 }
 
 }  // namespace cappedweather

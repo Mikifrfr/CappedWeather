@@ -2196,6 +2196,63 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                 std::cerr << "Case cycle volume differs after pack/unpack\n";
                 return 1;
             }
+            // Session rebuild from the unpacked pack: history, index,
+            // follow flag, plus a scrub fault-in through the live machinery.
+            {
+                CaseManifest importManifest;
+                importManifest.radarId = QStringLiteral("KTLX");
+                importManifest.frameIndex = 0;
+                CaseFrame importFrame;
+                importFrame.volumeId = QStringLiteral("cycle-vol");
+                importFrame.dataTime = QDateTime(QDate(2026, 10, 9), QTime(16, 37),
+                                                 QTimeZone::UTC);
+                importFrame.chunkCount = 53;
+                importFrame.file = QStringLiteral("volumes/vol.cwdv");
+                importManifest.frames.push_back(importFrame);
+                RadarSession importSession;
+                importSession.radarId = QStringLiteral("KTLX");
+                QString populateError;
+                if (!populateImportedSession(
+                        importSession, importManifest,
+                        cycleDir.filePath(QStringLiteral("unpacked")), &populateError)) {
+                    std::cerr << "populateImportedSession failed: "
+                              << populateError.toStdString() << '\n';
+                    return 1;
+                }
+                if (importSession.history.size() != 1 || importSession.frameIndex != 0 ||
+                    !importSession.followLatest ||
+                    importSession.history.front().volumeId != QStringLiteral("cycle-vol")) {
+                    std::cerr << "Imported session state is wrong\n";
+                    return 1;
+                }
+                const auto faulted = sessionFrameChunk(importSession, 0, 12);
+                if (!faulted || faulted->rays.size() != 3) {
+                    std::cerr << "Imported frame should fault back in\n";
+                    return 1;
+                }
+                // Wrong radar and missing files fail closed with the
+                // pre-existing session left alone.
+                RadarSession wrongRadar;
+                wrongRadar.radarId = QStringLiteral("KAMA");
+                if (populateImportedSession(wrongRadar, importManifest,
+                                            cycleDir.filePath(QStringLiteral("unpacked")),
+                                            &populateError) ||
+                    populateError.isEmpty() || !wrongRadar.history.empty()) {
+                    std::cerr << "Radar mismatch should fail closed\n";
+                    return 1;
+                }
+                CaseManifest missingFile = importManifest;
+                missingFile.frames.front().file = QStringLiteral("volumes/nope.cwdv");
+                RadarSession missingSession;
+                missingSession.radarId = QStringLiteral("KTLX");
+                if (populateImportedSession(missingSession, missingFile,
+                                            cycleDir.filePath(QStringLiteral("unpacked")),
+                                            &populateError) ||
+                    populateError.isEmpty() || !missingSession.history.empty()) {
+                    std::cerr << "Missing pack file should fail closed\n";
+                    return 1;
+                }
+            }
         }
     }
     // Offline pack plan: pure tile math, fail-closed on bad regions.

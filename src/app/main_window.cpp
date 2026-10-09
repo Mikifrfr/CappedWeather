@@ -5251,53 +5251,15 @@ void MainWindow::importCasePack() {
             if (!frame.spilledPath.isEmpty()) QFile::remove(frame.spilledPath);
         }
     }
-    // Stage every volume through the spill path so the imported session
-    // faults back in through the exact same machinery as live volumes.
-    // Staged paths are tracked so a mid-import failure removes what landed
-    // instead of littering the cache with orphan volumes.
-    std::vector<RadarFrame> history;
-    QStringList stagedDests;
-    const auto abandonStaged = [&stagedDests] {
-        for (const auto& dest : stagedDests) QFile::remove(dest);
-    };
-    for (const auto& frame : manifest->frames) {
-        const QString staged = unpacked.filePath(frame.file);
-        const QString dest = spillFilePath(radar, frame.volumeId);
-        if (dest.isEmpty()) {
-            abandonStaged();
-            QMessageBox::warning(this, QStringLiteral("Import failed"),
-                                 QStringLiteral("No cache location for spilled volumes"));
-            return;
-        }
-        QDir().mkpath(QFileInfo(dest).absolutePath());
-        QFile::remove(dest);
-        if (!QFile::copy(staged, dest)) {
-            abandonStaged();
-            QMessageBox::warning(this, QStringLiteral("Import failed"),
-                                 QStringLiteral("Could not stage %1").arg(frame.volumeId));
-            return;
-        }
-        stagedDests.push_back(dest);
-        // Validate before trusting: an unreadable volume aborts the import
-        // instead of planting a dead frame in the timeline.
-        if (!loadSpilledVolume(dest.toStdString())) {
-            abandonStaged();
-            QMessageBox::warning(this, QStringLiteral("Import failed"),
-                                 QStringLiteral("Packed volume %1 does not decode")
-                                     .arg(frame.volumeId));
-            return;
-        }
-        RadarFrame loaded;
-        loaded.volumeId = frame.volumeId;
-        loaded.dataTime = frame.dataTime;
-        loaded.chunkCount = frame.chunkCount;
-        loaded.failedChunks = frame.failedChunks;
-        loaded.spilledPath = dest;
-        history.push_back(std::move(loaded));
+    // Session rebuild is shared with the unit test (populateImportedSession):
+    // volumes stage through the spill path and validate before the session
+    // is touched, so a bad pack leaves the live history alone.
+    session->radarId = radar;
+    QString populateError;
+    if (!populateImportedSession(*session, *manifest, unpacked.path(), &populateError)) {
+        QMessageBox::warning(this, QStringLiteral("Import failed"), populateError);
+        return;
     }
-    session->history = std::move(history);
-    session->frameIndex = manifest->frameIndex;
-    session->followLatest = session->frameIndex == static_cast<int>(session->history.size()) - 1;
     for (int i = 0; i < static_cast<int>(manifest->panels.size()) && i < maps_.size(); ++i) {
         const auto& state = manifest->panels.at(i);
         auto* panel = maps_.at(i);

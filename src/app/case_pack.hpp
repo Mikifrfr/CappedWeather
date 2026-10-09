@@ -14,6 +14,8 @@
 // abort with an error and no partial session. Without zlib at build time
 // every entry point reports "needs a zlib build" and writes nothing.
 
+#include "app/session_store.hpp"
+
 #include <QByteArray>
 #include <QDateTime>
 #include <QString>
@@ -21,7 +23,9 @@
 #include <QVector>
 
 #include <functional>
+#include <memory>
 #include <optional>
+#include <vector>
 
 namespace cappedweather {
 
@@ -78,5 +82,14 @@ QStringList zipExtractFiles(const QString& zipPath, const QString& destDir, QStr
 
 // Progress callback for long packs: called per volume, return false to abort.
 using CasePackProgress = std::function<bool(int done, int total)>;
+
+// Stages every manifest frame through the spill path (copy plus decode
+// check) and installs the rebuilt history on the session. The result
+// mirrors a live session after its frames spill: empty chunks with spilled
+// paths, so scrubbing faults back in through sessionFrameChunk. Fails
+// closed with no partial session: a bad volume removes what landed and
+// leaves the session untouched.
+bool populateImportedSession(RadarSession& session, const CaseManifest& manifest,
+                             const QString& unpackedDir, QString* error);
 
 }  // namespace cappedweather

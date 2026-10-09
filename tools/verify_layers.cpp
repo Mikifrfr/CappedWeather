@@ -52,7 +52,17 @@ int main(int argc, char** argv) {
     MainWindow window;
     window.resize(1440, 850);
     window.show();
-    auto* map = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
+    // The active panel is the visible canvas (1x1 default): object names
+    // do not identify it, and driving a hidden panel screenshots nothing.
+    auto canvases = window.findChildren<RadarMapCanvas*>();
+    RadarMapCanvas* map = nullptr;
+    for (auto* canvas : canvases) {
+        if (canvas->isVisible()) {
+            map = canvas;
+            break;
+        }
+    }
+    if (!map && !canvases.isEmpty()) map = canvases.constFirst();
     auto* station = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
     auto* status = window.findChild<QLabel*>(QStringLiteral("unifiedStatusLabel"));
     if (!map || !station || !status) {
@@ -84,6 +94,8 @@ int main(int argc, char** argv) {
     map->setView(QPointF(-97.5, 35.5), 7);
     waitUntil(application, 8000, [&] { return map->tiltDiagnostics().size() >= 4; });
     application.processEvents();
+    std::cout << "view=" << map->viewCenter().x() << ',' << map->viewCenter().y()
+              << " zoom=" << map->viewZoom() << '\n';
     const QString mapShot = QString::fromLocal8Bit(argv[1]);
     if (!window.grab().save(mapShot, "PNG")) {
         std::cerr << "could not save map screenshot\n";
