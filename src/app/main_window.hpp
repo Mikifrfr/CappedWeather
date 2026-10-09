@@ -109,6 +109,9 @@ private slots:
                      int failedChunks, const QDateTime& receivedAt, bool live = true);
     void showFrame(int index);
     void advanceFrame();
+    // Scan diagnostics pop-out: a real slot (not just a method) so tests,
+    // the command palette, and the Details button share one entry point.
+    void showScanDiagnostics();
 
 private:
     void buildUi();
@@ -176,8 +179,6 @@ private:
     void updateVelocityControls();
     void showCrossSection(const QPointF& start, const QPointF& end);
     void refreshCrossSection();
-    // Scan diagnostics pop-out: per-tilt table plus VAD wind profile.
-    void showScanDiagnostics();
     void refreshScanDialog();
     void populateScanDialog();
     void togglePanelMaximized();
@@ -203,6 +204,9 @@ private:
     // Offline basemap pack for field chasing: pre-downloads tiles around
     // the selected radar into the shared tile cache.
     void downloadOfflinePack();
+    // Spill prefetch, one session at a time (scheduleSpillPrefetch fans out
+    // to every panel session; job keys dedupe shared sessions).
+    void prefetchSessionSpills(const std::shared_ptr<RadarSession>& session);
     void openLocalPlacefile();
     void addPlacefileUrl();
     void clearPlacefiles();
@@ -378,7 +382,6 @@ private:
     QString radarStatus_ = QStringLiteral("Pick a station → LIVE → timeline → overlays");
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
     QString spcStatus_;
-    QString metarStatus_ = QStringLiteral("Waiting for METAR stations");
     QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");
     QStringList recentRadarIds_;
     QStringList remotePlacefileUrls_;

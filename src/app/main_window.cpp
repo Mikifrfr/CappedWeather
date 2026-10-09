@@ -684,8 +684,7 @@ MainWindow::MainWindow(QWidget* parent)
         refreshLayerBadges();
     });
     connect(metarSource_, &MetarSource::statusChanged, this, [this](const QString& status) {
-        metarStatus_ = status;
-        updateUnifiedStatus();
+        statusBar()->showMessage(status, 8000);
     });
     connect(glmSource_, &GlmSource::cellsUpdated, this,
             [this](QVector<LightningCellSnapshot> cells, const QDateTime&, int, int) {
@@ -2559,7 +2558,22 @@ void MainWindow::enforceSpillBudget(RadarSession& session,
 }
 
 void MainWindow::scheduleSpillPrefetch() {
-    const auto session = activeSession();
+    // Every panel's session, not just the active one: mixed US+EU layouts
+    // scrub each radar independently. Job keys dedupe shared sessions.
+    QSet<QString> warmed;
+    const auto warm = [&](const std::shared_ptr<RadarSession>& session) {
+        if (!session || session->radarId.isEmpty() || warmed.contains(session->radarId)) return;
+        warmed.insert(session->radarId);
+        prefetchSessionSpills(session);
+    };
+    warm(activeSession());
+    for (auto* panel : maps_) warm(sessionFor(panel->radarId(), false));
+    // A scrub storm can leave finished keys behind if sessions were
+    // replaced mid-flight; keep the set bounded.
+    while (spillPrefetchInFlight_.size() > 32) spillPrefetchInFlight_.erase(spillPrefetchInFlight_.begin());
+}
+
+void MainWindow::prefetchSessionSpills(const std::shared_ptr<RadarSession>& session) {
     if (!session || session->history.empty() || session->frameIndex < 0) return;
     // Closest neighbours first; two is enough to cover scrub/next-playback
     // without stacking volume-sized reads on field hardware.
@@ -2597,9 +2611,6 @@ void MainWindow::scheduleSpillPrefetch() {
                 Qt::QueuedConnection);
         });
     }
-    // A scrub storm can leave finished keys behind if the session was
-    // replaced mid-flight; keep the set bounded.
-    while (spillPrefetchInFlight_.size() > 16) spillPrefetchInFlight_.erase(spillPrefetchInFlight_.begin());
 }
 
 void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volumeId,

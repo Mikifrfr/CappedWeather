@@ -283,6 +283,11 @@ if(CAPPEDWEATHER_BUILD_APP)
         )
         target_link_libraries(offline_pack PRIVATE cappedweather_ui)
 
+        qt_add_executable(verify_layers
+            tools/verify_layers.cpp
+        )
+        target_link_libraries(verify_layers PRIVATE cappedweather_ui)
+
         find_package(Qt6 6.4 COMPONENTS Test QUIET)
         if(TARGET Qt6::Test)
             qt_add_executable(cappedweather_ui_tests
