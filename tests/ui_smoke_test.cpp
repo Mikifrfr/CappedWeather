@@ -1997,6 +1997,37 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // World file: exact six lines for a known box, fail-closed otherwise.
+    {
+        QString worldError;
+        const auto world = MainWindow::frameWorldFile(40.0, 30.0, -90.0, -100.0, 1000, 500,
+                                                      &worldError);
+        const QString expected = QStringLiteral("0.0100000000\n0\n0\n-0.0200000000\n"
+                                                "-99.9950000000\n39.9900000000\n");
+        if (world != expected || !worldError.isEmpty()) {
+            std::cerr << "World file math is wrong: " << world.toStdString() << '\n';
+            return 1;
+        }
+        const auto nan = std::numeric_limits<double>::quiet_NaN();
+        if (!MainWindow::frameWorldFile(nan, 30.0, -90.0, -100.0, 1000, 500, &worldError)
+                 .isEmpty() ||
+            worldError.isEmpty()) {
+            std::cerr << "Non-finite bounds should fail the world file\n";
+            return 1;
+        }
+        if (!MainWindow::frameWorldFile(40.0, 30.0, -90.0, -100.0, 0, 500, &worldError)
+                 .isEmpty() ||
+            worldError.isEmpty()) {
+            std::cerr << "Zero-width image should fail the world file\n";
+            return 1;
+        }
+        if (!MainWindow::frameWorldFile(30.0, 40.0, -90.0, -100.0, 1000, 500, &worldError)
+                 .isEmpty() ||
+            worldError.isEmpty()) {
+            std::cerr << "Flipped bounds should fail the world file\n";
+            return 1;
+        }
+    }
     // Case-pack zip: deflated round-trip with CRC verification, fail-closed
     // on truncation and non-zip input (half-extracted files are removed).
     {

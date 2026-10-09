@@ -4768,8 +4768,36 @@ void MainWindow::exportSnapshot() {
     const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Export map snapshot"), defaultName,
                                                    QStringLiteral("PNG image (*.png)"));
     if (path.isEmpty()) return;
-    if (!map_->grab().save(path, "PNG"))
+    const auto image = map_->grab();
+    if (!image.save(path, "PNG")) {
         QMessageBox::warning(this, QStringLiteral("Export failed"), QStringLiteral("Could not write %1").arg(path));
+        return;
+    }
+    // GIS sidecar: the grab corners match the panel bounds exactly, so the
+    // six-line world file georeferences the PNG (baked-in legend included).
+    const auto bounds = map_->visibleLonLatBounds();
+    QString worldError;
+    const auto world = bounds.valid
+                           ? frameWorldFile(bounds.north, bounds.south, bounds.east, bounds.west,
+                                            image.width(), image.height(), &worldError)
+                           : QString{};
+    if (world.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("Snapshot exported (no world file: %1)")
+                .arg(bounds.valid ? worldError : QStringLiteral("map view not ready")),
+            5000);
+        return;
+    }
+    QFile worldFile(QFileInfo(path).dir().filePath(QFileInfo(path).completeBaseName() +
+                                                   QStringLiteral(".pgw")));
+    if (!worldFile.open(QIODevice::WriteOnly | QIODevice::Text) ||
+        worldFile.write(world.toUtf8()) != world.toUtf8().size()) {
+        statusBar()->showMessage(
+            QStringLiteral("Snapshot exported (world file failed: %1)").arg(worldFile.errorString()),
+            5000);
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Snapshot exported with world file"), 5000);
 }
 
 void MainWindow::exportTimelineAnimation() {
@@ -5023,6 +5051,32 @@ QString MainWindow::frameGroundOverlayKml(const QString& name, const QString& pn
         .arg(west, 0, 'f', 6);
 }
 
+QString MainWindow::frameWorldFile(const double north, const double south, const double east,
+                                  const double west, const int imageWidth, const int imageHeight,
+                                  QString* error) {
+    if (error) error->clear();
+    const auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return QString{};
+    };
+    for (const double edge : {north, south, east, west}) {
+        if (!std::isfinite(edge)) return fail(QStringLiteral("Map bounds are not finite yet"));
+    }
+    if (imageWidth <= 0 || imageHeight <= 0)
+        return fail(QStringLiteral("Snapshot has no pixels yet"));
+    if (!(north > south)) return fail(QStringLiteral("Map bounds are flipped north/south"));
+    if (!(east > west)) return fail(QStringLiteral("Map view crosses the antimeridian"));
+    // Pixel-center convention: the top-left pixel's center sits half a pixel
+    // inside the corner, and latitude steps negative going down rows.
+    const double pixelWidth = (east - west) / static_cast<double>(imageWidth);
+    const double pixelHeight = -(north - south) / static_cast<double>(imageHeight);
+    return QStringLiteral("%1\n0\n0\n%2\n%3\n%4\n")
+        .arg(pixelWidth, 0, 'f', 10)
+        .arg(pixelHeight, 0, 'f', 10)
+        .arg(west + pixelWidth / 2.0, 0, 'f', 10)
+        .arg(north + pixelHeight / 2.0, 0, 'f', 10);
+}
+
 void MainWindow::exportFrameKml() {
     if (!map_) return;
     const auto bounds = map_->visibleLonLatBounds();
@@ -5039,10 +5093,29 @@ void MainWindow::exportFrameKml() {
     }
     const auto pngPath = QFileInfo(kmlPath).dir().filePath(
         QFileInfo(kmlPath).completeBaseName() + QStringLiteral(".png"));
-    if (!map_->grab().save(pngPath, "PNG")) {
+    const auto frame = map_->grab();
+    if (!frame.save(pngPath, "PNG")) {
         QMessageBox::warning(this, QStringLiteral("Export failed"),
                              QStringLiteral("Could not write %1").arg(pngPath));
         return;
+    }
+    // Same world-file sidecar as snapshots, so the KML image doubles as a
+    // standalone GIS raster. A failed sidecar warns but keeps the KML.
+    QString worldError;
+    const auto world = frameWorldFile(bounds.north, bounds.south, bounds.east, bounds.west,
+                                      frame.width(), frame.height(), &worldError);
+    QString worldNote;
+    if (world.isEmpty()) {
+        worldNote = QStringLiteral(" (no world file: %1)").arg(worldError);
+    } else {
+        QFile worldFile(QFileInfo(kmlPath).dir().filePath(
+            QFileInfo(kmlPath).completeBaseName() + QStringLiteral(".pgw")));
+        if (!worldFile.open(QIODevice::WriteOnly | QIODevice::Text) ||
+            worldFile.write(world.toUtf8()) != world.toUtf8().size()) {
+            worldNote = QStringLiteral(" (world file failed: %1)").arg(worldFile.errorString());
+        } else {
+            worldNote = QStringLiteral(" + world file");
+        }
     }
     const auto overlayName = QStringLiteral("%1 %2 %3")
                                  .arg(selectedRadarId_,
@@ -5063,7 +5136,7 @@ void MainWindow::exportFrameKml() {
                              QStringLiteral("Could not write %1").arg(kmlPath));
         return;
     }
-    statusBar()->showMessage(QStringLiteral("Frame exported for GIS: %1 + image").arg(kmlPath), 5000);
+    statusBar()->showMessage(QStringLiteral("Frame exported for GIS: %1 + image%2").arg(kmlPath, worldNote), 5000);
 }
 
 void MainWindow::exportCasePack() {

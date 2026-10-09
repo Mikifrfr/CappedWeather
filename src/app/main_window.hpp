@@ -88,6 +88,10 @@ public:
     // reprojection). Public and static so the KML builder is unit-testable.
     static QString frameGroundOverlayKml(const QString& name, const QString& pngHref, double north,
                                          double south, double east, double west, QString* error);
+    // World file (.pgw) sidecar for PNG snapshots: six plain-text lines
+    // mapping image pixels to lon/lat so GIS tools load the grab in place.
+    static QString frameWorldFile(double north, double south, double east, double west,
+                                  int imageWidth, int imageHeight, QString* error);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
