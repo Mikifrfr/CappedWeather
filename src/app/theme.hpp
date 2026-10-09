@@ -17,7 +17,7 @@ enum class AppTheme {
 QString appThemeName(AppTheme theme);
 AppTheme appThemeFromInt(int value);
 QPalette appPalette(AppTheme theme);
-QString appStylesheet(AppTheme theme);
+QString appStylesheet(AppTheme theme, double fontScale = 1.0);
 // Accent used for canvas-painted chrome the stylesheet cannot reach
 // (active-panel border). Applied to every panel by MainWindow::applyTheme.
 QColor appAccent(AppTheme theme);

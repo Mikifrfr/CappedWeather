@@ -12,6 +12,7 @@
 #include "app/nexrad_source.hpp"
 #include "app/opera_source.hpp"
 #include "app/shortcut_help_dialog.hpp"
+#include "app/theme.hpp"
 #include "app/session_store.hpp"
 #include "app/session_prefetch.hpp"
 #include "app/metar_source.hpp"
@@ -2163,6 +2164,35 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                 std::cerr << "Bad pack region should fail closed with no tiles\n";
                 return 1;
             }
+        }
+    }
+    // Font-scale chrome: dock titles, badges, and tabs follow ui/fontScale
+    // through late override rules instead of staying pinned at 10 px.
+    {
+        const auto base = appStylesheet(AppTheme::Classic);
+        if (!base.contains(QStringLiteral("QDockWidget::title"))) {
+            std::cerr << "Theme sheet lost its dock title rule\n";
+            return 1;
+        }
+        const auto scaled = appStylesheet(AppTheme::Classic, 1.5);
+        if (!scaled.contains(QStringLiteral("QTabBar::tab{font-size:15px}")) ||
+            !scaled.contains(QStringLiteral("QLabel[layerBadge=\"true\"]{font-size:15px}")) ||
+            !scaled.contains(QStringLiteral("QListWidget#warningList{font-size:17px}")) ||
+            !scaled.contains(QStringLiteral("QLabel#activeProductLabel{font-size:18px}"))) {
+            std::cerr << "Font-scale chrome overrides are wrong\n";
+            return 1;
+        }
+        // Overrides come last so they win the tie with the pinned sizes.
+        const auto titlePos = scaled.lastIndexOf(QStringLiteral("QDockWidget::title{font-size:15px}"));
+        const auto pinnedPos = scaled.indexOf(QStringLiteral("QDockWidget::title {"));
+        if (titlePos < 0 || pinnedPos < 0 || titlePos < pinnedPos) {
+            std::cerr << "Font-scale overrides must follow the pinned rules\n";
+            return 1;
+        }
+        const auto squall = appStylesheet(AppTheme::Prototype, 0.8);
+        if (!squall.contains(QStringLiteral("QDockWidget::title{font-size:8px}"))) {
+            std::cerr << "Squall theme should scale chrome too\n";
+            return 1;
         }
     }
     // Spill budget tail-drop must carry the timeline index along: erasing

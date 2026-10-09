@@ -2,6 +2,8 @@
 
 #include <QApplication>
 
+#include <algorithm>
+
 namespace cappedweather {
 
 QString appThemeName(const AppTheme theme) {
@@ -307,8 +309,31 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: n
 
 } // namespace
 
-QString appStylesheet(const AppTheme theme) {
-    return theme == AppTheme::Prototype ? prototypeStylesheet() : classicStylesheet();
+QString appStylesheet(const AppTheme theme, const double fontScale) {
+    const auto base =
+        theme == AppTheme::Prototype ? prototypeStylesheet() : classicStylesheet();
+    // Font-scale chrome: the app font (applyFontScale) reaches every widget
+    // using the default font, but the pinned pixel sizes above (dock
+    // titles, badges, tabs, captions) outrank it. Late override rules win
+    // ties in Qt, so these scale the chrome without touching either theme.
+    const auto clamped = std::clamp(fontScale, 0.8, 1.5);
+    const int small = qRound(10.0 * clamped);  // dock titles, badges, tabs, captions
+    const int medium = qRound(11.0 * clamped);  // section labels, warning list
+    const int large = qRound(12.0 * clamped);  // active product label
+    return base +
+           QStringLiteral(
+               "QDockWidget::title{font-size:%1px}"
+               "QLabel#section{font-size:%2px}"
+               "QToolButton#groupHeader{font-size:%1px}"
+               "QLabel[layerBadge=\"true\"]{font-size:%1px}"
+               "QLabel#layerSub{font-size:%1px}"
+               "QLabel#groupCaption{font-size:%1px}"
+               "QLabel#activeProductLabel{font-size:%3px}"
+               "QTabBar::tab{font-size:%1px}"
+               "QListWidget#warningList{font-size:%2px}")
+               .arg(small)
+               .arg(medium)
+               .arg(large);
 }
 
 } // namespace cappedweather

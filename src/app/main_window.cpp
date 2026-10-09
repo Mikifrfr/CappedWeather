@@ -884,7 +884,7 @@ MainWindow::MainWindow(QWidget* parent)
 void MainWindow::applyTheme(const AppTheme theme) {
     theme_ = theme;
     QGuiApplication::setPalette(appPalette(theme));
-    qApp->setStyleSheet(appStylesheet(theme));
+    qApp->setStyleSheet(appStylesheet(theme, fontScale_));
     if (mapGrid_ != nullptr) mapGrid_->setSpacing(theme == AppTheme::Prototype ? 6 : 4);
     const auto accent = appAccent(theme);
     for (auto* panel : maps_) {
@@ -899,6 +899,9 @@ void MainWindow::applyFontScale(const double scale) {
     QFont appFont = QGuiApplication::font();
     appFont.setPointSizeF(std::max(1.0, uiBasePointSize_ * fontScale_));
     QGuiApplication::setFont(appFont);
+    // Re-issue the theme sheet so the pinned chrome sizes (dock titles,
+    // badges, tabs) follow the same scale as the app font and map HUD.
+    qApp->setStyleSheet(appStylesheet(theme_, fontScale_));
     for (auto* panel : maps_) {
         if (panel != nullptr) panel->update();
     }
