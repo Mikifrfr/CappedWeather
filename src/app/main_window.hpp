@@ -188,6 +188,12 @@ private:
     // Frame-exact VP9 through an ffmpeg image pipe (GIF path's frames,
     // sharing-friendly container). Fail-closed when ffmpeg is missing.
     void exportTimelineWebM();
+    // GIS export for one frame: PNG snapshot plus a KML GroundOverlay with
+    // the panel's current lon/lat box (current georeferencing, north-up, no
+    // reprojection). Static so the KML builder is unit-testable.
+    static QString frameGroundOverlayKml(const QString& name, const QString& pngHref, double north,
+                                         double south, double east, double west, QString* error);
+    void exportFrameKml();
     void openLocalPlacefile();
     void addPlacefileUrl();
     void clearPlacefiles();

@@ -3836,6 +3836,8 @@ void MainWindow::setupMenus() {
     connect(mp4Action, &QAction::triggered, this, &MainWindow::exportTimelineMp4);
     auto* webmAction = fileMenu->addAction(QStringLiteral("Export timeline WebM…"));
     connect(webmAction, &QAction::triggered, this, &MainWindow::exportTimelineWebM);
+    auto* kmlAction = fileMenu->addAction(QStringLiteral("Export frame KML (GIS)…"));
+    connect(kmlAction, &QAction::triggered, this, &MainWindow::exportFrameKml);
     fileMenu->addSeparator();
     auto* settingsAction = fileMenu->addAction(QStringLiteral("Settings…"));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettingsDialog);
@@ -3939,6 +3941,8 @@ void MainWindow::showCommandPalette() {
              [this] { exportTimelineMp4(); });
     addEntry(QStringLiteral("Export: timeline WebM"), QStringLiteral("Frame-exact VP9 via ffmpeg"),
              [this] { exportTimelineWebM(); });
+    addEntry(QStringLiteral("Export: frame KML"), QStringLiteral("PNG plus GroundOverlay for GIS"),
+             [this] { exportFrameKml(); });
     addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
              [this] { showSettingsDialog(); });
     palette->setEntries(std::move(entries));
@@ -4926,6 +4930,85 @@ void MainWindow::exportTimelineWebM() {
         return;
     }
     statusBar()->showMessage(QStringLiteral("Timeline WebM exported to %1").arg(path), 5000);
+}
+
+QString MainWindow::frameGroundOverlayKml(const QString& name, const QString& pngHref, double north,
+                                         double south, double east, double west, QString* error) {
+    if (error) error->clear();
+    const auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return QString{};
+    };
+    if (name.isEmpty() || pngHref.isEmpty()) return fail(QStringLiteral("Overlay needs a name and image"));
+    for (const double edge : {north, south, east, west}) {
+        if (!std::isfinite(edge)) return fail(QStringLiteral("Map bounds are not finite yet"));
+    }
+    if (!(north > south)) return fail(QStringLiteral("Map bounds are flipped north/south"));
+    if (!(east > west)) {
+        // Antimeridian wrap: a single LatLonBox cannot express it, and a
+        // flipped box would silently mirror the image. No output instead.
+        return fail(QStringLiteral("Map view crosses the antimeridian"));
+    }
+    const auto xml = [](QString raw) { return raw.replace(QLatin1Char('&'), QStringLiteral("&amp;"))
+                                                     .replace(QLatin1Char('<'), QStringLiteral("&lt;"))
+                                                     .replace(QLatin1Char('>'), QStringLiteral("&gt;")); };
+    return QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                          "<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n"
+                          "<GroundOverlay>\n"
+                          "<name>%1</name>\n"
+                          "<Icon><href>%2</href></Icon>\n"
+                          "<LatLonBox><north>%3</north><south>%4</south>"
+                          "<east>%5</east><west>%6</west><rotation>0</rotation></LatLonBox>\n"
+                          "</GroundOverlay>\n"
+                          "</kml>\n")
+        .arg(xml(name), xml(pngHref))
+        .arg(north, 0, 'f', 6)
+        .arg(south, 0, 'f', 6)
+        .arg(east, 0, 'f', 6)
+        .arg(west, 0, 'f', 6);
+}
+
+void MainWindow::exportFrameKml() {
+    if (!map_) return;
+    const auto bounds = map_->visibleLonLatBounds();
+    QString boundsError;
+    if (!bounds.valid) boundsError = QStringLiteral("Map view is not ready for export yet");
+    const auto defaultName = QStringLiteral("%1-%2-frame")
+                                 .arg(selectedRadarId_, QString::fromUtf8(productDescriptor(map_->product()).shortName.data()));
+    const auto kmlPath = QFileDialog::getSaveFileName(this, QStringLiteral("Export frame for GIS"),
+                                                      defaultName, QStringLiteral("KML (*.kml)"));
+    if (kmlPath.isEmpty()) return;
+    if (!bounds.valid) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"), boundsError);
+        return;
+    }
+    const auto pngPath = QFileInfo(kmlPath).dir().filePath(
+        QFileInfo(kmlPath).completeBaseName() + QStringLiteral(".png"));
+    if (!map_->grab().save(pngPath, "PNG")) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Could not write %1").arg(pngPath));
+        return;
+    }
+    const auto overlayName = QStringLiteral("%1 %2 %3")
+                                 .arg(selectedRadarId_,
+                                      QString::fromUtf8(productDescriptor(map_->product()).shortName.data()),
+                                      QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+    QString kmlError;
+    const auto kml = frameGroundOverlayKml(overlayName, QFileInfo(pngPath).fileName(), bounds.north,
+                                           bounds.south, bounds.east, bounds.west, &kmlError);
+    if (kml.isEmpty()) {
+        QFile::remove(pngPath);
+        QMessageBox::warning(this, QStringLiteral("Export failed"), kmlError);
+        return;
+    }
+    QFile file(kmlPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text) || file.write(kml.toUtf8()) != kml.toUtf8().size()) {
+        QFile::remove(pngPath);
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Could not write %1").arg(kmlPath));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Frame exported for GIS: %1 + image").arg(kmlPath), 5000);
 }
 
 void MainWindow::openLocalPlacefile() {

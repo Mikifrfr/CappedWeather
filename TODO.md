@@ -13,7 +13,7 @@ Short active list. Done work stays in git history and release notes, not in this
 
 ### Playback and export
 - [ ] Case-pack export/import. Zip of loaded volumes plus placefiles plus timeline state, so a shared case reproduces exactly.
-- [ ] GIS export (GeoTIFF/KML) for one frame. Uses current georeferencing only, no reprojection magic.
+- [ ] GIS export follow-on: GeoTIFF for one frame (needs a native TIFF dependency on every platform plus CI wiring). KML GroundOverlay is wired; uses current georeferencing only, no reprojection magic.
 
 ### Platform and UX
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
@@ -35,6 +35,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- KML frame export for GIS (PNG snapshot plus GroundOverlay with the panel lon/lat box, XML-escaped, fail-closed on wrap or flipped bounds). GeoTIFF stays open (native dependency).
 - WebM timeline export (frame-exact VP9 through an ffmpeg image pipe at GIF timing, cancellable with progress, fail-closed dialog when ffmpeg is missing). GIF stays frame-exact without dependencies, MP4 stays window capture.
 - Scan diagnostics full panel: per-tilt table pop-out (rays, gaps, VAD wind, height, RMSE, fit quality) live with the timeline, next to the live dock readout.
 - METAR surface observations overlay (aviationweather.gov station catalog plus batched obs, newest per station, flight-category colors). Layer with badge, pinned cards, persisted toggle, region follows the selected radar. Probe shows temp/dew of the nearest station.

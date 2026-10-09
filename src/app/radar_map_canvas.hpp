@@ -250,6 +250,18 @@ public:
     static void clearSharedTileCache();
     QPointF viewCenter() const;
     int viewZoom() const;
+    // Visible geographic bounds for GIS export: current georeferencing,
+    // no reprojection. Invalid when the panel has no size yet or the view
+    // wraps the antimeridian (callers fail closed instead of writing a
+    // flipped box).
+    struct GeoBounds {
+        double west = 0.0;
+        double south = 0.0;
+        double east = 0.0;
+        double north = 0.0;
+        bool valid = false;
+    };
+    [[nodiscard]] GeoBounds visibleLonLatBounds() const;
     QPoint radarScreenPoint(const QString& radarId) const;
     QString radarId() const;
     ProductKind product() const;

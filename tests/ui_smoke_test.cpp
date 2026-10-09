@@ -1876,6 +1876,53 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // KML GroundOverlay: exact box values in the XML, XML-escaped names,
+    // and fail-closed on flipped, wrapped, or non-finite bounds.
+    {
+        QString kmlError;
+        const auto kml = MainWindow::frameGroundOverlayKml(
+            QStringLiteral("KTLX & REF <live>"), QStringLiteral("frame.png"), 38.5, 32.5, -94.0,
+            -100.0, &kmlError);
+        if (kml.isEmpty() || !kmlError.isEmpty() ||
+            !kml.contains(QStringLiteral("<north>38.500000</north>")) ||
+            !kml.contains(QStringLiteral("<south>32.500000</south>")) ||
+            !kml.contains(QStringLiteral("<east>-94.000000</east>")) ||
+            !kml.contains(QStringLiteral("<west>-100.000000</west>")) ||
+            !kml.contains(QStringLiteral("<href>frame.png</href>")) ||
+            !kml.contains(QStringLiteral("KTLX &amp; REF &lt;live&gt;"))) {
+            std::cerr << "KML GroundOverlay builder is wrong\n";
+            return 1;
+        }
+        if (!MainWindow::frameGroundOverlayKml(QStringLiteral("n"), QStringLiteral("f.png"), 32.0,
+                                               38.0, -94.0, -100.0, &kmlError)
+                     .isEmpty() ||
+            kmlError.isEmpty()) {
+            std::cerr << "Flipped north/south should fail closed\n";
+            return 1;
+        }
+        if (!MainWindow::frameGroundOverlayKml(QStringLiteral("n"), QStringLiteral("f.png"), 38.0,
+                                               32.0, -100.0, -94.0, &kmlError)
+                     .isEmpty() ||
+            kmlError.isEmpty()) {
+            std::cerr << "Antimeridian wrap should fail closed, never mirror\n";
+            return 1;
+        }
+        const auto nan = std::numeric_limits<double>::quiet_NaN();
+        if (!MainWindow::frameGroundOverlayKml(QStringLiteral("n"), QStringLiteral("f.png"), nan,
+                                               32.0, -94.0, -100.0, &kmlError)
+                     .isEmpty() ||
+            kmlError.isEmpty()) {
+            std::cerr << "Non-finite bounds should fail closed\n";
+            return 1;
+        }
+        if (!MainWindow::frameGroundOverlayKml(QString{}, QStringLiteral("f.png"), 38.0, 32.0,
+                                               -94.0, -100.0, &kmlError)
+                     .isEmpty() ||
+            kmlError.isEmpty()) {
+            std::cerr << "Empty overlay name should fail closed\n";
+            return 1;
+        }
+    }
     // Spill budget tail-drop must carry the timeline index along: erasing
     // the front shifts every volume down, and a stale frameIndex would
     // point at the next volume over. Null chunks keep this disk-free.

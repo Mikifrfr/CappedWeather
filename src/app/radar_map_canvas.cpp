@@ -1742,6 +1742,21 @@ QPointF RadarMapCanvas::geographicPoint(const QPointF& screen) const {
     return {longitude, qRadiansToDegrees(std::atan(std::sinh(n)))};
 }
 
+RadarMapCanvas::GeoBounds RadarMapCanvas::visibleLonLatBounds() const {
+    GeoBounds bounds;
+    if (width() <= 0 || height() <= 0) return bounds;
+    const auto topLeft = geographicPoint(QPointF(0.0, 0.0));
+    const auto bottomRight = geographicPoint(QPointF(width(), height()));
+    bounds.west = topLeft.x();
+    bounds.north = topLeft.y();
+    bounds.east = bottomRight.x();
+    bounds.south = bottomRight.y();
+    bounds.valid = std::isfinite(bounds.west) && std::isfinite(bounds.south) &&
+                   std::isfinite(bounds.east) && std::isfinite(bounds.north) &&
+                   bounds.north > bounds.south && bounds.east > bounds.west;
+    return bounds;
+}
+
 QPoint RadarMapCanvas::radarScreenPoint(const QString& radarId) const {
     const auto found = siteIndexes_.constFind(radarId);
     if (found == siteIndexes_.cend()) return {};
