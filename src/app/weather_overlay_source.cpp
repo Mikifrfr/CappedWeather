@@ -23,6 +23,11 @@ namespace cappedweather {
 
 namespace {
 constexpr auto kAlertsUrl = "https://api.weather.gov/alerts/active?status=actual&message_type=alert";
+// MSC GeoMet weather-alerts collection (OGC API Features, open, no key).
+// Canada-wide bbox in OGC lon/lat order; the collection only holds active
+// products so no time filter is needed.
+constexpr auto kEcccAlertsUrl =
+    "https://api.weather.gc.ca/collections/weather-alerts/items?f=json&lang=en&limit=400&bbox=-141,42,-52,72";
 constexpr auto kTornadoReportsUrl = "https://www.spc.noaa.gov/climo/reports/today_torn.csv";
 constexpr auto kHailReportsUrl = "https://www.spc.noaa.gov/climo/reports/today_hail.csv";
 constexpr auto kWindReportsUrl = "https://www.spc.noaa.gov/climo/reports/today_wind.csv";
@@ -410,6 +415,76 @@ QVector<WeatherWarning> WeatherOverlaySource::parseAlerts(const QByteArray& data
         }
         if (geometryValue.isObject()) appendGeometry(geometryValue.toObject(), warning.polygons);
         if (!warning.polygons.isEmpty() || !warning.affectedZones.isEmpty()) warnings.push_back(std::move(warning));
+    }
+    if (error) error->clear();
+    return warnings;
+}
+
+QVector<WeatherWarning> WeatherOverlaySource::parseEcccAlerts(const QByteArray& data,
+                                                             QString* error) {
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        if (error)
+            *error = QStringLiteral("Invalid ECCC alert GeoJSON: %1").arg(parseError.errorString());
+        return {};
+    }
+    const auto titleCase = [](QString raw) {
+        raw = raw.toLower();
+        bool wordStart = true;
+        for (auto& ch : raw) {
+            if (ch.isSpace()) {
+                wordStart = true;
+            } else if (wordStart) {
+                ch = ch.toUpper();
+                wordStart = false;
+            }
+        }
+        return raw;
+    };
+    QVector<WeatherWarning> warnings;
+    for (const auto& value : document.object().value(QStringLiteral("features")).toArray()) {
+        const auto feature = value.toObject();
+        const auto geometryValue = feature.value(QStringLiteral("geometry"));
+        const auto properties = feature.value(QStringLiteral("properties")).toObject();
+        WeatherWarning warning;
+        // Feature ids embed the issuance batch, so reissues mint new ids;
+        // the eccc: prefix keeps AlertCenter dedupe in the ECCC namespace.
+        warning.id = QStringLiteral("eccc:%1").arg(feature.value(QStringLiteral("id")).toString());
+        // Title-cased on purpose: names shared with NWS ("Special Weather
+        // Statement", "Blizzard Warning") inherit official colors through
+        // the case-insensitive style table; the rest take the neutral
+        // fallback instead of a borrowed severity color.
+        warning.event = titleCase(properties.value(QStringLiteral("alert_name_en")).toString());
+        if (warning.event.isEmpty()) continue;
+        const auto area = properties.value(QStringLiteral("feature_name_en")).toString();
+        warning.headline = area.isEmpty() ? warning.event
+                                          : QStringLiteral("%1: %2").arg(area, warning.event);
+        // ECCC alert_type vocabulary is small and stable; anything else
+        // stays Unknown (AlertCenter treats Unknown as Moderate).
+        const auto type = properties.value(QStringLiteral("alert_type")).toString().toLower();
+        warning.severity = type == QStringLiteral("warning")   ? QStringLiteral("Severe")
+                           : type == QStringLiteral("watch")  ? QStringLiteral("Moderate")
+                           : type == QStringLiteral("advisory") ||
+                                   type == QStringLiteral("statement")
+                                                               ? QStringLiteral("Minor")
+                                                               : QStringLiteral("Unknown");
+        warning.senderName = QStringLiteral("Environment Canada");
+        warning.description = properties.value(QStringLiteral("alert_text_en")).toString();
+        warning.onset =
+            QDateTime::fromString(properties.value(QStringLiteral("publication_datetime")).toString(),
+                                  Qt::ISODate);
+        warning.expires =
+            QDateTime::fromString(properties.value(QStringLiteral("expiration_datetime")).toString(),
+                                  Qt::ISODate);
+        // No status_en filtering: ended/cancelled values appear on otherwise
+        // current products, so unexpired items publish and expiry alone
+        // retires them, mirroring the NWS path.
+        const auto alertStyle = nwsAlertStyle(warning.event);
+        warning.alertColor = alertStyle.color;
+        warning.alertPriority = alertStyle.priority;
+        if (geometryValue.isObject()) appendGeometry(geometryValue.toObject(), warning.polygons);
+        if (!warning.polygons.isEmpty()) warnings.push_back(std::move(warning));
     }
     if (error) error->clear();
     return warnings;
@@ -847,7 +922,7 @@ void WeatherOverlaySource::refresh() {
     // instead of wiping storm reports off the map until the next success.
     // Meteoalarm follows the same pattern per country (areas/hazards), while
     // details and tile geometry accumulate in caches.
-    pending_ = totalRequests_ = 7;
+    pending_ = totalRequests_ = 8;
     zoneWarningIndexes_.clear();
     meteoPendingDetails_.clear();
     meteoPendingTiles_.clear();
@@ -856,6 +931,8 @@ void WeatherOverlaySource::refresh() {
     const auto now = QDateTime::currentDateTimeUtc();
     const auto today = now.time().hour() < 12 ? now.date().addDays(-1) : now.date();
     request(QUrl(QString::fromUtf8(kAlertsUrl)), {RequestKind::Alerts}, QByteArrayLiteral("application/geo+json"));
+    request(QUrl(QString::fromUtf8(kEcccAlertsUrl)), {RequestKind::EcccAlerts},
+            QByteArrayLiteral("application/geo+json"));
     const std::array<const char*, 3> todayUrls{kTornadoReportsUrl, kHailReportsUrl, kWindReportsUrl};
     const std::array<const char*, 3> yesterdayUrls{kYesterdayTornadoReportsUrl, kYesterdayHailReportsUrl,
                                                    kYesterdayWindReportsUrl};
@@ -891,7 +968,7 @@ void WeatherOverlaySource::refresh() {
         url.setQuery(query);
         request(url, std::move(context));
     }
-    emit statusChanged(QStringLiteral("updating NWS warnings, SPC reports, and Meteoalarm"));
+    emit statusChanged(QStringLiteral("updating NWS/ECCC warnings, SPC reports, and Meteoalarm"));
 }
 
 void WeatherOverlaySource::pruneMeteoTileCache() {
@@ -1061,6 +1138,14 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
                 }
                 alertResponseReady_ = true;
                 schedulePublish();
+            }
+        } else if (context.kind == RequestKind::EcccAlerts) {
+            auto parsed = parseEcccAlerts(data, &error);
+            if (error.isEmpty()) {
+                ecccWarnings_ = std::move(parsed);
+                // Rides the NWS publish gate: merged at snapshot time, so no
+                // gating changes and no map blanking when ECCC is slow.
+                if (alertResponseReady_) schedulePublish();
             }
         } else if (context.kind == RequestKind::Reports) {
             auto parsed = parseStormReports(data, context.reportKind, &error, context.convectiveDate);
@@ -1285,6 +1370,7 @@ void WeatherOverlaySource::publishOverlaySnapshot() {
         }
     }
     QVector<WeatherWarning> combined = warnings_;
+    combined.append(ecccWarnings_);
     const auto meteoWarnings = buildMeteoWarnings();
     qsizetype meteoDrawable = 0;
     for (const auto& warning : meteoWarnings) {

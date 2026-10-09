@@ -38,7 +38,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 
 ### Overlays & alerts
 
-- NWS warnings (polygons with holes, zone-only alerts resolved to official geometry) and rolling 24-hour SPC tornado/hail/wind reports.
+- NWS warnings (polygons with holes, zone-only alerts resolved to official geometry), Environment Canada alerts (open MSC GeoMet feed, same rows and colors), and rolling 24-hour SPC tornado/hail/wind reports.
 - SPC Day 1 + 2 categorical outlooks in official colors and active mesoscale discussions with watch probability; tornado and severe watches arrive through NWS alerts.
 - GOES GLM lightning-jump cells (2σ LJA) fused with reflectivity objects ([engine](docs/lightning-jump-engine.md)); honestly disabled without netCDF, live out of the box in releases.
 - Meteoalarm warnings for European sites; 130+ bucket-active OPERA radars as first-class sessions (CC BY 4.0 EUMETNET, [sources](docs/europe-sources.md)).

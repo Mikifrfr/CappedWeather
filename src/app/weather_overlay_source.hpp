@@ -76,6 +76,11 @@ public:
 
     static QVector<WeatherWarning> parseAlerts(const QByteArray& data, QString* error = nullptr);
     static QVector<WarningPolygon> parseZone(const QByteArray& data, QString* error = nullptr);
+    // Environment Canada MSC GeoMet weather-alerts collection (open OGC
+    // API, no key): same WeatherWarning row shape as NWS so paint, probe,
+    // cards, badges, and alerts treat both countries identically.
+    // Anything malformed fails closed to empty.
+    static QVector<WeatherWarning> parseEcccAlerts(const QByteArray& data, QString* error = nullptr);
     static QVector<StormReport> parseStormReports(const QByteArray& data, StormReportKind kind,
                                                    QString* error = nullptr,
                                                    QDate convectiveDate = {});
@@ -129,6 +134,7 @@ signals:
 private:
     enum class RequestKind {
         Alerts,
+        EcccAlerts,
         Reports,
         Zone,
         MeteoRegions,
@@ -176,6 +182,9 @@ private:
     // on a successful parse (see requestFinished()); a failed round leaves
     // the previous warnings_ in place so the map never blanks while offline.
     QVector<WeatherWarning> warnings_;
+    // Environment Canada alerts: replaced wholesale on each successful
+    // parse, merged at publish time, same last-known-good contract as NWS.
+    QVector<WeatherWarning> ecccWarnings_;
     // Meteoalarm state. Regional responses replace their own per-country sets
     // wholesale (last-known-good survives per-feed failures); details and
     // tile geometry accumulate in caches keyed by warning signature and tile.

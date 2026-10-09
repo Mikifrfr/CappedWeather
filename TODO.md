@@ -33,6 +33,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Environment Canada alerts (open MSC GeoMet OGC feed, Canada-wide bbox, shared warning rows/colors/probe/cards with NWS, last-known-good on failure).
 - Case-pack import session rebuild as shared tested logic (copy plus decode check per volume, staged cleanup, radar guard) with fault-in coverage.
 - Spill prefetch fans out to every panel session for mixed-radar layouts.
 - Pinned-card keyboard scroll (Up/Down when the card overflows, same target physics as the wheel, editing widgets keep their keys). Shortcut help lists it.

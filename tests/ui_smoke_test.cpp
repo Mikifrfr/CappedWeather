@@ -1884,6 +1884,46 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "Non-MCD page should fail closed with an error\n";
         return 1;
     }
+    // ECCC alerts (MSC GeoMet OGC API): same warning rows as NWS, mapped
+    // from alert_name_en/type with title-cased events, no status filtering.
+    {
+        const QByteArray eccc = R"JSON({"type":"FeatureCollection","features":[
+{"id":"batch1_fea1-2195","type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-115.9,54.85],[-115.98,54.85],[-115.96,54.5],[-115.06,54.5],[-115.9,54.85]]]},"properties":{"alert_name_en":"special weather statement","alert_type":"statement","alert_text_en":"First snow.","feature_name_en":"Big Lakes County near Swan Hills","publication_datetime":"2026-10-09T11:19:59.506Z","expiration_datetime":"2026-10-10T03:19:59.506Z","status_en":"ended"}},
+{"id":"batch1_fea1-2200","type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-114.0,53.0],[-114.5,53.0],[-114.5,52.5],[-114.0,52.5],[-114.0,53.0]]]},"properties":{"alert_name_en":"snowfall warning","alert_type":"warning","alert_text_en":"Heavy snow.","feature_name_en":"Calgary","publication_datetime":"2026-10-09T12:00:00.000Z","expiration_datetime":"2026-10-10T12:00:00.000Z","status_en":"active"}},
+{"id":"batch1_fea1-2201","type":"Feature","geometry":null,"properties":{"alert_name_en":"wind warning","alert_type":"warning","alert_text_en":"Strong wind.","feature_name_en":"Edmonton","publication_datetime":"2026-10-09T12:00:00.000Z","expiration_datetime":"2026-10-10T12:00:00.000Z"}}]})JSON";
+        const auto parsed = WeatherOverlaySource::parseEcccAlerts(eccc, &parseError);
+        if (!parseError.isEmpty() || parsed.size() != 2) {
+            std::cerr << "ECCC alert parsing failed: " << parseError.toStdString() << '\n';
+            return 1;
+        }
+        const auto statement = *std::find_if(parsed.cbegin(), parsed.cend(), [](const WeatherWarning& row) {
+            return row.id == QStringLiteral("eccc:batch1_fea1-2195");
+        });
+        if (statement.event != QStringLiteral("Special Weather Statement") ||
+            statement.severity != QStringLiteral("Minor") ||
+            statement.senderName != QStringLiteral("Environment Canada") ||
+            statement.headline !=
+                QStringLiteral("Big Lakes County near Swan Hills: Special Weather Statement") ||
+            statement.description != QStringLiteral("First snow.") ||
+            statement.polygons.isEmpty() || statement.polygons.front().exterior.size() != 5 ||
+            statement.alertColor != QColor(QStringLiteral("#FFE4B5"))) {
+            std::cerr << "ECCC statement mapping is wrong\n";
+            return 1;
+        }
+        const auto warning = *std::find_if(parsed.cbegin(), parsed.cend(), [](const WeatherWarning& row) {
+            return row.id == QStringLiteral("eccc:batch1_fea1-2200");
+        });
+        if (warning.event != QStringLiteral("Snowfall Warning") ||
+            warning.severity != QStringLiteral("Severe")) {
+            std::cerr << "ECCC warning mapping is wrong\n";
+            return 1;
+        }
+        if (!WeatherOverlaySource::parseEcccAlerts(QByteArray("not json"), &parseError).isEmpty() ||
+            parseError.isEmpty()) {
+            std::cerr << "Malformed ECCC payload should fail closed\n";
+            return 1;
+        }
+    }
     // METAR station catalog: only ICAO stations with coordinates and a METAR
     // feed survive; NEXRAD sites and id-less rows are dropped, never fatal.
     {
