@@ -185,6 +185,9 @@ private:
     void exportSnapshot();
     void exportTimelineAnimation();
     void exportTimelineMp4();
+    // Frame-exact VP9 through an ffmpeg image pipe (GIF path's frames,
+    // sharing-friendly container). Fail-closed when ffmpeg is missing.
+    void exportTimelineWebM();
     void openLocalPlacefile();
     void addPlacefileUrl();
     void clearPlacefiles();

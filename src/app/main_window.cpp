@@ -70,6 +70,8 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QProgressDialog>
+#include <QProcess>
+#include <QBuffer>
 #include <QResizeEvent>
 #include <QPushButton>
 #include <QPointer>
@@ -3832,6 +3834,8 @@ void MainWindow::setupMenus() {
     connect(gifAction, &QAction::triggered, this, &MainWindow::exportTimelineAnimation);
     auto* mp4Action = fileMenu->addAction(QStringLiteral("Record timeline MP4…"));
     connect(mp4Action, &QAction::triggered, this, &MainWindow::exportTimelineMp4);
+    auto* webmAction = fileMenu->addAction(QStringLiteral("Export timeline WebM…"));
+    connect(webmAction, &QAction::triggered, this, &MainWindow::exportTimelineWebM);
     fileMenu->addSeparator();
     auto* settingsAction = fileMenu->addAction(QStringLiteral("Settings…"));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettingsDialog);
@@ -3933,6 +3937,8 @@ void MainWindow::showCommandPalette() {
              [this] { exportTimelineAnimation(); });
     addEntry(QStringLiteral("Export: timeline MP4"), QStringLiteral("Realtime recording, sharing-friendly"),
              [this] { exportTimelineMp4(); });
+    addEntry(QStringLiteral("Export: timeline WebM"), QStringLiteral("Frame-exact VP9 via ffmpeg"),
+             [this] { exportTimelineWebM(); });
     addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
              [this] { showSettingsDialog(); });
     palette->setEntries(std::move(entries));
@@ -4822,6 +4828,104 @@ void MainWindow::exportTimelineMp4() {
         QStringLiteral("Video export needs a CappedWeather build with Qt Multimedia. "
                        "Timeline GIF works in every build."));
 #endif
+}
+
+void MainWindow::exportTimelineWebM() {
+    const auto session = activeSession();
+    if (!session || session->history.empty()) return;
+    const auto ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("Timeline WebM"),
+            QStringLiteral("WebM export pipes frames through ffmpeg, which was not found on PATH. "
+                           "Install ffmpeg (https://ffmpeg.org/download.html) and retry. "
+                           "Timeline GIF works without it."));
+        return;
+    }
+    const auto defaultName = QStringLiteral("%1-%2-timeline.webm")
+                                 .arg(selectedRadarId_, QString::fromUtf8(productDescriptor(map_->product()).shortName.data()));
+    const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Export timeline WebM"),
+                                                   defaultName, QStringLiteral("WebM video (*.webm)"));
+    if (path.isEmpty()) return;
+    // Same frame timing as the GIF path: centisecond delay from the playback
+    // speed, converted to a pipe framerate.
+    const auto delayCs = std::max(5, speedCombo_->currentData().toInt() / 10);
+    const auto frameRate = 100.0 / static_cast<double>(delayCs);
+    QProcess encoder;
+    encoder.setProgram(ffmpeg);
+    encoder.setArguments({QStringLiteral("-y"), QStringLiteral("-f"), QStringLiteral("image2pipe"),
+                          QStringLiteral("-framerate"), QString::number(frameRate),
+                          QStringLiteral("-i"), QStringLiteral("-"),
+                          QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+                          QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                          QStringLiteral("-crf"), QStringLiteral("28"),
+                          QStringLiteral("-b:v"), QStringLiteral("0"), path});
+    encoder.start();
+    if (!encoder.waitForStarted(10000)) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Could not start ffmpeg: %1").arg(encoder.errorString()));
+        return;
+    }
+    const auto previousIndex = session->frameIndex;
+    const auto total = static_cast<int>(session->history.size());
+    QProgressDialog progress(QStringLiteral("Encoding %1 frames…").arg(total), QStringLiteral("Cancel"),
+                             0, total, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(250);
+    progress.setValue(0);
+    bool failed = false;
+    QString failure;
+    for (int index = 0; index < total; ++index) {
+        if (progress.wasCanceled()) {
+            encoder.kill();
+            failed = true;
+            failure = QStringLiteral("Timeline export cancelled");
+            break;
+        }
+        showFrame(index);
+        progress.setValue(index + 1);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        QByteArray png;
+        QBuffer buffer(&png);
+        buffer.open(QIODevice::WriteOnly);
+        if (!map_->grab().toImage().save(&buffer, "PNG")) {
+            encoder.kill();
+            failed = true;
+            failure = QStringLiteral("Could not grab frame %1").arg(index + 1);
+            break;
+        }
+        if (encoder.write(png) != png.size()) {
+            failed = true;
+            failure = QStringLiteral("ffmpeg pipe broke at frame %1: %2").arg(index + 1).arg(
+                encoder.errorString());
+            break;
+        }
+    }
+    encoder.closeWriteChannel();
+    if (!failed && !encoder.waitForFinished(60000)) {
+        encoder.kill();
+        failed = true;
+        failure = QStringLiteral("ffmpeg did not finish: %1").arg(encoder.errorString());
+    }
+    progress.setValue(total);
+    showFrame(previousIndex);
+    if (failed || encoder.exitStatus() != QProcess::NormalExit || encoder.exitCode() != 0) {
+        QFile::remove(path);
+        if (failed && failure == QStringLiteral("Timeline export cancelled")) {
+            statusBar()->showMessage(failure, 4000);
+        } else {
+            const auto details = QString::fromUtf8(encoder.readAllStandardError()).trimmed();
+            QMessageBox::warning(this, QStringLiteral("Export failed"),
+                                 failed ? failure
+                                        : QStringLiteral("ffmpeg failed (exit %1)%2")
+                                              .arg(encoder.exitCode())
+                                              .arg(details.isEmpty() ? QString{}
+                                                                     : QStringLiteral(": %1").arg(
+                                                                           details.left(300))));
+        }
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Timeline WebM exported to %1").arg(path), 5000);
 }
 
 void MainWindow::openLocalPlacefile() {

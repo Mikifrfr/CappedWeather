@@ -1,6 +1,6 @@
-# Echo Tops, VIL, CREF, and CAPPI derived products
+# Echo Tops, VIL, CREF, CAPPI, and VAD derived products
 
-CappedWeather derives four 2D products from each completed Level II reflectivity volume. They are intentionally volume-derived approximations, not byte-for-byte reproductions of proprietary GR or NEXRAD RPG products.
+CappedWeather derives 2D products from each completed Level II volume plus a per-tilt wind fit from velocity. They are intentionally volume-derived approximations, not byte-for-byte reproductions of proprietary GR or NEXRAD RPG products.
 
 ## Echo top (18 dBZ)
 
@@ -40,6 +40,28 @@ VIL = 3.44e-6 * integral(Z^(4/7) dh)  [kg/m2]
 
 where `Z = 10^(dBZ/10)` and `h` is height in metres. For each adjacent valid pair, CappedWeather averages the two linear-Z values, caps that layer average at **56 dBZ**, applies the `4/7` power, and multiplies by the beam-centre height difference. A column requires at least two distinct tilts and at least one sample of 5 dBZ or greater.
 
+## VAD wind profile (per tilt)
+
+Each tilt carrying velocity moments gets a layer-mean horizontal wind from a
+least-squares sine fit over dealiased gates:
+
+```text
+Vr(az) = a + b*sin(az) + c*cos(az)
+speed = hypot(b, c) / cos(elevation), direction = atan2(b, c) (reported FROM)
+```
+
+The fit runs on Dealiased velocity at the panel/per-ray Nyquist, so folded
+C-band OPERA scans do not manufacture winds. Every tilt reports gate count,
+azimuth coverage, RMSE, median sample height (MSL), and a quality flag:
+Good needs 200+ gates, a 270+ degree circle, and RMSE at most 3 m/s;
+Marginal needs 60+ gates, 180+ degrees, RMSE at most 6. Solved-but-worse
+fits show as Poor with their RMSE; singular geometry, fewer than 25 gates,
+or under 90 degrees of coverage show as Invalid. Poor and Invalid rows stay
+visible in the scan diagnostics pop-out so a bad fit never reads as calm
+air. Guidance only, never warnings. Core contract tests fit a known wind on
+a synthetic two-tilt volume (speed, FROM direction, tilt height separation)
+plus singular, all-missing, and infinite-gate fail-closed cases.
+
 ## Sampling and quality behavior
 
 - At least two distinct reflectivity elevation angles are required. Repeated supplemental scans at effectively the same angle are deduplicated so they cannot inflate VIL.
@@ -50,7 +72,8 @@ where `Z = 10^(dBZ/10)` and `h` is height in metres. For each adjacent valid pai
 
 ## Architecture
 
-- Core implementation: `src/core/derived_products.{hpp,cpp}`
+- Core implementation: `src/core/derived_products.{hpp,cpp}` (reflectivity family)
+- VAD wind fit: `src/core/vad.{hpp,cpp}` (velocity family)
 - Product descriptors: `src/core/product.{hpp,cpp}`
 - Materialization point: `MainWindow::volumeReady()`
 - Performance: elevation/range gate lookups are cached per sweep layout and the completed-volume pass runs on the global thread pool before publication, never on the GUI thread.

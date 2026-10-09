@@ -6,14 +6,9 @@ Short active list. Done work stays in git history and release notes, not in this
 
 ### Analysis depth
 - [ ] Rainfall accumulation (one-hour and storm-total style) from Z-R over spill-to-disk history. Needs AP/clutter guard plus validation before any trust. No precision claims until then.
-- [ ] VAD wind profile inside the scan diagnostics pop-out. Sine fit on dealiased VEL per tilt, speed/dir by height, with fit-quality flag.
 - [ ] OPERA dual-pol unlock when 2027 moments land (CC, ZDR, PHI, KDP). Work is decoder mapping in `readOdimPvol` plus a fixture and availability tests. Per-panel auto-disable already handles their absence, so do not fake dual-pol from single-pol before then.
-- [ ] Scan diagnostics full panel. The dock readout (`Scan: ...`) is live; the per-tilt table pop-out is still follow-on.
-- [ ] Spill-to-disk prefetch. Scrubbing into spilled frames works but hitches on a volume-sized disk read. Add background prefetch.
-- [ ] Export follow-on: ffmpeg-piped WebM stays documented but unwired. GIF is frame-exact, MP4 is window capture.
 
 ### Overlays and context
-- [ ] METAR surface observations overlay. Small vetted feed, decluttered markers with temp/dew/wind in the probe.
 - [ ] MTG Lightning Imager for European sessions. GLM covers GOES-18/19 only, OPERA sites stay dark without it.
 
 ### Playback and export
@@ -40,6 +35,11 @@ Short active list. Done work stays in git history and release notes, not in this
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- WebM timeline export (frame-exact VP9 through an ffmpeg image pipe at GIF timing, cancellable with progress, fail-closed dialog when ffmpeg is missing). GIF stays frame-exact without dependencies, MP4 stays window capture.
+- Scan diagnostics full panel: per-tilt table pop-out (rays, gaps, VAD wind, height, RMSE, fit quality) live with the timeline, next to the live dock readout.
+- METAR surface observations overlay (aviationweather.gov station catalog plus batched obs, newest per station, flight-category colors). Layer with badge, pinned cards, persisted toggle, region follows the selected radar. Probe shows temp/dew of the nearest station.
+- VAD wind profile per tilt (least-squares sine fit on dealiased velocity with Good/Marginal/Poor/Invalid quality) inside the scan diagnostics pop-out (per-tilt rays, gaps, wind, height, RMSE, live with the timeline).
+- Spill-to-disk background prefetch (nearest spilled neighbours fault in off the UI thread, installed by volumeId so tail-drop shifts stay safe). Pick-list and install covered by tests.
 - SPC Day 1 + 2 categorical outlooks in official colors plus active mesoscale discussions with watch probability (RSS discovery, discussion-page parse). Layers with badges, pinned cards, persisted toggles. Watches ride NWS alerts, no new code.
 - Composite reflectivity plus CAPPI at selectable MSL altitude (2/3/4/5/7 km, global setting with background re-derive and spill-safe altitude tags). REF packing shared, so palettes and probes agree.
 - Hail cores from VIL density (Amburn and Wolf tiers, guidance size ranges not diameters, cluster 10 km by warning-CSI sweep) plus polarimetric debris signatures (CC drop at live couplets with contrast guard and 2-volume persistence). Scored on three archive cases in `docs/severe-hail-tds-validation.md`. Guidance only.
