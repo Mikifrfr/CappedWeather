@@ -14,6 +14,7 @@
 #include "app/shortcut_help_dialog.hpp"
 #include "app/session_store.hpp"
 #include "app/session_prefetch.hpp"
+#include "app/metar_source.hpp"
 #include "core/product.hpp"
 
 #include "app/alert_center.hpp"
@@ -1808,6 +1809,72 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         parseError.isEmpty()) {
         std::cerr << "Non-MCD page should fail closed with an error\n";
         return 1;
+    }
+    // METAR station catalog: only ICAO stations with coordinates and a METAR
+    // feed survive; NEXRAD sites and id-less rows are dropped, never fatal.
+    {
+        const QByteArray stations = R"JSON([{"id":"KOKC","icaoId":"KOKC","site":"Oklahoma City/Will Rogers Intl","lat":35.3843,"lon":-97.60033,"priority":1,"siteType":["METAR","TAF"]},
+{"id":"KOUN","icaoId":"KOUN","site":"Norman/Univ Oklahoma Arpt","lat":35.24359,"lon":-97.47133,"priority":6,"siteType":["METAR"]},
+{"id":"KTLX","icaoId":"KTLX","site":"Oklahoma City/NEXRAD","lat":35.333,"lon":-97.278,"priority":9,"siteType":[]},
+{"id":"NONAV","site":"No ICAO here","lat":35.0,"lon":-97.0,"priority":5,"siteType":["METAR"]},
+{"id":"BADLAT","icaoId":"KBAD","site":"Bad coords","lat":"north","lon":-97.0,"priority":5,"siteType":["METAR"]}])JSON";
+        const auto parsed = parseMetarStations(stations, &parseError);
+        if (!parseError.isEmpty() || parsed.size() != 2 || parsed.at(0).icaoId != QStringLiteral("KOKC") ||
+            parsed.at(1).icaoId != QStringLiteral("KOUN") || !parsed.at(0).hasMetar ||
+            !parsed.at(0).hasCoords || parsed.at(0).priority != 1) {
+            std::cerr << "METAR station catalog parsing failed\n";
+            return 1;
+        }
+        if (!parseMetarStations(QByteArray(R"JSON({"not":"an array"})JSON"), &parseError).isEmpty() ||
+            parseError.isEmpty()) {
+            std::cerr << "Non-array station catalog should fail closed with an error\n";
+            return 1;
+        }
+    }
+    // METAR observations: newest report per station wins, missing fields
+    // stay NaN/-1 (never zero), id-less rows are dropped.
+    {
+        const QByteArray obs = R"JSON([{"icaoId":"KOKC","obsTime":1791561120,"temp":27.2,"dewp":13.9,"wdir":160,"wspd":6,"lat":35.3843,"lon":-97.6003,"name":"Oklahoma City/Will Rogers Intl, OK, US","fltCat":"VFR"},
+{"icaoId":"KOKC","obsTime":1791557520,"temp":22.8,"dewp":15.0,"wdir":200,"wspd":4,"lat":35.3843,"lon":-97.6003,"name":"Oklahoma City/Will Rogers Intl, OK, US","fltCat":"VFR"},
+{"icaoId":"KOUN","obsTime":1791561120,"wdir":180,"wspd":8,"wgst":14,"lat":35.24359,"lon":-97.47133,"name":"Norman/Univ Oklahoma Arpt, OK, US","fltCat":"MVFR"},
+{"icaoId":"","obsTime":1791561120,"temp":20.0,"lat":35.0,"lon":-97.0,"fltCat":"VFR"}])JSON";
+        const auto parsed = parseMetarObs(obs, &parseError);
+        if (!parseError.isEmpty() || parsed.size() != 2) {
+            std::cerr << "METAR observation parsing failed\n";
+            return 1;
+        }
+        const auto kokc = *std::find_if(parsed.cbegin(), parsed.cend(), [](const MetarObs& row) {
+            return row.icaoId == QStringLiteral("KOKC");
+        });
+        if (std::abs(kokc.tempC - 27.2) > 0.01 || std::abs(kokc.dewpointC - 13.9) > 0.01 ||
+            kokc.windDirectionDegrees != 160 || kokc.windSpeedKnots != 6 ||
+            kokc.flightCategory != QStringLiteral("VFR") ||
+            kokc.obsTime != QDateTime::fromSecsSinceEpoch(1791561120, QTimeZone::UTC)) {
+            std::cerr << "Newest KOKC report should win the dedupe\n";
+            return 1;
+        }
+        const auto koun = *std::find_if(parsed.cbegin(), parsed.cend(), [](const MetarObs& row) {
+            return row.icaoId == QStringLiteral("KOUN");
+        });
+        if (!std::isnan(koun.tempC) || koun.windGustKnots != 14 ||
+            koun.flightCategory != QStringLiteral("MVFR")) {
+            std::cerr << "Missing METAR fields should stay NaN, gusts should parse\n";
+            return 1;
+        }
+        if (!parseMetarObs(QByteArray("not json"), &parseError).isEmpty() || parseError.isEmpty()) {
+            std::cerr << "Malformed METAR payload should fail closed with an error\n";
+            return 1;
+        }
+        // Flight-category colors: unknown strings paint gray, never VFR green.
+        if (metarCategoryColor(QStringLiteral("VFR")) != QColor(QStringLiteral("#53d769")) ||
+            metarCategoryColor(QStringLiteral("MVFR")) != QColor(QStringLiteral("#44a7ff")) ||
+            metarCategoryColor(QStringLiteral("IFR")) != QColor(QStringLiteral("#ff9f43")) ||
+            metarCategoryColor(QStringLiteral("LIFR")) != QColor(QStringLiteral("#ff3b4d")) ||
+            metarCategoryColor(QStringLiteral("XYZ")) != QColor(QStringLiteral("#9aa0a6")) ||
+            metarCategoryColor(QString{}).name() != QColor(QStringLiteral("#9aa0a6")).name()) {
+            std::cerr << "METAR flight-category colors are wrong\n";
+            return 1;
+        }
     }
     // Spill budget tail-drop must carry the timeline index along: erasing
     // the front shifts every volume down, and a stale frameIndex would

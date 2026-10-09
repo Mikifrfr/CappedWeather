@@ -1148,6 +1148,21 @@ int RadarMapCanvas::mcdCount() const {
     return static_cast<int>(mcds_.size());
 }
 
+void RadarMapCanvas::setMetars(QVector<MetarObs> metars) {
+    metars_ = std::move(metars);
+    update();
+}
+
+void RadarMapCanvas::setMetarVisible(const bool visible) {
+    if (metarVisible_ == visible) return;
+    metarVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::metarCount() const {
+    return static_cast<int>(metars_.size());
+}
+
 void RadarMapCanvas::setStormReportKindVisible(const StormReportKind kind, const bool visible) {
     if (stormReportKindsVisible_.at(static_cast<std::size_t>(kind)) == visible) return;
     stormReportKindsVisible_.at(static_cast<std::size_t>(kind)) = visible;
@@ -2587,6 +2602,64 @@ void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {
     painter.restore();
 }
 
+std::optional<MetarObs> RadarMapCanvas::metarNear(const QPointF& point) const {
+    if (!metarVisible_ || metars_.isEmpty()) return std::nullopt;
+    const MetarObs* best = nullptr;
+    double bestDistance = 14.0;
+    for (const auto& metar : metars_) {
+        const auto stationPoint = screenPoint(metar.latitude, metar.longitude);
+        const double distance = QLineF(stationPoint, point).length();
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = &metar;
+        }
+    }
+    if (!best) return std::nullopt;
+    return *best;
+}
+
+void RadarMapCanvas::paintMetars(QPainter& painter) {
+    if (!metarVisible_ || metars_.isEmpty()) return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
+    // Declutter: one label per 30x16 cell at low zoom, like the storm-report
+    // grid, so a metroplex reads as dots instead of a text pile.
+    QSet<QString> occupiedCells;
+    const bool showLabels = zoom_ >= 6;
+    painter.setFont(hudFont(7, QFont::DemiBold));
+    for (const auto& metar : metars_) {
+        const auto point = screenPoint(metar.latitude, metar.longitude);
+        if (!viewport.contains(point)) continue;
+        if (showLabels) {
+            const auto cell = QStringLiteral("%1/%2")
+                                  .arg(static_cast<int>(point.x()) / 30)
+                                  .arg(static_cast<int>(point.y()) / 16);
+            if (occupiedCells.contains(cell)) continue;
+            occupiedCells.insert(cell);
+        }
+        const auto color = metarCategoryColor(metar.flightCategory);
+        painter.setPen(QPen(QColor(10, 14, 17), 2.0));
+        painter.setBrush(color);
+        painter.drawEllipse(point, 4.0, 4.0);
+        painter.setPen(QPen(color, 1.0));
+        painter.drawEllipse(point, 5.5, 5.5);
+        if (showLabels) {
+            const auto tempText = std::isnan(metar.tempC)
+                                      ? QStringLiteral("--")
+                                      : QString::number(static_cast<int>(std::lround(metar.tempC)));
+            const auto dewText = std::isnan(metar.dewpointC)
+                                     ? QStringLiteral("--")
+                                     : QString::number(static_cast<int>(std::lround(metar.dewpointC)));
+            painter.setPen(QColor(232, 238, 240));
+            painter.drawText(QRectF(point.x() + 8.0, point.y() - 8.0, 64.0, 14.0),
+                             Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("%1/%2").arg(tempText, dewText));
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintPlacefiles(QPainter& painter) {
     if (!placefilesVisible_ || placefiles_.isEmpty() || width() <= 0 || height() <= 0) return;
     const auto edge = geographicPoint(QPointF(width(), height() / 2.0));
@@ -3931,6 +4004,39 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
             };
         }
     }
+    if (const auto metar = metarNear(point)) {
+        const auto tempText = std::isnan(metar->tempC)
+                                  ? QStringLiteral("--")
+                                  : QStringLiteral("%1 C").arg(metar->tempC, 0, 'f', 1);
+        const auto dewText = std::isnan(metar->dewpointC)
+                                 ? QStringLiteral("--")
+                                 : QStringLiteral("%1 C").arg(metar->dewpointC, 0, 'f', 1);
+        const auto windText = metar->windSpeedKnots < 0
+                                  ? QStringLiteral("wind: n/a")
+                                  : metar->windGustKnots >= 0
+                                        ? QStringLiteral("wind: %1 at %2 kt gust %3 kt")
+                                              .arg(metar->windDirectionDegrees)
+                                              .arg(metar->windSpeedKnots)
+                                              .arg(metar->windGustKnots)
+                                        : QStringLiteral("wind: %1 at %2 kt")
+                                              .arg(metar->windDirectionDegrees)
+                                              .arg(metar->windSpeedKnots);
+        const auto ageMinutes = metar->obsTime.isValid()
+                                    ? metar->obsTime.secsTo(QDateTime::currentDateTimeUtc()) / 60
+                                    : -1;
+        const auto age = ageMinutes >= 0 ? QStringLiteral(" | %1m old").arg(ageMinutes)
+                                         : QStringLiteral(" | age unknown");
+        const auto category = metar->flightCategory.isEmpty() ? QStringLiteral("category unknown")
+                                                              : metar->flightCategory;
+        const auto name = metar->stationName.isEmpty() ? metar->icaoId : metar->stationName;
+        const auto obsTime = metar->obsTime.isValid()
+                                 ? metar->obsTime.toString(QStringLiteral("MMM d HH:mm 'UTC'"))
+                                 : QStringLiteral("time unknown");
+        return {QStringLiteral("%1 (%2)\n%3 | dewpoint %4\n%5 | %6%7\nObserved: %8")
+                    .arg(metar->icaoId, name, tempText, dewText, windText, category, age,
+                         obsTime),
+                PinnedInfoKind::Metar, std::nullopt};
+    }
     if (mcdVisible_) {
         for (const auto& mcd : mcds_) {
             if (mcd.exterior.size() < 4) continue;
@@ -4120,10 +4226,26 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
         update();
         return;
     }
+    // Nearest surface station, shared by every probe path below so hover
+    // and click-pin agree on which station is "here".
+    const auto metarSuffix = [this, &point] {
+        const auto metar = metarNear(point);
+        if (!metar) return QString{};
+        const auto tempText = std::isnan(metar->tempC)
+                                  ? QStringLiteral("--")
+                                  : QString::number(static_cast<int>(std::lround(metar->tempC)));
+        const auto dewText = std::isnan(metar->dewpointC)
+                                 ? QStringLiteral("--")
+                                 : QString::number(static_cast<int>(std::lround(metar->dewpointC)));
+        return QStringLiteral(" | %1 %2/%3").arg(metar->icaoId, tempText, dewText);
+    };
     probeText_.clear();
     const auto geographic = geographicPoint(point);
     const auto sample = sampleAtGeo(QPointF(geographic.x(), geographic.y()));
+    const auto metar = metarSuffix();
     if (!sample.valid) {
+        // No radar gate here, but a nearby station still answers the hover.
+        probeText_ = metar.isEmpty() ? QString{} : metar.mid(3);
         update();
         return;
     }
@@ -4136,7 +4258,8 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
          sample.valueText.startsWith(QStringLiteral("Product")))) {
         probeText_ = QStringLiteral("%1 | %2 km")
                          .arg(sample.valueText)
-                         .arg(sample.groundRangeMeters / 1000.0, 0, 'f', 1);
+                         .arg(sample.groundRangeMeters / 1000.0, 0, 'f', 1) +
+                     metar;
         update();
         return;
     }
@@ -4146,7 +4269,8 @@ void RadarMapCanvas::updateProbe(const QPointF& point) {
                      .arg(sample.azimuthDegrees, 0, 'f', 1)
                      .arg(QChar(0x00b0))
                      .arg(sample.elevationDegrees, 0, 'f', 1)
-                     .arg(sample.beamMslMeters / 1000.0, 0, 'f', 2);
+                     .arg(sample.beamMslMeters / 1000.0, 0, 'f', 2) +
+                 metar;
     update();
 }
 
@@ -4553,6 +4677,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintRadarOverlay(painter);
     }
     paintMcdOverlays(painter);
+    paintMetars(painter);
     paintPlacefiles(painter);
     paintLightningOverlay(painter);
 

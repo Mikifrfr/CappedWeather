@@ -54,6 +54,7 @@ class CrossSectionWidget;
 class RadarListModel;
 class WeatherOverlaySource;
 class SpcConvectiveSource;
+class MetarSource;
 class PlacefileSource;
 class ArchiveSource;
 class AlertCenter;
@@ -308,6 +309,8 @@ private:
     QLabel* spcOutlookBadge_ = nullptr;
     QCheckBox* mcdCheck_ = nullptr;
     QLabel* mcdBadge_ = nullptr;
+    QCheckBox* metarCheck_ = nullptr;
+    QLabel* metarBadge_ = nullptr;
     QCheckBox* trailCheck_ = nullptr;
     QCheckBox* smoothingCheck_ = nullptr;
     QLabel* scanDiagnosticsLabel_ = nullptr;
@@ -346,6 +349,7 @@ private:
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
     SpcConvectiveSource* spcSource_ = nullptr;
+    MetarSource* metarSource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;
     ArchiveSource* archiveSource_ = nullptr;
     AlertCenter* alertCenter_ = nullptr;
@@ -356,6 +360,7 @@ private:
     QString radarStatus_ = QStringLiteral("Pick a station → LIVE → timeline → overlays");
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
     QString spcStatus_;
+    QString metarStatus_ = QStringLiteral("Waiting for METAR stations");
     QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");
     QStringList recentRadarIds_;
     QStringList remotePlacefileUrls_;

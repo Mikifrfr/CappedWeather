@@ -5,6 +5,7 @@
 #include "core/debris_detector.hpp"
 #include "core/hail_detector.hpp"
 #include "app/spc_convective.hpp"
+#include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
 #include "core/scan_diagnostics.hpp"
@@ -168,6 +169,12 @@ public:
     void setMcdVisible(bool visible);
     [[nodiscard]] bool mcdVisible() const { return mcdVisible_; }
     [[nodiscard]] int mcdCount() const;
+    // METAR surface observations: decluttered station dots with temp/dew in
+    // the probe and full T/Td/wind/category on click.
+    void setMetars(QVector<MetarObs> metars);
+    void setMetarVisible(bool visible);
+    [[nodiscard]] bool metarVisible() const { return metarVisible_; }
+    [[nodiscard]] int metarCount() const;
     // Per-panel overlay overrides. When `hasOverrides` is false, the global
     // toggles from MainWindow drive visibility (the default for every panel).
     // When `hasOverrides` is true, the four bools apply to this panel alone.
@@ -330,6 +337,7 @@ private:
         Placefile,
         SpcOutlook,
         SpcMcd,
+        Metar,
         // A frozen cursor readout. "Inspect at cursor" used to write the same
         // transient text the hover uses, so the next mouse move silently wiped
         // it and the action looked broken. Pinning it makes it readable, and
@@ -443,6 +451,11 @@ private:
     QVector<SpcMcd> mcds_;
     void paintSpcOutlook(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
+    QVector<MetarObs> metars_;
+    void paintMetars(QPainter& painter);
+    // Nearest METAR within 14 px of a screen point, or nullopt. Shared by
+    // the probe suffix and the click-hit branch so hover and pin agree.
+    std::optional<MetarObs> metarNear(const QPointF& point) const;
     std::vector<LightningCellSnapshot> lightningCells_;
     std::vector<RadarStormFeature> radarFeatures_;
     std::vector<LightningRadarAssociation> lightningAssociations_;
@@ -545,6 +558,7 @@ private:
     bool stormReportsVisible_ = true;
     bool spcOutlookVisible_ = true;
     bool mcdVisible_ = true;
+    bool metarVisible_ = true;
     bool placefilesVisible_ = true;
     bool lightningVisible_ = true;
     bool lightningFusionVisible_ = true;

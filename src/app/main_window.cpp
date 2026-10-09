@@ -10,6 +10,7 @@
 #include "app/session_prefetch.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/spc_convective.hpp"
+#include "app/metar_source.hpp"
 #include "app/placefile_source.hpp"
 #include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
@@ -373,6 +374,7 @@ MainWindow::MainWindow(QWidget* parent)
       glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
       spcSource_(new SpcConvectiveSource(this)),
+      metarSource_(new MetarSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
       alertCenter_(new AlertCenter(this)),
@@ -491,6 +493,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(refreshTimer_, &QTimer::timeout, this, &MainWindow::requestSelectedRadar);
     connect(overlayRefreshTimer_, &QTimer::timeout, overlaySource_, &WeatherOverlaySource::refresh);
     connect(overlayRefreshTimer_, &QTimer::timeout, spcSource_, &SpcConvectiveSource::refresh);
+    connect(overlayRefreshTimer_, &QTimer::timeout, metarSource_, &MetarSource::refresh);
     connect(animationTimer_, &QTimer::timeout, this, &MainWindow::advanceFrame);
     healthTimer_->setInterval(30'000); // 30 s — enough resolution to flip Online/Stale
     healthTimer_->setSingleShot(false);
@@ -590,6 +593,10 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) panel->setMcdVisible(visible);
         refreshLayerBadges();
     });
+    connect(metarCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setMetarVisible(visible);
+        refreshLayerBadges();
+    });
     connect(addPlacefileButton_, &QToolButton::clicked, this, &MainWindow::openLocalPlacefile);
     connect(addPlacefileUrlButton_, &QToolButton::clicked, this, &MainWindow::addPlacefileUrl);
     connect(clearPlacefilesButton_, &QToolButton::clicked, this, &MainWindow::clearPlacefiles);
@@ -665,6 +672,14 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(spcSource_, &SpcConvectiveSource::statusChanged, this, [this](const QString& status) {
         spcStatus_ = status;
+        updateUnifiedStatus();
+    });
+    connect(metarSource_, &MetarSource::metarsReady, this, [this](QVector<MetarObs> metars) {
+        for (auto* panel : maps_) panel->setMetars(metars);
+        refreshLayerBadges();
+    });
+    connect(metarSource_, &MetarSource::statusChanged, this, [this](const QString& status) {
+        metarStatus_ = status;
         updateUnifiedStatus();
     });
     connect(glmSource_, &GlmSource::cellsUpdated, this,
@@ -830,6 +845,7 @@ MainWindow::MainWindow(QWidget* parent)
                                     30, 600) * 1000);
     overlaySource_->refresh();
     spcSource_->refresh();
+    metarSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
     glmSource_->configure(glmConfigFromSettings());
@@ -1344,6 +1360,10 @@ void MainWindow::buildUi() {
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
                  QStringLiteral("Active SPC mesoscale discussions with watch probability. Tornado and severe watches already arrive through NWS alerts."));
+    makeLayerRow(metarCheck_, QStringLiteral("METAR stations"), QStringLiteral("metarCheck"),
+                 QStringLiteral("Surface temp/dew/wind near the radar"), metarBadge_,
+                 QStringLiteral("metarBadge"), true,
+                 QStringLiteral("Nearby METAR surface observations: temp/dew markers colored by flight category, full wind and age on click."));
     auto* placefileRow = new QHBoxLayout();
     placefileRow->setSpacing(4);
     // Share the row evenly and allow shrinking. These three default to their
@@ -2217,6 +2237,10 @@ void MainWindow::radarSelected(const QModelIndex& index) {
                 const GeographicCoordinate coord{*site.latitude, *site.longitude};
                 alertCenter_->setSelectedRadar(coord);
             }
+            // Surface stations follow the radar: refresh the METAR region so
+            // the markers stay local instead of stuck on the last site.
+            metarSource_->setRegion(*site.latitude, *site.longitude, 3.0);
+            metarSource_->refresh();
         }
     }
     pushProximityFilterToCanvases();
@@ -3137,6 +3161,7 @@ void MainWindow::restoreSettings() {
         panel->setTdsVisible(tdsCheck_->isChecked());
         panel->setSpcOutlookVisible(spcOutlookCheck_->isChecked());
         panel->setMcdVisible(mcdCheck_->isChecked());
+        panel->setMetarVisible(metarCheck_->isChecked());
     }
     if (lightningCheck_->isEnabled())
         lightningCheck_->setChecked(settings.value(QStringLiteral("overlays/lightning"), true).toBool());
@@ -3145,6 +3170,7 @@ void MainWindow::restoreSettings() {
     placefilesCheck_->setChecked(settings.value(QStringLiteral("overlays/placefiles"), true).toBool());
     spcOutlookCheck_->setChecked(settings.value(QStringLiteral("overlays/spcOutlook"), true).toBool());
     mcdCheck_->setChecked(settings.value(QStringLiteral("overlays/mcd"), true).toBool());
+    metarCheck_->setChecked(settings.value(QStringLiteral("overlays/metar"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
     // speed combo. After the P1 round 2 expansion, 1x is at index 1, 2x at 2,
     // 4x at 3, and we added 0.5x, 8x, 16x at 0, 4, 5.
@@ -3200,6 +3226,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/placefiles"), placefilesCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/spcOutlook"), spcOutlookCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/metar"), metarCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
     settings.setValue(QStringLiteral("timeline/maximumFrames"), maximumHistoryFrames_);
     settings.setValue(QStringLiteral("timeline/historyVolumes"), historyVolumeCount_);
@@ -4121,6 +4148,15 @@ void MainWindow::refreshLayerBadges() {
         mcdBadge_->setToolTip(!on ? QStringLiteral("MCD layer is off")
                               : n > 0 ? QStringLiteral("Active mesoscale discussions on the map")
                                       : QStringLiteral("Layer is on; no MCDs in effect right now"));
+    }
+    if (metarBadge_) {
+        const auto n = map_->metarCount();
+        const bool on = metarCheck_ && metarCheck_->isChecked();
+        metarBadge_->setText(!on ? QStringLiteral("off") : n > 0 ? QString::number(n)
+                                                                 : QStringLiteral("quiet"));
+        metarBadge_->setToolTip(!on ? QStringLiteral("METAR layer is off")
+                                : n > 0 ? QStringLiteral("Surface stations on the map")
+                                        : QStringLiteral("Layer is on; no stations reporting in this region right now"));
     }
     if (lightningBadge_) {
         if (!cappedweather::glmL2ReaderAvailable() || !lightningCheck_ ||
