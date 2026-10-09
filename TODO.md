@@ -30,7 +30,6 @@ Short active list. Done work stays in git history and release notes, not in this
 
 Ready to build (data live now, testable hermetically plus replay):
 - [ ] SPC fire-weather outlooks Day 1/2. Same GeoJSON pipeline as categorical outlooks, different files, official colors. Verify: parser tests on live-shaped payload plus layer screenshot.
-- [ ] Bright-band / melting-layer ring. Quasi-circular low-CC band in stratiform echo gives freezing-level height per volume; feeds ZDR-column gating and hail logic. Verify: synthetic rings plus stratiform replay cases.
 - [ ] TBSS hail-spike detector. Down-radial weak-echo spike behind 60+ dBZ cores (three-body scatter), range/azimuth geometry only. Verify: synthetic spikes plus hail-case replays.
 - [ ] Bunkers storm motion from VAD. 0-6 km mean wind from the existing profile fit, standard left/right-mover math, feeds storm-relative velocity and SRH. Verify: synthetic winds plus sounding-day replay consistency.
 - [ ] Storm-relative helicity estimate. VAD profile plus Bunkers motion integrated 0-1 and 0-3 km, shown in the scan pop-out with the same quality flags. Verify: synthetic hodographs with closed-form SRH.
@@ -58,6 +57,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Bright-band melting-level estimate per volume (CC-dip ring median with quality flags, shown in the scan pop-out; future ZDR-column gating).
 - ZDR columns as updraft markers (dual-pol stacks over 1.5 km on 2+ tilts topping 3 km, layer with badge and persisted toggle, core tests plus replay-ready).
 - World-file sidecars (.pgw) for snapshots and KML frames so every PNG loads in GIS.
 - Environment Canada alerts (open MSC GeoMet OGC feed, Canada-wide bbox, shared warning rows/colors/probe/cards with NWS, last-known-good on failure).
