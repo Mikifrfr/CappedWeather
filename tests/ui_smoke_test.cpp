@@ -1108,6 +1108,52 @@ static bool testPinnedLock(QString* error) {
     return true;
 }
 
+static bool testPinnedCardKeyboard(QString* error) {
+    // A 2000-character headline overflows the card on a short panel, which
+    // is exactly the state Up/Down serves.
+    const QString longHeadline = QStringLiteral("SCROLL-ME ").repeated(200);
+    const auto warning =
+        smokeWarning(QStringLiteral("pin-scroll"), QStringLiteral("Tornado Warning"),
+                     QStringLiteral("Severe"), longHeadline, smokeSquare(-97.4, 35.2, 0.1));
+    RadarMapCanvas canvas;
+    canvas.resize(800, 220);
+    canvas.setWarningsVisible(true);
+    canvas.setWeatherOverlays({warning}, {});
+    canvas.setView(QPointF(-97.4, 35.2), 8);
+    // No card yet: keyboard scroll must be a safe no-op, never a crash.
+    if (canvas.hasScrollablePinnedCard()) {
+        *error = QStringLiteral("no card means nothing scrollable");
+        return false;
+    }
+    canvas.scrollPinnedCard(60);
+    canvas.show();
+    canvas.inspectAt(QPointF(canvas.rect().center()));
+    QCoreApplication::processEvents();
+    if (!canvas.probeText().contains(QStringLiteral("SCROLL-ME"))) {
+        *error = QStringLiteral("long card should pin, got: %1").arg(canvas.probeText().left(80));
+        return false;
+    }
+    if (!canvas.infoCardScrollable() || !canvas.hasScrollablePinnedCard()) {
+        *error = QStringLiteral("long card on a short panel should overflow");
+        return false;
+    }
+    canvas.scrollPinnedCard(-120);  // Down: reveal later content.
+    QTest::qWait(400);
+    QCoreApplication::processEvents();
+    if (canvas.infoCardScrollOffset() <= 0.0) {
+        *error = QStringLiteral("Down should advance the card");
+        return false;
+    }
+    canvas.scrollPinnedCard(100000);  // Up past the top: clamps, never negative.
+    QTest::qWait(400);
+    QCoreApplication::processEvents();
+    if (canvas.infoCardScrollOffset() != 0.0) {
+        *error = QStringLiteral("Up past the top should clamp to zero");
+        return false;
+    }
+    return true;
+}
+
 static bool testProbeClearsOnLeave(QString* error) {
     // Regression: the 16ms hover debounce used to outlive the cursor, so fast
     // transits across panels left frozen probe readouts behind on every panel.
@@ -2615,6 +2661,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testPinnedLock(&failure)) {
             std::cerr << "Pinned lock failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testPinnedCardKeyboard(&failure)) {
+            std::cerr << "Pinned card keyboard failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testProbeClearsOnLeave(&failure)) {

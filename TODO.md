@@ -19,7 +19,6 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
 - [ ] Flatpak plus Windows auto-update check. Artifacts already ship, discovery and updates are the gap.
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
-- [ ] Card keyboard focus. Full font-scale chrome is wired (dock titles, badges, tabs, and captions follow the text preference through late stylesheet overrides).
 
 ### Research (explicitly not next)
 - [ ] GPU volume rendering of live Level II. Design in `docs/gpu-volume-rendering.md` (shared VolumeBrick, GL raymarcher plus CPU twin). Not started.
@@ -34,6 +33,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Pinned-card keyboard scroll (Up/Down when the card overflows, same target physics as the wheel, editing widgets keep their keys). Shortcut help lists it.
 - Full font-scale chrome (dock titles, badges, tabs, captions follow the interface text preference).
 - Offline basemap pack for field chasing (region/zoom plan with tile cap and byte estimate, downloads into the shared tile cache through the production URL builder, verified against live tiles with a headless CLI).
 - KML frame export for GIS (PNG snapshot plus GroundOverlay with the panel lon/lat box, XML-escaped, fail-closed on wrap or flipped bounds). GeoTIFF stays open (native dependency).

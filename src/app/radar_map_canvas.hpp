@@ -285,6 +285,10 @@ public:
     void inspectAt(const QPointF& point);
     QPoint lightningCellScreenPoint(int index) const;
     int warningCount() const;
+    // Keyboard card access: a pinned card with overflowing content can be
+    // scrolled with Up/Down (same target physics as the wheel path).
+    [[nodiscard]] bool hasScrollablePinnedCard() const;
+    void scrollPinnedCard(int pixels);
     int stormReportCount() const;
     int placefileElementCount() const;
     bool placefilesVisible() const { return placefilesVisible_; }

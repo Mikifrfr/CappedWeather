@@ -753,6 +753,22 @@ MainWindow::MainWindow(QWidget* parent)
         map_->setPinnedOverlayLocked(!map_->pinnedOverlayLocked());
         updateUnifiedStatus();
     });
+    // Painted cards take no Qt focus, so Up/Down scroll the active panel's
+    // pinned card whenever one overflows. Editing widgets keep their keys:
+    // combos, spinners, sliders, and lists navigate natively when focused.
+    const auto scrollActiveCard = [this](const int pixels) {
+        if (!map_ || !map_->hasScrollablePinnedCard()) return;
+        const auto* focused = QApplication::focusWidget();
+        if (focused &&
+            (qobject_cast<const QComboBox*>(focused) || qobject_cast<const QAbstractSpinBox*>(focused) ||
+             qobject_cast<const QSlider*>(focused) || qobject_cast<const QListWidget*>(focused) ||
+             qobject_cast<const QLineEdit*>(focused))) {
+            return;
+        }
+        map_->scrollPinnedCard(pixels);
+    };
+    addShortcut(QKeySequence(Qt::Key_Up), [scrollActiveCard] { scrollActiveCard(60); });
+    addShortcut(QKeySequence(Qt::Key_Down), [scrollActiveCard] { scrollActiveCard(-60); });
     addShortcut(QKeySequence::Undo, [this] {
         if (map_ && map_->canUndoView()) {
             map_->undoView();

@@ -1297,6 +1297,22 @@ void RadarMapCanvas::togglePinnedCardExpanded() {
     update();
 }
 
+bool RadarMapCanvas::hasScrollablePinnedCard() const {
+    return !pinnedInfo_.isEmpty() &&
+           pinnedInfoContentHeight_ > static_cast<int>(std::floor(pinnedInfoBodyRect_.height()));
+}
+
+void RadarMapCanvas::scrollPinnedCard(const int pixels) {
+    if (!hasScrollablePinnedCard()) return;
+    const auto maximumScroll = static_cast<double>(
+        std::max(0, pinnedInfoContentHeight_ -
+                        static_cast<int>(std::floor(pinnedInfoBodyRect_.height()))));
+    if (!pinnedInfoScrollTimer_->isActive())
+        pinnedInfoScrollTarget_ = pinnedInfoScrollOffset_;
+    pinnedInfoScrollTarget_ = std::clamp(pinnedInfoScrollTarget_ - pixels, 0.0, maximumScroll);
+    pinnedInfoScrollTimer_->start();
+}
+
 void RadarMapCanvas::setLinkedProbe(const QPointF& lonLat, const QString& text,
                                     const QString& sourceLabel) {
     linkedProbeGeo_ = lonLat;
@@ -5081,9 +5097,7 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         return;
     }
     if (!pinnedInfo_.isEmpty() && pinnedInfoCardRect_.contains(event->position()) &&
-        pinnedInfoContentHeight_ > pinnedInfoBodyRect_.height()) {
-        const auto maximumScroll = static_cast<double>(std::max(
-            0, pinnedInfoContentHeight_ - static_cast<int>(std::floor(pinnedInfoBodyRect_.height()))));
+        hasScrollablePinnedCard()) {
         const auto pixelDelta = event->pixelDelta().y();
         const auto scrollDelta = pixelDelta != 0
             ? static_cast<double>(pixelDelta)
@@ -5092,11 +5106,7 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
             event->accept();
             return;
         }
-        if (!pinnedInfoScrollTimer_->isActive())
-            pinnedInfoScrollTarget_ = pinnedInfoScrollOffset_;
-        pinnedInfoScrollTarget_ = std::clamp(
-            pinnedInfoScrollTarget_ - scrollDelta, 0.0, maximumScroll);
-        pinnedInfoScrollTimer_->start();
+        scrollPinnedCard(static_cast<int>(scrollDelta));
         event->accept();
         return;
     }
