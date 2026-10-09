@@ -42,18 +42,19 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 - SPC Day 1 + 2 categorical outlooks in official colors and active mesoscale discussions with watch probability; tornado and severe watches arrive through NWS alerts.
 - GOES GLM lightning-jump cells (2σ LJA) fused with reflectivity objects ([engine](docs/lightning-jump-engine.md)); honestly disabled without netCDF, live out of the box in releases.
 - Meteoalarm warnings for European sites; 130+ bucket-active OPERA radars as first-class sessions (CC BY 4.0 EUMETNET, [sources](docs/europe-sources.md)).
+- METAR surface stations near the selected radar (temp/dew markers colored by flight category, wind and age on click).
 - Alert center with sound + tray notification, severity/geo/suppression filters, and a severity-sorted warning inbox.
 
 ### Analysis
 
 - TVS / mesocyclone markers (NSSL-style couplet heuristic), rotation/shear overlay, VIL-density hail cores with guidance size ranges, and polarimetric debris confirmation at live couplets. Per-storm tracks with +10/+20/+30 min extrapolation. Guidance only, never warnings ([rotation validation](docs/rotation-validation.md), [hail/TDS validation](docs/severe-hail-tds-validation.md)).
-- Measure (great-circle range/bearing), beam height, scan diagnostics, and modeless multi-tilt cross-sections with CSV export.
-- Scoped Archive-II case loading (local files or an AWS time window) and a GR-compatible placefile subset ([limits](docs/placefiles-and-archives.md)).
+- Measure (great-circle range/bearing), beam height, scan diagnostics with per-tilt table and VAD wind profile ([derived products](docs/derived-products.md)), and modeless multi-tilt cross-sections with CSV export.
+- Scoped Archive-II case loading (local files or an AWS time window), shareable case-pack export/import, and a GR-compatible placefile subset ([limits](docs/placefiles-and-archives.md)).
 
 ### Playback & export
 
 - Live-follow, looping, 0.5×–16× speeds, filmstrip with warning ticks and bookmarks, jump to earliest/latest or an absolute time.
-- PNG snapshots, frame-exact timeline GIFs, MP4 capture, and spill-to-disk history beyond the RAM window.
+- PNG snapshots, frame-exact timeline GIFs, MP4 capture, frame-exact WebM through ffmpeg when installed, KML frame export for GIS, and spill-to-disk history beyond the RAM window.
 
 ### Interface
 
