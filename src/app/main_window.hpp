@@ -40,6 +40,7 @@ class QListWidgetItem;
 class QSlider;
 class QSpinBox;
 class QTabWidget;
+class QTableWidget;
 class QTimer;
 class QToolButton;
 
@@ -168,6 +169,10 @@ private:
     void updateVelocityControls();
     void showCrossSection(const QPointF& start, const QPointF& end);
     void refreshCrossSection();
+    // Scan diagnostics pop-out: per-tilt table plus VAD wind profile.
+    void showScanDiagnostics();
+    void refreshScanDialog();
+    void populateScanDialog();
     void togglePanelMaximized();
     void updateOfflineBanner();
     void applyDataSaverPreset();
@@ -374,6 +379,11 @@ private:
     // showFrame() via refreshCrossSection().
     QPointer<QDialog> crossSectionDialog_;
     class CrossSectionWidget* crossSectionWidget_ = nullptr;
+    // Modeless scan diagnostics (per-tilt table plus VAD wind profile).
+    // Same live-update contract: showFrame() repopulates while open.
+    QPointer<QDialog> scanDialog_;
+    QTableWidget* scanTable_ = nullptr;
+    QLabel* scanSummary_ = nullptr;
     QPointF crossSectionStart_;
     QPointF crossSectionEnd_;
     QString crossSectionRadarId_;

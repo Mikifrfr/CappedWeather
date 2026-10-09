@@ -56,6 +56,7 @@ add_library(cappedweather_core STATIC
     src/core/radar_catalog.cpp
     src/core/opera_catalog.cpp
     src/core/scan_diagnostics.cpp
+    src/core/vad.cpp
     src/core/velocity_processing.cpp
     src/core/lightning_jump.cpp
     src/core/flash_rate_grid.cpp

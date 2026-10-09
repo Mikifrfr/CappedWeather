@@ -13,6 +13,7 @@
 #include "app/placefile_source.hpp"
 #include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
+#include "core/vad.hpp"
 #include "app/cross_section_widget.hpp"
 #include "app/command_palette.hpp"
 #include "app/timeline_strip.hpp"
@@ -89,6 +90,8 @@
 #include <QStatusBar>
 #include <QThread>
 #include <QThreadPool>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QTime>
 #include <QTimer>
 #include <QToolButton>
@@ -1581,7 +1584,14 @@ void MainWindow::buildUi() {
     scanDiagnosticsLabel_->setObjectName(QStringLiteral("layerSub"));
     scanDiagnosticsLabel_->setWordWrap(true);
     scanDiagnosticsLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    displayGroup->addWidget(scanDiagnosticsLabel_);
+    auto* scanRow = new QHBoxLayout();
+    scanRow->addWidget(scanDiagnosticsLabel_, 1);
+    auto* scanDetailsButton = new QToolButton(controlBody);
+    scanDetailsButton->setText(QStringLiteral("Details"));
+    scanDetailsButton->setToolTip(QStringLiteral("Per-tilt table plus VAD wind profile for the active volume"));
+    connect(scanDetailsButton, &QToolButton::clicked, this, [this] { showScanDiagnostics(); });
+    scanRow->addWidget(scanDetailsButton);
+    displayGroup->addLayout(scanRow);
     displayPageLayout->addSpacing(2);
 
     // Alert tuning lives next to the inbox it governs, on the Alerts tab.
@@ -2925,6 +2935,7 @@ void MainWindow::showFrame(const int index) {
     refreshLayerBadges();
     updatePanelAttribution();
     refreshCrossSection();
+    refreshScanDialog();
     scheduleSpillPrefetch();
 }
 
@@ -4450,6 +4461,164 @@ void MainWindow::refreshCrossSection() {
         QStringLiteral("%1 Cross-section — %2 (live)")
             .arg(crossSectionRadarId_,
                  frame.dataTime.toLocalTime().toString(QStringLiteral("HH:mm:ss"))));
+}
+
+void MainWindow::showScanDiagnostics() {
+    if (scanDialog_) {
+        populateScanDialog();
+        scanDialog_->show();
+        scanDialog_->raise();
+        scanDialog_->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setModal(false);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->resize(680, 420);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
+    scanSummary_ = new QLabel(dialog);
+    scanSummary_->setWordWrap(true);
+    scanSummary_->setObjectName(QStringLiteral("groupCaption"));
+    layout->addWidget(scanSummary_);
+    scanTable_ = new QTableWidget(dialog);
+    scanTable_->setColumnCount(9);
+    scanTable_->setHorizontalHeaderLabels({QStringLiteral("Tilt"), QStringLiteral("El"),
+                                           QStringLiteral("Rays"), QStringLiteral("Max gap"),
+                                           QStringLiteral("VAD wind"), QStringLiteral("Ht MSL"),
+                                           QStringLiteral("Gates"), QStringLiteral("RMSE"),
+                                           QStringLiteral("Fit")});
+    scanTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    scanTable_->verticalHeader()->setVisible(false);
+    scanTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    scanTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    layout->addWidget(scanTable_, 1);
+    auto* note = new QLabel(
+        QStringLiteral("VAD is a layer-mean sine fit on dealiased velocity: guidance only, never "
+                       "warnings. Poor and Invalid fits stay visible with their RMSE so a bad fit "
+                       "never reads as calm air."),
+        dialog);
+    note->setWordWrap(true);
+    note->setObjectName(QStringLiteral("groupCaption"));
+    layout->addWidget(note);
+    auto* buttons = new QHBoxLayout();
+    buttons->addStretch(1);
+    auto* refreshButton = new QToolButton(dialog);
+    refreshButton->setText(QStringLiteral("Refresh"));
+    connect(refreshButton, &QToolButton::clicked, this, [this] { populateScanDialog(); });
+    buttons->addWidget(refreshButton);
+    auto* closeButton = new QToolButton(dialog);
+    closeButton->setText(QStringLiteral("Close"));
+    connect(closeButton, &QToolButton::clicked, dialog, &QDialog::close);
+    buttons->addWidget(closeButton);
+    layout->addLayout(buttons);
+    scanDialog_ = dialog;
+    connect(dialog, &QObject::destroyed, this, [this] {
+        scanTable_ = nullptr;
+        scanSummary_ = nullptr;
+    });
+    populateScanDialog();
+    dialog->show();
+}
+
+void MainWindow::refreshScanDialog() {
+    if (!scanDialog_) return;
+    populateScanDialog();
+}
+
+void MainWindow::populateScanDialog() {
+    if (!scanTable_ || !scanSummary_ || !map_) return;
+    const auto chunk = map_->decodedChunk();
+    const QString radar = selectedRadarId();
+    scanDialog_->setWindowTitle(radar.isEmpty() ? QStringLiteral("Scan diagnostics")
+                                                : QStringLiteral("%1 Scan diagnostics").arg(radar));
+    if (!chunk || chunk->rays.empty() || radar.isEmpty()) {
+        scanSummary_->setText(QStringLiteral("No volume loaded. Pick a station and go LIVE first."));
+        scanTable_->setRowCount(0);
+        return;
+    }
+    scanSummary_->setText(QStringLiteral("%1 · %2").arg(map_->scanDiagnosticsText(),
+                                                        QStringLiteral("Volume follows the active panel")));
+    const auto perTilt = map_->tiltDiagnostics();
+    auto options = map_->velocityProcessing();
+    options.mode = VelocityProcessingMode::Dealiased;
+    const auto dealiased = processVelocity(*chunk, options);
+    double radarElevationMeters = 0.0;
+    if (model_) {
+        const auto radarRow = model_->rowForRadar(radar);
+        if (radarRow >= 0) radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
+    }
+    const auto levels = fitVadProfile(*chunk, dealiased, radarElevationMeters);
+    scanTable_->setRowCount(static_cast<int>(perTilt.size()));
+    for (int row = 0; row < static_cast<int>(perTilt.size()); ++row) {
+        const auto& tilt = perTilt[static_cast<std::size_t>(row)];
+        double elevationDegrees = std::numeric_limits<double>::quiet_NaN();
+        for (const auto& ray : chunk->rays) {
+            if (ray.elevationNumber == tilt.elevationNumber) {
+                elevationDegrees = ray.elevationDegrees;
+                break;
+            }
+        }
+        const VadLevel* vad = nullptr;
+        for (const auto& level : levels) {
+            if (level.elevationNumber == tilt.elevationNumber) {
+                vad = &level;
+                break;
+            }
+        }
+        const auto degree = QChar(0x00b0);
+        auto cell = [this, row](int column, const QString& text, const QString& tooltip = {}) {
+            auto* item = new QTableWidgetItem(text);
+            if (!tooltip.isEmpty()) item->setToolTip(tooltip);
+            scanTable_->setItem(row, column, item);
+        };
+        cell(0, QString::number(tilt.elevationNumber));
+        cell(1, std::isnan(elevationDegrees) ? QStringLiteral("—")
+                                             : QStringLiteral("%1%2").arg(elevationDegrees, 0, 'f', 1).arg(degree));
+        cell(2, QString::number(tilt.rayCount));
+        cell(3, QStringLiteral("%1%2").arg(tilt.largestAzimuthGapDegrees, 0, 'f', 1).arg(degree));
+        QString windText = QStringLiteral("no VEL");
+        QString windTip =
+            QStringLiteral("This tilt carries no velocity moments, so there is nothing to fit.");
+        QString heightText = QStringLiteral("—");
+        QString gatesText = QStringLiteral("—");
+        QString rmseText = QStringLiteral("—");
+        QString fitText = QStringLiteral("n/a");
+        QString fitTip;
+        if (vad) {
+            gatesText = QString::number(vad->gateCount);
+            if (!std::isnan(vad->heightMslMeters))
+                heightText = QStringLiteral("%1 km").arg(vad->heightMslMeters / 1000.0, 0, 'f', 1);
+            if (!std::isnan(vad->rmseMetersPerSecond))
+                rmseText = QStringLiteral("%1 m/s").arg(vad->rmseMetersPerSecond, 0, 'f', 1);
+            switch (vad->quality) {
+                case VadQuality::Good: fitText = QStringLiteral("Good"); break;
+                case VadQuality::Marginal: fitText = QStringLiteral("Marginal"); break;
+                case VadQuality::Poor: fitText = QStringLiteral("Poor"); break;
+                case VadQuality::Invalid: fitText = QStringLiteral("Invalid"); break;
+            }
+            fitTip = QStringLiteral("Good: 200+ gates, 270°+ circle, RMSE ≤ 3 m/s. Marginal: 60+ "
+                                    "gates, 180°+, RMSE ≤ 6. Poor/Invalid: shown, not trusted.");
+            if (vad->quality == VadQuality::Invalid) {
+                windText = QStringLiteral("no fit");
+                windTip = QStringLiteral("Too few gates, too narrow a circle, or degenerate "
+                                         "geometry: no wind was fitted.");
+            } else {
+                windText = QStringLiteral("%1%2 / %3 m/s")
+                               .arg(vad->directionFromDegrees, 0, 'f', 0)
+                               .arg(degree)
+                               .arg(vad->speedMetersPerSecond, 0, 'f', 1);
+                windTip = QStringLiteral("Layer-mean wind (FROM direction) from the sine fit. "
+                                         "Guidance only.");
+            }
+        }
+        cell(4, windText, windTip);
+        cell(5, heightText);
+        cell(6, gatesText);
+        cell(7, rmseText);
+        cell(8, fitText, fitTip);
+    }
 }
 
 void MainWindow::importCustomPalette() {

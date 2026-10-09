@@ -1459,6 +1459,13 @@ void RadarMapCanvas::setVolumeQuality(const int decodedChunks, const int totalCh
     update();
 }
 
+std::vector<TiltDiagnostics> RadarMapCanvas::tiltDiagnostics() const {
+    if (!chunk_) return {};
+    std::vector<TiltDiagnostics> perTilt;
+    analyzeScan(*chunk_, product_, perTilt, std::nullopt);
+    return perTilt;
+}
+
 void RadarMapCanvas::refreshScanDiagnostics() {
     scanQualityText_.clear();
     invalidateStatusText();

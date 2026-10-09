@@ -5,6 +5,7 @@
 #include "core/radar_geometry.hpp"
 #include "core/scan_diagnostics.hpp"
 #include "core/velocity_processing.hpp"
+#include "core/vad.hpp"
 #include "core/lightning_jump.hpp"
 #include "core/flash_rate_grid.hpp"
 #include "core/glm_l2_reader.hpp"
@@ -462,6 +463,112 @@ void testVelocityProcessing() {
     const auto stormRelative = processVelocity(
         chunk, {VelocityProcessingMode::StormRelative, 25.0, 0.0, 10.0});
     assert(std::abs(stormRelative[0][0] - 10.0) < 0.01);
+}
+
+namespace {
+DecodedRay syntheticVadRay(const float azimuth, const std::uint8_t elevationNumber,
+                           const float elevationDegrees, const double radialVelocity) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 10.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    const auto index = static_cast<std::size_t>(ProductKind::Velocity);
+    // (encoded - offset) / scale encoding; offset keeps negatives encodable.
+    const auto encoded =
+        static_cast<std::uint16_t>(std::lround(radialVelocity * 2.0 + 2000.0));
+    ray.fields.at(index).assign(20, encoded);
+    ray.firstGateByProduct.at(index) = 0;
+    ray.gateSpacingByProduct.at(index) = 1000;
+    ray.scaleByProduct.at(index) = 2.0F;
+    ray.offsetByProduct.at(index) = 2000.0F;
+    return ray;
+}
+}  // namespace
+
+void testVadProfile() {
+    // Known wind: 10 m/s east + 5 m/s north. Vr(az) = (u sin + v cos) cos(el).
+    // True speed hypot(10,5) = 11.18; toward = atan2(10,5) = 63.4, FROM = 243.4.
+    constexpr double kWindU = 10.0;
+    constexpr double kWindV = 5.0;
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    for (int step = 0; step < 36; ++step) {
+        const double azimuth = step * 10.0;
+        const double azimuthRad = azimuth * 3.14159265358979323846 / 180.0;
+        const double radial =
+            (kWindU * std::sin(azimuthRad) + kWindV * std::cos(azimuthRad)) * std::cos(0.5 * 3.14159265358979323846 / 180.0);
+        chunk.rays.push_back(syntheticVadRay(static_cast<float>(azimuth), 1, 0.5F, radial));
+    }
+    for (int step = 0; step < 36; ++step) {
+        const double azimuth = step * 10.0;
+        const double azimuthRad = azimuth * 3.14159265358979323846 / 180.0;
+        const double radial =
+            (kWindU * std::sin(azimuthRad) + kWindV * std::cos(azimuthRad)) * std::cos(15.0 * 3.14159265358979323846 / 180.0);
+        chunk.rays.push_back(syntheticVadRay(static_cast<float>(azimuth), 2, 15.0F, radial));
+    }
+    const auto dealiased = processVelocity(chunk, {VelocityProcessingMode::Native, 25.0, 0.0, 0.0});
+    const auto levels = fitVadProfile(chunk, dealiased, 300.0);
+    assert(levels.size() == 2);
+    for (const auto& level : levels) {
+        assert(level.quality == VadQuality::Good);
+        assert(level.gateCount == 720);
+        assert(std::abs(level.speedMetersPerSecond - 11.18) < 0.3);
+        assert(std::abs(level.directionFromDegrees - 243.4) < 2.0);
+        assert(level.azimuthCoverageDegrees > 340.0);
+        assert(level.rmseMetersPerSecond < 1.0);
+    }
+    // Height separates the tilts: low tilt near the radar level, 15-degree
+    // tilt kilometres up. Catches a forgotten /cos(elevation) or a height
+    // mixup between tilts.
+    assert(levels[0].heightMslMeters < 3000.0);
+    assert(levels[1].heightMslMeters > 4000.0);
+    // Fail-closed inputs produce no output, never phantoms.
+    assert(fitVadProfile(DecodedChunk{}, ProcessedVelocity{}).empty());
+    assert(fitVadProfile(chunk, ProcessedVelocity{}).empty());
+    // Single-ray tilt: degenerate azimuth spread goes singular, which must
+    // surface as one Invalid row, not a phantom wind and not a dropped tilt.
+    {
+        DecodedChunk single;
+        single.radarId = "KTLX";
+        single.rays.push_back(syntheticVadRay(90.0F, 1, 0.5F, 8.0));
+        // Widen the single ray so the gate-count guard cannot mask the
+        // singular-matrix path.
+        single.rays.back().fields.at(static_cast<std::size_t>(ProductKind::Velocity)).assign(64, 2016);
+        const auto singleDealiased =
+            processVelocity(single, {VelocityProcessingMode::Native, 25.0, 0.0, 0.0});
+        const auto singleLevels = fitVadProfile(single, singleDealiased, 0.0);
+        assert(singleLevels.size() == 1);
+        assert(singleLevels.front().quality == VadQuality::Invalid);
+    }
+    // All-missing tilt: no usable gates, no row at all.
+    {
+        DecodedChunk missing;
+        missing.radarId = "KTLX";
+        DecodedRay ray;
+        ray.azimuthDegrees = 0.0F;
+        ray.elevationNumber = 1;
+        ray.elevationDegrees = 0.5F;
+        ray.fields.at(static_cast<std::size_t>(ProductKind::Velocity)).assign(20, 0);
+        missing.rays.push_back(ray);
+        const auto missingDealiased =
+            processVelocity(missing, {VelocityProcessingMode::Native, 25.0, 0.0, 0.0});
+        assert(fitVadProfile(missing, missingDealiased, 0.0).empty());
+    }
+    // Non-finite gates (inf) are skipped, never fitted.
+    {
+        ProcessedVelocity inf(1, std::vector<float>(32, std::numeric_limits<float>::infinity()));
+        DecodedChunk infChunk;
+        infChunk.radarId = "KTLX";
+        DecodedRay ray;
+        ray.azimuthDegrees = 0.0F;
+        ray.elevationNumber = 1;
+        ray.elevationDegrees = 0.5F;
+        ray.fields.at(static_cast<std::size_t>(ProductKind::Velocity))
+            .assign(32, static_cast<std::uint16_t>(2000));
+        infChunk.rays.push_back(ray);
+        assert(fitVadProfile(infChunk, inf, 0.0).empty());
+    }
 }
 
 void writeBigEndian16(std::vector<std::byte>& bytes, const std::size_t offset, const std::uint16_t value) {
@@ -1784,6 +1891,7 @@ int main() {
     testRadarGeometry();
     testScanDiagnostics();
     testVelocityProcessing();
+    testVadProfile();
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();
     testMessage31MalformedInputs();

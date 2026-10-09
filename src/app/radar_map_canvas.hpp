@@ -7,6 +7,7 @@
 #include "app/spc_convective.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
+#include "core/scan_diagnostics.hpp"
 #include "core/velocity_processing.hpp"
 #include "core/lightning_overlay.hpp"
 #include "core/radar_lightning_fusion.hpp"
@@ -150,6 +151,11 @@ public:
     void setDisplaySmoothing(bool enabled);
     [[nodiscard]] bool displaySmoothing() const { return displaySmoothing_; }
     [[nodiscard]] QString scanDiagnosticsText() const;
+    // Scan pop-out support: the live volume plus a full-tilt breakdown.
+    // Null when no volume is loaded; per-tilt rows skip the panel's tilt
+    // filter so the dialog always shows every tilt in the volume.
+    [[nodiscard]] std::shared_ptr<const DecodedChunk> decodedChunk() const { return chunk_; }
+    [[nodiscard]] std::vector<TiltDiagnostics> tiltDiagnostics() const;
     void setWarningsVisible(bool visible);
     void setStormReportsVisible(bool visible);
     void setStormReportKindVisible(StormReportKind kind, bool visible);
