@@ -33,6 +33,8 @@ Short active list. Done work stays in git history and release notes, not in this
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Case-pack import session rebuild as shared tested logic (copy plus decode check per volume, staged cleanup, radar guard) with fault-in coverage.
+- Spill prefetch fans out to every panel session for mixed-radar layouts.
 - Pinned-card keyboard scroll (Up/Down when the card overflows, same target physics as the wheel, editing widgets keep their keys). Shortcut help lists it.
 - Full font-scale chrome (dock titles, badges, tabs, captions follow the interface text preference).
 - Offline basemap pack for field chasing (region/zoom plan with tile cap and byte estimate, downloads into the shared tile cache through the production URL builder, verified against live tiles with a headless CLI).
