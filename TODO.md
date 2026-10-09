@@ -18,7 +18,6 @@ Short active list. Done work stays in git history and release notes, not in this
 ### Platform and UX
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
 - [ ] Flatpak plus Windows auto-update check. Artifacts already ship, discovery and updates are the gap.
-- [ ] Offline basemap pack for field chasing. Pre-cached tile region with an explicit storage budget, so a no-signal chase still has roads.
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
 - [ ] Card keyboard focus and full font-scale chrome. Map HUD scales with the text preference; dock titles, badges, and tabs are still theme-pinned.
 
@@ -35,6 +34,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Offline basemap pack for field chasing (region/zoom plan with tile cap and byte estimate, downloads into the shared tile cache through the production URL builder, verified against live tiles with a headless CLI).
 - KML frame export for GIS (PNG snapshot plus GroundOverlay with the panel lon/lat box, XML-escaped, fail-closed on wrap or flipped bounds). GeoTIFF stays open (native dependency).
 - WebM timeline export (frame-exact VP9 through an ffmpeg image pipe at GIF timing, cancellable with progress, fail-closed dialog when ffmpeg is missing). GIF stays frame-exact without dependencies, MP4 stays window capture.
 - Scan diagnostics full panel: per-tilt table pop-out (rays, gaps, VAD wind, height, RMSE, fit quality) live with the timeline, next to the live dock readout.

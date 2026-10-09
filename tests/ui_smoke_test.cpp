@@ -16,6 +16,7 @@
 #include "app/session_prefetch.hpp"
 #include "app/metar_source.hpp"
 #include "app/case_pack.hpp"
+#include "app/offline_pack.hpp"
 #include "core/volume_spill.hpp"
 #include "core/product.hpp"
 
@@ -2122,6 +2123,44 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             if (!loaded || loaded->rays.size() != 3 ||
                 loaded->rays.at(2).fields.at(refIndex) != chunk.rays.at(2).fields.at(refIndex)) {
                 std::cerr << "Case cycle volume differs after pack/unpack\n";
+                return 1;
+            }
+        }
+    }
+    // Offline pack plan: pure tile math, fail-closed on bad regions.
+    {
+        // Equatorial z1 in a +-20 degree box is exactly 2x2 tiles.
+        const auto world = planOfflinePack(0.0, 0.0, 20.0, 1, 1);
+        if (!world.error.isEmpty() || world.tiles.size() != 4) {
+            std::cerr << "z1 pack of +-20 degrees should be 4 tiles: "
+                      << world.error.toStdString() << '\n';
+            return 1;
+        }
+        for (const auto& tile : world.tiles) {
+            if (tile.zoom != 1 || tile.x < 0 || tile.x > 1 || tile.y < 0 || tile.y > 1) {
+                std::cerr << "Pack tile out of its zoom bounds\n";
+                return 1;
+            }
+        }
+        if (world.urlsPerTile < 1 || world.estimatedBytes <= 0) {
+            std::cerr << "Pack estimate should be positive\n";
+            return 1;
+        }
+        // A single zoom-0 tile for a small region.
+        const auto single = planOfflinePack(35.5, -97.5, 0.5, 0, 0);
+        if (!single.error.isEmpty() || single.tiles.size() != 1) {
+            std::cerr << "z0 pack should be 1 tile\n";
+            return 1;
+        }
+        const auto badRange = planOfflinePack(0.0, 0.0, 1.0, 8, 4);
+        const auto badLat =
+            planOfflinePack(std::numeric_limits<double>::quiet_NaN(), 0.0, 1.0, 4, 6);
+        const auto badHalf = planOfflinePack(0.0, 0.0, 0.0, 4, 6);
+        const auto badWrap = planOfflinePack(0.0, 179.0, 5.0, 4, 6);
+        const auto badCap = planOfflinePack(0.0, 0.0, 20.0, 0, 12);
+        for (const auto* bad : {&badRange, &badLat, &badHalf, &badWrap, &badCap}) {
+            if (bad->error.isEmpty() || !bad->tiles.isEmpty()) {
+                std::cerr << "Bad pack region should fail closed with no tiles\n";
                 return 1;
             }
         }

@@ -207,6 +207,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/shortcut_help_dialog.hpp
             src/app/spc_convective.cpp
             src/app/spc_convective.hpp
+            src/app/offline_pack.cpp
+            src/app/offline_pack.hpp
             src/app/case_pack.cpp
             src/app/case_pack.hpp
             src/app/metar_source.cpp
@@ -275,6 +277,11 @@ if(CAPPEDWEATHER_BUILD_APP)
             tools/rotation_replay.cpp
         )
         target_link_libraries(rotation_replay PRIVATE cappedweather_ui)
+
+        qt_add_executable(offline_pack
+            tools/offline_pack.cpp
+        )
+        target_link_libraries(offline_pack PRIVATE cappedweather_ui)
 
         find_package(Qt6 6.4 COMPONENTS Test QUIET)
         if(TARGET Qt6::Test)

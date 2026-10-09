@@ -200,6 +200,9 @@ private:
     // the session from a pack so a shared case reproduces exactly.
     void exportCasePack();
     void importCasePack();
+    // Offline basemap pack for field chasing: pre-downloads tiles around
+    // the selected radar into the shared tile cache.
+    void downloadOfflinePack();
     void openLocalPlacefile();
     void addPlacefileUrl();
     void clearPlacefiles();

@@ -54,7 +54,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 ### Playback & export
 
 - Live-follow, looping, 0.5×–16× speeds, filmstrip with warning ticks and bookmarks, jump to earliest/latest or an absolute time.
-- PNG snapshots, frame-exact timeline GIFs, MP4 capture, frame-exact WebM through ffmpeg when installed, KML frame export for GIS, and spill-to-disk history beyond the RAM window.
+- PNG snapshots, frame-exact timeline GIFs, MP4 capture, frame-exact WebM through ffmpeg when installed, KML frame export for GIS, offline map packs for no-signal chasing, and spill-to-disk history beyond the RAM window.
 
 ### Interface
 

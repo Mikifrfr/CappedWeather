@@ -16,6 +16,7 @@
 #include "core/derived_products.hpp"
 #include "core/vad.hpp"
 #include "app/case_pack.hpp"
+#include "app/offline_pack.hpp"
 #include "app/cross_section_widget.hpp"
 #include "app/command_palette.hpp"
 #include "app/timeline_strip.hpp"
@@ -3844,6 +3845,8 @@ void MainWindow::setupMenus() {
     connect(caseExportAction, &QAction::triggered, this, &MainWindow::exportCasePack);
     auto* caseImportAction = fileMenu->addAction(QStringLiteral("Import case-pack…"));
     connect(caseImportAction, &QAction::triggered, this, &MainWindow::importCasePack);
+    auto* packAction = fileMenu->addAction(QStringLiteral("Download offline map pack…"));
+    connect(packAction, &QAction::triggered, this, &MainWindow::downloadOfflinePack);
     fileMenu->addSeparator();
     auto* settingsAction = fileMenu->addAction(QStringLiteral("Settings…"));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettingsDialog);
@@ -3953,6 +3956,8 @@ void MainWindow::showCommandPalette() {
              [this] { exportCasePack(); });
     addEntry(QStringLiteral("Import: case-pack"), QStringLiteral("Reproduce a shared case exactly"),
              [this] { importCasePack(); });
+    addEntry(QStringLiteral("Offline: download map pack"), QStringLiteral("Cache basemap for no-signal chasing"),
+             [this] { downloadOfflinePack(); });
     addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
              [this] { showSettingsDialog(); });
     palette->setEntries(std::move(entries));
@@ -5281,6 +5286,122 @@ void MainWindow::importCasePack() {
     statusBar()->showMessage(
         QStringLiteral("Case-pack imported: %1 volumes for %2").arg(session->history.size()).arg(radar),
         5000);
+}
+
+void MainWindow::downloadOfflinePack() {
+    double latitude = 35.0;
+    double longitude = -97.0;
+    QString centerName = QStringLiteral("Southern Plains");
+    if (model_) {
+        const auto row = model_->rowForRadar(selectedRadarId_);
+        if (row >= 0) {
+            const auto& site = model_->siteAt(row);
+            if (site.latitude && site.longitude) {
+                latitude = *site.latitude;
+                longitude = *site.longitude;
+                centerName = selectedRadarId_;
+            }
+        }
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Download offline map pack"));
+    dialog.setModal(true);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* centerLabel = new QLabel(
+        QStringLiteral("Center: %1 (%2, %3). Tiles land in the shared map cache, "
+                       "so the chase works with no signal.")
+            .arg(centerName)
+            .arg(latitude, 0, 'f', 2)
+            .arg(longitude, 0, 'f', 2),
+        &dialog);
+    centerLabel->setWordWrap(true);
+    layout->addWidget(centerLabel);
+    auto* form = new QFormLayout();
+    auto* halfSpin = new QDoubleSpinBox(&dialog);
+    halfSpin->setRange(0.5, 8.0);
+    halfSpin->setSingleStep(0.5);
+    halfSpin->setValue(2.0);
+    halfSpin->setSuffix(QStringLiteral("°"));
+    form->addRow(QStringLiteral("Half-size"), halfSpin);
+    auto* minZoomSpin = new QSpinBox(&dialog);
+    minZoomSpin->setRange(0, 12);
+    minZoomSpin->setValue(4);
+    form->addRow(QStringLiteral("Min zoom"), minZoomSpin);
+    auto* maxZoomSpin = new QSpinBox(&dialog);
+    maxZoomSpin->setRange(0, 14);
+    maxZoomSpin->setValue(8);
+    form->addRow(QStringLiteral("Max zoom"), maxZoomSpin);
+    layout->addLayout(form);
+    auto* estimateLabel = new QLabel(&dialog);
+    estimateLabel->setWordWrap(true);
+    estimateLabel->setObjectName(QStringLiteral("groupCaption"));
+    layout->addWidget(estimateLabel);
+    const auto refreshEstimate = [&] {
+        const auto plan = planOfflinePack(latitude, longitude, halfSpin->value(),
+                                          minZoomSpin->value(), maxZoomSpin->value());
+        if (!plan.error.isEmpty()) {
+            estimateLabel->setText(plan.error);
+            return plan;
+        }
+        estimateLabel->setText(
+            QStringLiteral("%1 tiles, ~%2 MB. Roads stay readable offline to zoom %3.")
+                .arg(plan.tiles.size())
+                .arg(plan.estimatedBytes / 1048576.0, 0, 'f', 1)
+                .arg(plan.maxZoom));
+        return plan;
+    };
+    connect(halfSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog,
+            [&](double) { refreshEstimate(); });
+    connect(minZoomSpin, qOverload<int>(&QSpinBox::valueChanged), &dialog,
+            [&](int) { refreshEstimate(); });
+    connect(maxZoomSpin, qOverload<int>(&QSpinBox::valueChanged), &dialog,
+            [&](int) { refreshEstimate(); });
+    refreshEstimate();
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Download"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const auto plan =
+        planOfflinePack(latitude, longitude, halfSpin->value(), minZoomSpin->value(),
+                        maxZoomSpin->value());
+    if (!plan.error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Offline map pack"), plan.error);
+        return;
+    }
+    QProgressDialog progress(QStringLiteral("Caching %1 tiles…").arg(plan.tiles.size()),
+                             QStringLiteral("Cancel"), 0,
+                             static_cast<int>(plan.tiles.size()) * plan.urlsPerTile, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(250);
+    progress.setValue(0);
+    // Local event loop: the packer is async, but this flow is modal like
+    // the GIF/WebM exports. The packer outlives the loop via deleteLater.
+    QEventLoop wait;
+    QString packMessage;
+    bool packOk = false;
+    auto* packer = new OfflinePacker(this);
+    connect(packer, &OfflinePacker::progressed, &progress,
+            [&](int done, int) { progress.setValue(done); });
+    connect(packer, &OfflinePacker::finished, &wait,
+            [&](bool ok, const QString& message) {
+                packOk = ok;
+                packMessage = message;
+                progress.setValue(progress.maximum());
+                packer->deleteLater();
+                wait.quit();
+            });
+    connect(&progress, &QProgressDialog::canceled, packer, &OfflinePacker::cancel);
+    packer->start(plan);
+    wait.exec(QEventLoop::ExcludeUserInputEvents);
+    if (packOk) {
+        statusBar()->showMessage(QStringLiteral("Offline maps: %1").arg(packMessage), 8000);
+    } else if (packMessage != QStringLiteral("Offline pack cancelled")) {
+        QMessageBox::warning(this, QStringLiteral("Offline map pack"), packMessage);
+    } else {
+        statusBar()->showMessage(packMessage, 4000);
+    }
 }
 
 void MainWindow::openLocalPlacefile() {
