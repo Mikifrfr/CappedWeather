@@ -15,6 +15,7 @@
 #include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
 #include "core/vad.hpp"
+#include "core/bright_band.hpp"
 #include "app/case_pack.hpp"
 #include "app/offline_pack.hpp"
 #include "app/cross_section_widget.hpp"
@@ -4646,8 +4647,6 @@ void MainWindow::populateScanDialog() {
         scanTable_->setRowCount(0);
         return;
     }
-    scanSummary_->setText(QStringLiteral("%1 · %2").arg(map_->scanDiagnosticsText(),
-                                                        QStringLiteral("Volume follows the active panel")));
     const auto perTilt = map_->tiltDiagnostics();
     auto options = map_->velocityProcessing();
     options.mode = VelocityProcessingMode::Dealiased;
@@ -4658,6 +4657,22 @@ void MainWindow::populateScanDialog() {
         if (radarRow >= 0) radarElevationMeters = model_->siteAt(radarRow).antennaElevationMeters;
     }
     const auto levels = fitVadProfile(*chunk, dealiased, radarElevationMeters);
+    // Melting-level line: single-volume estimate with its quality flag, so
+    // a convective-only volume reads Poor instead of a confident height.
+    const auto melt = estimateBrightBand(*chunk, radarElevationMeters);
+    if (melt.valid) {
+        const QString meltQuality = melt.quality == BrightBandQuality::Good          ? QStringLiteral("good")
+                                    : melt.quality == BrightBandQuality::Marginal ? QStringLiteral("marginal")
+                                                                                 : QStringLiteral("poor");
+        scanSummary_->setText(QStringLiteral("%1 · %2 · Melting ~%3 km (%4)")
+                                  .arg(map_->scanDiagnosticsText(),
+                                       QStringLiteral("Volume follows the active panel"),
+                                       QString::number(melt.heightMslMeters / 1000.0, 'f', 1),
+                                       meltQuality));
+    } else {
+        scanSummary_->setText(QStringLiteral("%1 · %2").arg(map_->scanDiagnosticsText(),
+                                                            QStringLiteral("Volume follows the active panel")));
+    }
     scanTable_->setRowCount(static_cast<int>(perTilt.size()));
     for (int row = 0; row < static_cast<int>(perTilt.size()); ++row) {
         const auto& tilt = perTilt[static_cast<std::size_t>(row)];

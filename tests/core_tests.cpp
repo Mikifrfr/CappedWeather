@@ -6,6 +6,7 @@
 #include "core/scan_diagnostics.hpp"
 #include "core/velocity_processing.hpp"
 #include "core/vad.hpp"
+#include "core/bright_band.hpp"
 #include "core/zdr_column.hpp"
 #include "core/lightning_jump.hpp"
 #include "core/flash_rate_grid.hpp"
@@ -558,6 +559,88 @@ void testZdrColumns() {
         ZdrColumnConfig low;
         low.minTopMslMeters = 20000.0;
         assert(detectZdrColumns(chunk, 35.0, -97.0, 300.0, low).empty());
+    }
+}
+
+namespace {
+DecodedRay syntheticBrightBandRay(const float azimuth, const std::uint8_t elevationNumber,
+                                  const float elevationDegrees) {
+    // Stratiform ray: CC dips to 0.93 exactly where the beam crosses
+    // 2700-3300 m, 0.995 elsewhere, REF steady at 30 dBZ.
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 3.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    const auto ccIndex = static_cast<std::size_t>(ProductKind::CorrelationCoefficient);
+    const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    ray.fields.at(ccIndex).assign(120, static_cast<std::uint16_t>(995));
+    ray.firstGateByProduct.at(ccIndex) = 0;
+    ray.gateSpacingByProduct.at(ccIndex) = 1000;
+    ray.scaleByProduct.at(ccIndex) = 1000.0F;
+    ray.offsetByProduct.at(ccIndex) = 0.0F;
+    ray.fields.at(refIndex).assign(120, static_cast<std::uint16_t>(30 * 2 + 66));
+    ray.firstGateByProduct.at(refIndex) = 0;
+    ray.gateSpacingByProduct.at(refIndex) = 1000;
+    ray.scaleByProduct.at(refIndex) = 2.0F;
+    ray.offsetByProduct.at(refIndex) = 66.0F;
+    // Dip gates are chosen by the same curved beam height the detector
+    // measures (flat slant*sin would sit ~600 m low at 100 km).
+    for (std::size_t gate = 0; gate < 120; ++gate) {
+        const double slant = 500.0 + gate * 1000.0;
+        const double height =
+            standardBeamGeometry(slant, elevationDegrees).heightAboveRadarMeters + 300.0;
+        if (height >= 2700.0 && height <= 3300.0)
+            ray.fields.at(ccIndex).at(gate) = static_cast<std::uint16_t>(930);
+    }
+    return ray;
+}
+}  // namespace
+
+void testBrightBand() {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    for (int step = 0; step < 120; ++step) {
+        const float azimuth = static_cast<float>(step * 3);
+        chunk.rays.push_back(syntheticBrightBandRay(azimuth, 1, 1.5F));
+        chunk.rays.push_back(syntheticBrightBandRay(azimuth, 2, 3.0F));
+    }
+    const auto estimate = estimateBrightBand(chunk, 300.0, {});
+    assert(estimate.valid);
+    assert(estimate.quality == BrightBandQuality::Good);
+    assert(std::abs(estimate.heightMslMeters - 3000.0) < 300.0);
+    assert(estimate.azimuthCoverageDegrees > 340.0);
+    // Clean air (no dip) has no melting level.
+    {
+        DecodedChunk clean;
+        clean.radarId = "KTLX";
+        clean.rays.push_back(syntheticBrightBandRay(90.0F, 1, 1.5F));
+        for (auto& value : clean.rays.back().fields.at(
+                 static_cast<std::size_t>(ProductKind::CorrelationCoefficient)))
+            value = static_cast<std::uint16_t>(995);
+        const auto none = estimateBrightBand(clean, 300.0, {});
+        assert(!none.valid && none.quality == BrightBandQuality::Invalid);
+    }
+    // Convective-only echo (REF 55 everywhere) is excluded by the REF
+    // window, even with a CC dip present.
+    {
+        DecodedChunk convective = chunk;
+        for (auto& ray : convective.rays) {
+            auto& ref = ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity));
+            std::fill(ref.begin(), ref.end(), static_cast<std::uint16_t>(55 * 2 + 66));
+        }
+        const auto none = estimateBrightBand(convective, 300.0, {});
+        assert(!none.valid);
+    }
+    // Narrow-sector data cannot be Good, however clean the ring.
+    {
+        DecodedChunk sector;
+        sector.radarId = "KTLX";
+        for (int step = 0; step < 10; ++step)
+            sector.rays.push_back(
+                syntheticBrightBandRay(static_cast<float>(step * 3), 1, 1.5F));
+        const auto narrow = estimateBrightBand(sector, 300.0, {});
+        assert(narrow.quality != BrightBandQuality::Good);
     }
 }
 
@@ -1967,6 +2050,7 @@ int main() {
     testScanDiagnostics();
     testVelocityProcessing();
     testVadProfile();
+    testBrightBand();
     testZdrColumns();
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();
