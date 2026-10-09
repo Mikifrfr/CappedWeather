@@ -1149,14 +1149,30 @@ static bool testPinnedCardKeyboard(QString* error) {
             if (QDateTime::currentDateTimeUtc() >= deadline) return false;
         }
     };
-    if (!waitFor([&] { return canvas.infoCardScrollOffset() > 0.0; })) {
-        *error = QStringLiteral("Down should advance the card");
+    // Target selection and clamping are synchronous: assert those exactly.
+    // The animation itself only needs to prove it moves (one timer tick).
+    const double maxScroll = canvas.pinnedCardMaxScrollForTest();
+    if (maxScroll <= 0.0) {
+        *error = QStringLiteral("Overflow must report a positive max scroll");
         return false;
     }
-    canvas.scrollPinnedCard(100000);  // Up past the top: clamps, never negative.
-    if (!waitFor([&] { return canvas.infoCardScrollOffset() == 0.0; })) {
-        std::fprintf(stderr, "DEBUG offset=%f\n", canvas.infoCardScrollOffset());
-        *error = QStringLiteral("Up past the top should clamp to zero");
+    if (canvas.pinnedCardScrollTargetForTest() != std::min(120.0, maxScroll)) {
+        *error = QStringLiteral("Down should target 120 px, got: %1")
+                     .arg(canvas.pinnedCardScrollTargetForTest());
+        return false;
+    }
+    if (!waitFor([&] { return canvas.infoCardScrollOffset() > 0.0; })) {
+        *error = QStringLiteral("Scroll timer should advance the card");
+        return false;
+    }
+    canvas.scrollPinnedCard(100000);  // Up past the top: clamps to zero.
+    if (canvas.pinnedCardScrollTargetForTest() != 0.0) {
+        *error = QStringLiteral("Up past the top should target zero");
+        return false;
+    }
+    canvas.scrollPinnedCard(-100000);  // Down past the bottom: clamps to max.
+    if (canvas.pinnedCardScrollTargetForTest() != maxScroll) {
+        *error = QStringLiteral("Down past the bottom should target max scroll");
         return false;
     }
     return true;

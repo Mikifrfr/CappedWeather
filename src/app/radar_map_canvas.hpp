@@ -27,8 +27,10 @@
 #include <QWidget>
 
 #include <optional>
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -282,6 +284,15 @@ public:
     // Test hook: explicit enter/leave tracking (QWidget::underMouse does not
     // reflect synthesized hover, so the probe debounce cannot rely on it).
     bool hoverActiveForTest() const { return cursorInside_; }
+    // Scroll-target plumbing for tests: the animation itself converges on a
+    // timer (wall-clock, load-sensitive), but target selection and
+    // clamping are synchronous and fully deterministic.
+    double pinnedCardScrollTargetForTest() const { return pinnedInfoScrollTarget_; }
+    double pinnedCardMaxScrollForTest() const {
+        return static_cast<double>(
+            std::max(0, pinnedInfoContentHeight_ -
+                            static_cast<int>(std::floor(pinnedInfoBodyRect_.height()))));
+    }
     void inspectAt(const QPointF& point);
     QPoint lightningCellScreenPoint(int index) const;
     int warningCount() const;

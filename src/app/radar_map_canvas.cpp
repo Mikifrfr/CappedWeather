@@ -1298,18 +1298,15 @@ void RadarMapCanvas::togglePinnedCardExpanded() {
 }
 
 bool RadarMapCanvas::hasScrollablePinnedCard() const {
-    return !pinnedInfo_.isEmpty() &&
-           pinnedInfoContentHeight_ > static_cast<int>(std::floor(pinnedInfoBodyRect_.height()));
+    return !pinnedInfo_.isEmpty() && pinnedCardMaxScrollForTest() > 0.0;
 }
 
 void RadarMapCanvas::scrollPinnedCard(const int pixels) {
     if (!hasScrollablePinnedCard()) return;
-    const auto maximumScroll = static_cast<double>(
-        std::max(0, pinnedInfoContentHeight_ -
-                        static_cast<int>(std::floor(pinnedInfoBodyRect_.height()))));
     if (!pinnedInfoScrollTimer_->isActive())
         pinnedInfoScrollTarget_ = pinnedInfoScrollOffset_;
-    pinnedInfoScrollTarget_ = std::clamp(pinnedInfoScrollTarget_ - pixels, 0.0, maximumScroll);
+    pinnedInfoScrollTarget_ =
+        std::clamp(pinnedInfoScrollTarget_ - pixels, 0.0, pinnedCardMaxScrollForTest());
     pinnedInfoScrollTimer_->start();
 }
 
