@@ -83,6 +83,12 @@ public:
     AppTheme theme() const { return theme_; }
     void applyFontScale(double scale);
 
+    // GIS export for one frame: PNG snapshot plus a KML GroundOverlay with
+    // the panel's current lon/lat box (current georeferencing, north-up, no
+    // reprojection). Public and static so the KML builder is unit-testable.
+    static QString frameGroundOverlayKml(const QString& name, const QString& pngHref, double north,
+                                         double south, double east, double west, QString* error);
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
@@ -188,12 +194,12 @@ private:
     // Frame-exact VP9 through an ffmpeg image pipe (GIF path's frames,
     // sharing-friendly container). Fail-closed when ffmpeg is missing.
     void exportTimelineWebM();
-    // GIS export for one frame: PNG snapshot plus a KML GroundOverlay with
-    // the panel's current lon/lat box (current georeferencing, north-up, no
-    // reprojection). Static so the KML builder is unit-testable.
-    static QString frameGroundOverlayKml(const QString& name, const QString& pngHref, double north,
-                                         double south, double east, double west, QString* error);
     void exportFrameKml();
+    // Case-pack: export the active radar session (volumes, panels,
+    // placefiles, timeline position) to one .cwcase zip; import rebuilds
+    // the session from a pack so a shared case reproduces exactly.
+    void exportCasePack();
+    void importCasePack();
     void openLocalPlacefile();
     void addPlacefileUrl();
     void clearPlacefiles();

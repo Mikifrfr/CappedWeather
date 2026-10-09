@@ -15,6 +15,8 @@
 #include "app/session_store.hpp"
 #include "app/session_prefetch.hpp"
 #include "app/metar_source.hpp"
+#include "app/case_pack.hpp"
+#include "core/volume_spill.hpp"
 #include "core/product.hpp"
 
 #include "app/alert_center.hpp"
@@ -1921,6 +1923,207 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             kmlError.isEmpty()) {
             std::cerr << "Empty overlay name should fail closed\n";
             return 1;
+        }
+    }
+    // Case-pack zip: deflated round-trip with CRC verification, fail-closed
+    // on truncation and non-zip input (half-extracted files are removed).
+    {
+        if (!zipAvailable()) {
+            std::cerr << "note: zlib unavailable, skipping case-pack zip asserts\n";
+        } else {
+            QTemporaryDir packDir;
+            if (!packDir.isValid()) {
+                std::cerr << "Temporary dir for case-pack test failed\n";
+                return 1;
+            }
+            const auto writeFile = [&packDir](const QString& name, const QByteArray& bytes) {
+                QFile file(packDir.filePath(name));
+                if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+                return file.write(bytes) == bytes.size();
+            };
+            QByteArray big;
+            big.reserve(262144);
+            for (int i = 0; i < 65536; ++i) big.append("ABCD"[i % 4]);
+            if (!writeFile(QStringLiteral("a.txt"), QByteArray("hello case-pack")) ||
+                !writeFile(QStringLiteral("empty.bin"), QByteArray()) ||
+                !writeFile(QStringLiteral("big.bin"), big)) {
+                std::cerr << "Case-pack test fixture write failed\n";
+                return 1;
+            }
+            const QString zipPath = packDir.filePath(QStringLiteral("case.cwcase"));
+            const QVector<QPair<QString, QString>> entries = {
+                {QStringLiteral("manifest.json"), packDir.filePath(QStringLiteral("a.txt"))},
+                {QStringLiteral("volumes/empty.cwdv"), packDir.filePath(QStringLiteral("empty.bin"))},
+                {QStringLiteral("volumes/big.cwdv"), packDir.filePath(QStringLiteral("big.bin"))},
+            };
+            QString zipError;
+            if (!zipPackFiles(entries, zipPath, &zipError)) {
+                std::cerr << "zipPackFiles failed: " << zipError.toStdString() << '\n';
+                return 1;
+            }
+            const QString outDir = packDir.filePath(QStringLiteral("out"));
+            const auto names = zipExtractFiles(zipPath, outDir, &zipError);
+            if (names.size() != 3 || !zipError.isEmpty()) {
+                std::cerr << "zipExtractFiles failed: " << zipError.toStdString() << '\n';
+                return 1;
+            }
+            QFile check(outDir + QStringLiteral("/volumes/big.cwdv"));
+            if (!check.open(QIODevice::ReadOnly) || check.readAll() != big) {
+                std::cerr << "Zip round-trip bytes differ\n";
+                return 1;
+            }
+            // Truncation and garbage fail closed with nothing trusted.
+            QFile zip(zipPath);
+            if (!zip.open(QIODevice::ReadOnly)) {
+                std::cerr << "Case-pack zip unreadable\n";
+                return 1;
+            }
+            const QByteArray full = zip.readAll();
+            zip.close();
+            QFile shortZip(packDir.filePath(QStringLiteral("short.cwcase")));
+            if (!shortZip.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+                shortZip.write(full.constData(), full.size() / 2) != full.size() / 2) {
+                std::cerr << "Truncated zip fixture write failed\n";
+                return 1;
+            }
+            shortZip.close();
+            if (!zipExtractFiles(shortZip.fileName(), packDir.filePath(QStringLiteral("out2")),
+                                 &zipError)
+                     .isEmpty() ||
+                zipError.isEmpty()) {
+                std::cerr << "Truncated zip should fail closed\n";
+                return 1;
+            }
+            if (!QDir(packDir.filePath(QStringLiteral("out2/volumes"))).exists()) {
+                // out2/volumes must not exist: fail() removes partial extracts.
+            } else if (!QDir(packDir.filePath(QStringLiteral("out2/volumes")))
+                                  .entryList(QDir::Files)
+                                  .isEmpty()) {
+                std::cerr << "Truncated zip left trusted files behind\n";
+                return 1;
+            }
+            QFile garbage(packDir.filePath(QStringLiteral("garbage.cwcase")));
+            if (!garbage.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+                garbage.write("definitely not a zip file....................") != 45) {
+                std::cerr << "Garbage zip fixture write failed\n";
+                return 1;
+            }
+            garbage.close();
+            if (!zipExtractFiles(garbage.fileName(), packDir.filePath(QStringLiteral("out3")),
+                                 &zipError)
+                     .isEmpty() ||
+                zipError.isEmpty()) {
+                std::cerr << "Non-zip input should fail closed\n";
+                return 1;
+            }
+        }
+    }
+    // Case manifest: write/parse identity plus fail-closed validation.
+    {
+        CaseManifest manifest;
+        manifest.radarId = QStringLiteral("KTLX");
+        manifest.frameIndex = 1;
+        manifest.exportedAt = QDateTime(QDate(2026, 10, 9), QTime(18, 0), QTimeZone::UTC);
+        for (int i = 0; i < 2; ++i) {
+            CaseFrame frame;
+            frame.volumeId = QStringLiteral("v%1").arg(i);
+            frame.dataTime = QDateTime(QDate(2026, 10, 9), QTime(18, i), QTimeZone::UTC);
+            frame.chunkCount = 10;
+            frame.failedChunks = i;
+            frame.file = QStringLiteral("volumes/v%1.cwdv").arg(i);
+            manifest.frames.push_back(frame);
+        }
+        CasePanelState panel;
+        panel.radarId = QStringLiteral("KTLX");
+        panel.product = 0;
+        panel.tilt = -1;
+        manifest.panels.push_back(panel);
+        manifest.placefileUrls.push_back(QStringLiteral("https://example.com/spots.txt"));
+        manifest.placefileFiles.push_back(QStringLiteral("placefiles/0.txt"));
+        QString manifestError;
+        const auto parsed = parseCaseManifest(writeCaseManifest(manifest), &manifestError);
+        if (!parsed || !manifestError.isEmpty() || parsed->radarId != QStringLiteral("KTLX") ||
+            parsed->frames.size() != 2 || parsed->frameIndex != 1 ||
+            parsed->frames.at(0).volumeId != QStringLiteral("v0") ||
+            parsed->frames.at(1).failedChunks != 1 || parsed->panels.size() != 1 ||
+            parsed->placefileUrls.size() != 1 || parsed->placefileFiles.size() != 1 ||
+            parsed->exportedAt != manifest.exportedAt) {
+            std::cerr << "Case manifest write/parse identity failed\n";
+            return 1;
+        }
+        const auto mutate = [](QByteArray bytes, const QByteArray& from, const QByteArray& to) {
+            return QByteArray(bytes.replace(from, to));
+        };
+        const auto bytes = writeCaseManifest(manifest);
+        if (parseCaseManifest(mutate(bytes, "\"caseFormat\":1", "\"caseFormat\":2"), &manifestError) ||
+            manifestError.isEmpty()) {
+            std::cerr << "Wrong case format version should fail closed\n";
+            return 1;
+        }
+        if (parseCaseManifest(mutate(bytes, "\"frameIndex\":1", "\"frameIndex\":7"), &manifestError) ||
+            manifestError.isEmpty()) {
+            std::cerr << "Out-of-range frame index should fail closed\n";
+            return 1;
+        }
+        if (parseCaseManifest(QByteArray("not json"), &manifestError) || manifestError.isEmpty()) {
+            std::cerr << "Malformed manifest should fail closed\n";
+            return 1;
+        }
+        if (parseCaseManifest(mutate(bytes, "\"file\":\"volumes/v0.cwdv\"", "\"file\":\"../evil.cwdv\""),
+                              &manifestError) ||
+            manifestError.isEmpty()) {
+            std::cerr << "Escaping frame path should fail closed\n";
+            return 1;
+        }
+    }
+    // Full volume cycle: spill, pack, extract, fault back in, same gates.
+    {
+        if (zipAvailable()) {
+            QTemporaryDir cycleDir;
+            if (!cycleDir.isValid()) {
+                std::cerr << "Temporary dir for case cycle test failed\n";
+                return 1;
+            }
+            DecodedChunk chunk;
+            chunk.radarId = "KTLX";
+            for (int ray = 0; ray < 3; ++ray) {
+                DecodedRay decoded;
+                decoded.azimuthDegrees = static_cast<float>(ray * 10);
+                decoded.elevationNumber = 1;
+                decoded.elevationDegrees = 0.5F;
+                const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+                decoded.fields.at(index).assign(16, static_cast<std::uint16_t>(100 + ray));
+                decoded.firstGateByProduct.at(index) = 0;
+                decoded.gateSpacingByProduct.at(index) = 1000;
+                decoded.scaleByProduct.at(index) = 2.0F;
+                decoded.offsetByProduct.at(index) = 66.0F;
+                chunk.rays.push_back(std::move(decoded));
+            }
+            const QString spilled = cycleDir.filePath(QStringLiteral("vol.cwdv"));
+            if (!spillVolume(chunk, spilled.toStdString())) {
+                std::cerr << "Case cycle spill failed\n";
+                return 1;
+            }
+            QString zipError;
+            if (!zipPackFiles({{QStringLiteral("volumes/vol.cwdv"), spilled}},
+                              cycleDir.filePath(QStringLiteral("cycle.cwcase")), &zipError)) {
+                std::cerr << "Case cycle pack failed: " << zipError.toStdString() << '\n';
+                return 1;
+            }
+            const auto names = zipExtractFiles(cycleDir.filePath(QStringLiteral("cycle.cwcase")),
+                                               cycleDir.filePath(QStringLiteral("unpacked")), &zipError);
+            if (names.size() != 1 || !zipError.isEmpty()) {
+                std::cerr << "Case cycle unpack failed: " << zipError.toStdString() << '\n';
+                return 1;
+            }
+            const auto loaded = loadSpilledVolume(
+                cycleDir.filePath(QStringLiteral("unpacked/volumes/vol.cwdv")).toStdString());
+            const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+            if (!loaded || loaded->rays.size() != 3 ||
+                loaded->rays.at(2).fields.at(refIndex) != chunk.rays.at(2).fields.at(refIndex)) {
+                std::cerr << "Case cycle volume differs after pack/unpack\n";
+                return 1;
+            }
         }
     }
     // Spill budget tail-drop must carry the timeline index along: erasing

@@ -28,6 +28,10 @@ public:
     void clear();
     QVector<PlacefileDocument> documents() const;
     int sourceCount() const;
+    // Source URLs by entry: file:// for local files (re-add via the local
+    // path), http(s) for remote feeds (re-fetched on case import). Lets
+    // case-pack export enumerate feeds without touching entry internals.
+    QStringList sourceUrls() const;
 
 signals:
     void documentsChanged(QVector<cappedweather::PlacefileDocument> documents);

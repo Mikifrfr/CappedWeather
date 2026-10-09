@@ -15,6 +15,7 @@
 #include "app/archive_source.hpp"
 #include "core/derived_products.hpp"
 #include "core/vad.hpp"
+#include "app/case_pack.hpp"
 #include "app/cross_section_widget.hpp"
 #include "app/command_palette.hpp"
 #include "app/timeline_strip.hpp"
@@ -70,6 +71,7 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QProgressDialog>
+#include <QTemporaryDir>
 #include <QProcess>
 #include <QBuffer>
 #include <QResizeEvent>
@@ -3838,6 +3840,10 @@ void MainWindow::setupMenus() {
     connect(webmAction, &QAction::triggered, this, &MainWindow::exportTimelineWebM);
     auto* kmlAction = fileMenu->addAction(QStringLiteral("Export frame KML (GIS)…"));
     connect(kmlAction, &QAction::triggered, this, &MainWindow::exportFrameKml);
+    auto* caseExportAction = fileMenu->addAction(QStringLiteral("Export case-pack…"));
+    connect(caseExportAction, &QAction::triggered, this, &MainWindow::exportCasePack);
+    auto* caseImportAction = fileMenu->addAction(QStringLiteral("Import case-pack…"));
+    connect(caseImportAction, &QAction::triggered, this, &MainWindow::importCasePack);
     fileMenu->addSeparator();
     auto* settingsAction = fileMenu->addAction(QStringLiteral("Settings…"));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettingsDialog);
@@ -3943,6 +3949,10 @@ void MainWindow::showCommandPalette() {
              [this] { exportTimelineWebM(); });
     addEntry(QStringLiteral("Export: frame KML"), QStringLiteral("PNG plus GroundOverlay for GIS"),
              [this] { exportFrameKml(); });
+    addEntry(QStringLiteral("Export: case-pack"), QStringLiteral("Share this case as one file"),
+             [this] { exportCasePack(); });
+    addEntry(QStringLiteral("Import: case-pack"), QStringLiteral("Reproduce a shared case exactly"),
+             [this] { importCasePack(); });
     addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
              [this] { showSettingsDialog(); });
     palette->setEntries(std::move(entries));
@@ -5009,6 +5019,258 @@ void MainWindow::exportFrameKml() {
         return;
     }
     statusBar()->showMessage(QStringLiteral("Frame exported for GIS: %1 + image").arg(kmlPath), 5000);
+}
+
+void MainWindow::exportCasePack() {
+    const auto session = activeSession();
+    const QString radar = selectedRadarId();
+    if (!session || session->history.empty() || radar.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Export case-pack"),
+                                 QStringLiteral("Load a radar volume first, then pack the case."));
+        return;
+    }
+    if (!zipAvailable()) {
+        QMessageBox::information(this, QStringLiteral("Export case-pack"),
+                                 QStringLiteral("Case-packs need a CappedWeather build with zlib. "
+                                                "This build decoded without it."));
+        return;
+    }
+    const auto packPath = QFileDialog::getSaveFileName(this, QStringLiteral("Export case-pack"),
+                                                       QStringLiteral("%1-case.cwcase").arg(radar),
+                                                       QStringLiteral("Case-pack (*.cwcase)"));
+    if (packPath.isEmpty()) return;
+    QTemporaryDir staging;
+    if (!staging.isValid()) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Could not stage the case-pack"));
+        return;
+    }
+    const auto total = static_cast<int>(session->history.size());
+    QProgressDialog progress(QStringLiteral("Packing %1 volumes…").arg(total), QStringLiteral("Cancel"),
+                             0, total, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(250);
+    progress.setValue(0);
+    CaseManifest manifest;
+    manifest.radarId = radar;
+    manifest.frameIndex = session->frameIndex;
+    manifest.exportedAt = QDateTime::currentDateTimeUtc();
+    QVector<QPair<QString, QString>> entries;
+    const auto sanitize = [](const QString& raw) {
+        QString safe;
+        for (const auto ch : raw)
+            safe.push_back(ch.isLetterOrNumber() || ch == QLatin1Char('-') || ch == QLatin1Char('_') ||
+                                   ch == QLatin1Char('.')
+                               ? ch
+                               : QLatin1Char('_'));
+        if (safe.isEmpty()) safe = QStringLiteral("volume");
+        return safe;
+    };
+    for (int i = 0; i < total; ++i) {
+        if (progress.wasCanceled()) {
+            statusBar()->showMessage(QStringLiteral("Case-pack export cancelled"), 4000);
+            return;
+        }
+        const auto& frame = session->history.at(static_cast<std::size_t>(i));
+        const QString zipName =
+            QStringLiteral("volumes/%1.cwdv").arg(sanitize(frame.volumeId));
+        const QString staged = staging.filePath(zipName);
+        QDir().mkpath(QFileInfo(staged).absolutePath());
+        bool staged_ok = false;
+        if (frame.chunk) {
+            staged_ok = spillVolume(*frame.chunk, staged.toStdString());
+        } else if (!frame.spilledPath.isEmpty()) {
+            staged_ok = QFile::copy(frame.spilledPath, staged);
+        }
+        if (!staged_ok) {
+            QMessageBox::warning(
+                this, QStringLiteral("Export failed"),
+                QStringLiteral("Could not stage volume %1: it is neither resident nor on disk.")
+                    .arg(frame.volumeId));
+            return;
+        }
+        CaseFrame packed;
+        packed.volumeId = frame.volumeId;
+        packed.dataTime = frame.dataTime;
+        packed.chunkCount = frame.chunkCount;
+        packed.failedChunks = frame.failedChunks;
+        packed.file = zipName;
+        manifest.frames.push_back(packed);
+        entries.push_back({zipName, staged});
+        progress.setValue(i + 1);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+    for (auto* panel : maps_) {
+        CasePanelState state;
+        state.radarId = panel->radarId();
+        state.product = static_cast<int>(panel->product());
+        const auto tilt = panel->elevationFilter();
+        state.tilt = tilt ? *tilt : -1;
+        manifest.panels.push_back(state);
+    }
+    int placefileNumber = 0;
+    for (const auto& source : placefileSource_->sourceUrls()) {
+        const QUrl url(source);
+        if (url.isLocalFile()) {
+            const QString local = url.toLocalFile();
+            if (QFileInfo(local).size() > 2 * 1024 * 1024) continue;  // same 2 MiB guard
+            const QString zipName =
+                QStringLiteral("placefiles/%1.txt").arg(placefileNumber++);
+            const QString staged = staging.filePath(zipName);
+            QDir().mkpath(QFileInfo(staged).absolutePath());
+            if (!QFile::copy(local, staged)) continue;
+            manifest.placefileFiles.push_back(zipName);
+            entries.push_back({zipName, staged});
+        } else if (url.isValid() && (url.scheme() == QStringLiteral("http") ||
+                                     url.scheme() == QStringLiteral("https"))) {
+            manifest.placefileUrls.push_back(source);
+        }
+    }
+    QFile manifestFile(staging.filePath(QStringLiteral("manifest.json")));
+    if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        manifestFile.write(writeCaseManifest(manifest)) <= 0) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Could not write the case manifest"));
+        return;
+    }
+    manifestFile.close();
+    entries.push_front({QStringLiteral("manifest.json"), manifestFile.fileName()});
+    progress.setValue(total);
+    QString zipError;
+    if (!zipPackFiles(entries, packPath, &zipError)) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"), zipError);
+        return;
+    }
+    statusBar()->showMessage(
+        QStringLiteral("Case-pack exported: %1 volumes for %2").arg(total).arg(radar), 5000);
+}
+
+void MainWindow::importCasePack() {
+    if (!zipAvailable()) {
+        QMessageBox::information(this, QStringLiteral("Import case-pack"),
+                                 QStringLiteral("Case-packs need a CappedWeather build with zlib. "
+                                                "This build decoded without it."));
+        return;
+    }
+    const auto packPath = QFileDialog::getOpenFileName(this, QStringLiteral("Import case-pack"), {},
+                                                       QStringLiteral("Case-pack (*.cwcase)"));
+    if (packPath.isEmpty()) return;
+    QTemporaryDir unpacked;
+    if (!unpacked.isValid()) {
+        QMessageBox::warning(this, QStringLiteral("Import failed"),
+                             QStringLiteral("Could not stage the case-pack"));
+        return;
+    }
+    QString zipError;
+    const auto names = zipExtractFiles(packPath, unpacked.path(), &zipError);
+    if (names.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Import failed"),
+                             zipError.isEmpty() ? QStringLiteral("Empty case-pack") : zipError);
+        return;
+    }
+    if (!names.contains(QStringLiteral("manifest.json"))) {
+        QMessageBox::warning(this, QStringLiteral("Import failed"),
+                             QStringLiteral("Case-pack has no manifest"));
+        return;
+    }
+    QFile manifestFile(unpacked.filePath(QStringLiteral("manifest.json")));
+    if (!manifestFile.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, QStringLiteral("Import failed"), manifestFile.errorString());
+        return;
+    }
+    QString manifestError;
+    const auto manifest = parseCaseManifest(manifestFile.readAll(), &manifestError);
+    if (!manifest) {
+        QMessageBox::warning(this, QStringLiteral("Import failed"), manifestError);
+        return;
+    }
+    for (const auto& frame : manifest->frames) {
+        if (!names.contains(frame.file)) {
+            QMessageBox::warning(this, QStringLiteral("Import failed"),
+                                 QStringLiteral("Case-pack is missing %1").arg(frame.file));
+            return;
+        }
+    }
+    const QString radar = manifest->radarId;
+    auto session = sessionFor(radar);
+    if (!session) return;
+    if (!session->history.empty()) {
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("Import case-pack"),
+            QStringLiteral("Replace the %1 history (%2 volumes) with the packed case (%3 volumes)?")
+                .arg(radar)
+                .arg(session->history.size())
+                .arg(manifest->frames.size()));
+        if (answer != QMessageBox::Yes) return;
+        for (const auto& frame : session->history) {
+            if (!frame.spilledPath.isEmpty()) QFile::remove(frame.spilledPath);
+        }
+    }
+    // Stage every volume through the spill path so the imported session
+    // faults back in through the exact same machinery as live volumes.
+    std::vector<RadarFrame> history;
+    for (const auto& frame : manifest->frames) {
+        const QString staged = unpacked.filePath(frame.file);
+        const QString dest = spillFilePath(radar, frame.volumeId);
+        if (dest.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Import failed"),
+                                 QStringLiteral("No cache location for spilled volumes"));
+            return;
+        }
+        QDir().mkpath(QFileInfo(dest).absolutePath());
+        QFile::remove(dest);
+        if (!QFile::copy(staged, dest)) {
+            QMessageBox::warning(this, QStringLiteral("Import failed"),
+                                 QStringLiteral("Could not stage %1").arg(frame.volumeId));
+            return;
+        }
+        // Validate before trusting: an unreadable volume aborts the import
+        // instead of planting a dead frame in the timeline.
+        if (!loadSpilledVolume(dest.toStdString())) {
+            QFile::remove(dest);
+            QMessageBox::warning(this, QStringLiteral("Import failed"),
+                                 QStringLiteral("Packed volume %1 does not decode")
+                                     .arg(frame.volumeId));
+            return;
+        }
+        RadarFrame loaded;
+        loaded.volumeId = frame.volumeId;
+        loaded.dataTime = frame.dataTime;
+        loaded.chunkCount = frame.chunkCount;
+        loaded.failedChunks = frame.failedChunks;
+        loaded.spilledPath = dest;
+        history.push_back(std::move(loaded));
+    }
+    session->history = std::move(history);
+    session->frameIndex = manifest->frameIndex;
+    session->followLatest = session->frameIndex == static_cast<int>(session->history.size()) - 1;
+    for (int i = 0; i < static_cast<int>(manifest->panels.size()) && i < maps_.size(); ++i) {
+        const auto& state = manifest->panels.at(i);
+        auto* panel = maps_.at(i);
+        if (!state.radarId.isEmpty()) panel->setSelectedRadar(state.radarId);
+        if (state.product >= 0 && state.product < static_cast<int>(productDescriptors().size()))
+            panel->setProduct(static_cast<ProductKind>(state.product));
+        panel->setElevationFilter(state.tilt >= 0 ? std::optional<int>(state.tilt) : std::nullopt);
+    }
+    for (const auto& file : manifest->placefileFiles) {
+        QString placefileError;
+        placefileSource_->addLocalFile(unpacked.filePath(file), &placefileError);
+    }
+    for (const auto& source : manifest->placefileUrls) {
+        const QUrl url(source);
+        if (url.isValid()) {
+            QString urlError;
+            placefileSource_->addUrl(url, &urlError);
+        }
+    }
+    if (radar == selectedRadarId_) {
+        updateProductAvailability();
+        rebuildTiltCombo();
+        showFrame(session->frameIndex);
+    }
+    statusBar()->showMessage(
+        QStringLiteral("Case-pack imported: %1 volumes for %2").arg(session->history.size()).arg(radar),
+        5000);
 }
 
 void MainWindow::openLocalPlacefile() {

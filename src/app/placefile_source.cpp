@@ -154,6 +154,16 @@ int PlacefileSource::sourceCount() const {
     return static_cast<int>(entries_.size());
 }
 
+QStringList PlacefileSource::sourceUrls() const {
+    QStringList urls;
+    urls.reserve(static_cast<qsizetype>(entries_.size()));
+    for (const auto& [key, entry] : entries_) {
+        Q_UNUSED(key);
+        urls.push_back(entry->url.toString());
+    }
+    return urls;
+}
+
 void PlacefileSource::request(Entry& entry) {
     if (entry.reply) return;
     auto url = entry.url;
