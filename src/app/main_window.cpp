@@ -4908,7 +4908,17 @@ void MainWindow::exportTimelineWebM() {
             failure = QStringLiteral("Could not grab frame %1").arg(index + 1);
             break;
         }
-        if (encoder.write(png) != png.size()) {
+        // The pipe can accept fewer bytes than offered: loop until the whole
+        // PNG is queued, or fail closed instead of a truncated frame stream.
+        qint64 queued = 0;
+        while (queued < png.size()) {
+            const qint64 accepted = encoder.write(png.constData() + queued, png.size() - queued);
+            if (accepted < 0) break;
+            queued += accepted;
+            if (queued < png.size() && !encoder.waitForBytesWritten(10000)) break;
+        }
+        if (queued != png.size()) {
+            encoder.kill();
             failed = true;
             failure = QStringLiteral("ffmpeg pipe broke at frame %1: %2").arg(index + 1).arg(
                 encoder.errorString());
