@@ -5242,11 +5242,18 @@ void MainWindow::importCasePack() {
     }
     // Stage every volume through the spill path so the imported session
     // faults back in through the exact same machinery as live volumes.
+    // Staged paths are tracked so a mid-import failure removes what landed
+    // instead of littering the cache with orphan volumes.
     std::vector<RadarFrame> history;
+    QStringList stagedDests;
+    const auto abandonStaged = [&stagedDests] {
+        for (const auto& dest : stagedDests) QFile::remove(dest);
+    };
     for (const auto& frame : manifest->frames) {
         const QString staged = unpacked.filePath(frame.file);
         const QString dest = spillFilePath(radar, frame.volumeId);
         if (dest.isEmpty()) {
+            abandonStaged();
             QMessageBox::warning(this, QStringLiteral("Import failed"),
                                  QStringLiteral("No cache location for spilled volumes"));
             return;
@@ -5254,14 +5261,16 @@ void MainWindow::importCasePack() {
         QDir().mkpath(QFileInfo(dest).absolutePath());
         QFile::remove(dest);
         if (!QFile::copy(staged, dest)) {
+            abandonStaged();
             QMessageBox::warning(this, QStringLiteral("Import failed"),
                                  QStringLiteral("Could not stage %1").arg(frame.volumeId));
             return;
         }
+        stagedDests.push_back(dest);
         // Validate before trusting: an unreadable volume aborts the import
         // instead of planting a dead frame in the timeline.
         if (!loadSpilledVolume(dest.toStdString())) {
-            QFile::remove(dest);
+            abandonStaged();
             QMessageBox::warning(this, QStringLiteral("Import failed"),
                                  QStringLiteral("Packed volume %1 does not decode")
                                      .arg(frame.volumeId));

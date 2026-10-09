@@ -1138,16 +1138,23 @@ static bool testPinnedCardKeyboard(QString* error) {
         return false;
     }
     canvas.scrollPinnedCard(-120);  // Down: reveal later content.
-    QTest::qWait(400);
-    QCoreApplication::processEvents();
-    if (canvas.infoCardScrollOffset() <= 0.0) {
+    // Poll with a deadline: the scroll animation converges on its own
+    // timer, and a fixed sleep flakes under load.
+    const auto waitFor = [&](const auto& settled) {
+        const auto deadline = QDateTime::currentDateTimeUtc().addSecs(5);
+        for (;;) {
+            QTest::qWait(50);
+            QCoreApplication::processEvents();
+            if (settled()) return true;
+            if (QDateTime::currentDateTimeUtc() >= deadline) return false;
+        }
+    };
+    if (!waitFor([&] { return canvas.infoCardScrollOffset() > 0.0; })) {
         *error = QStringLiteral("Down should advance the card");
         return false;
     }
     canvas.scrollPinnedCard(100000);  // Up past the top: clamps, never negative.
-    QTest::qWait(400);
-    QCoreApplication::processEvents();
-    if (canvas.infoCardScrollOffset() != 0.0) {
+    if (!waitFor([&] { return canvas.infoCardScrollOffset() == 0.0; })) {
         *error = QStringLiteral("Up past the top should clamp to zero");
         return false;
     }
