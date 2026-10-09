@@ -391,6 +391,8 @@ QStringList zipExtractFiles(const QString& zipPath, const QString& destDir, QStr
         QString nameError;
         if (!cleanEntryName(entry.name, &nameError))
             return fail(QStringLiteral("Unsafe entry name: %1").arg(entry.name));
+        if (entry.uncompressedSize > kCasePackMaxEntryBytes)
+            return fail(QStringLiteral("Entry too large: %1").arg(entry.name));
         totalUncompressed += entry.uncompressedSize;
         if (totalUncompressed > kCasePackMaxUncompressedBytes)
             return fail(QStringLiteral("Zip contents exceed the 2 GiB safety bound"));

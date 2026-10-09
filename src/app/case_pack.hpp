@@ -30,6 +30,10 @@ inline constexpr int kCasePackFormat = 1;
 // tens of MB each); anything beyond these bounds is rejected, not read.
 inline constexpr int kCasePackMaxEntries = 256;
 inline constexpr qint64 kCasePackMaxUncompressedBytes = 2LL * 1024 * 1024 * 1024;
+// One entry never legitimately approaches this (spilled volumes are tens of
+// MB); without it a single lying central-directory size passes the total
+// cap and then crashes on a 2 GiB contiguous resize.
+inline constexpr quint32 kCasePackMaxEntryBytes = 256U * 1024U * 1024U;
 
 struct CasePanelState {
     QString radarId;
