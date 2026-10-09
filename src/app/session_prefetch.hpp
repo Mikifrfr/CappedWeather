@@ -1,9 +1,9 @@
 #pragma once
 
 // Field-reliability prep: prefetch pick-list for spilled session volumes.
-// No threading here by design. A future background warmer (e.g. a
-// QThreadPool job faulting spilled volumes back in) consumes the pick list
-// produced below; see ArchiveSource hook comments for the intended call site.
+// No threading here by design. MainWindow::scheduleSpillPrefetch() consumes
+// the pick list below (QThreadPool job faulting spilled volumes back in via
+// loadSpilledVolume(), published with installPrefetchedChunk()).
 // CrossSectionWidget and the filmstrip scrub path fault in synchronously via
 // sessionFrameChunk(), so warming the ±1/±2 neighbours ahead of a scrub
 // step is what removes the hitch on field hardware.
@@ -74,8 +74,8 @@ public:
     }
 
     // Spilled file paths to prefetch, same order as pickSpillIndexes().
-    // A future warmer faults each path via loadSpilledVolume() off the UI
-    // thread and then publishes through sessionFrameChunk(); it must respect
+    // The warmer faults each path via loadSpilledVolume() off the UI
+    // thread and then publishes through installPrefetchedChunk(); it must respect
     // the spill budget and never exceed kSpilledKeepVolumes + RAM window.
     static inline QStringList pickSpillPaths(const RadarSession& session, int current,
                                              int count = 4) {

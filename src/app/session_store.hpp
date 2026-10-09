@@ -72,5 +72,13 @@ std::shared_ptr<DecodedChunk> sessionFrameChunk(RadarSession& session, std::size
 // Keeps the newest maximumHistoryFrames volumes resident, spills older ones
 // to disk (up to kSpilledKeepVolumes), drops the rest entirely.
 void enforceSessionSpillBudget(RadarSession& session, int maximumHistoryFrames, int excludeIndex = -1);
+// Background spill-prefetch install: drops an off-thread loadSpilledVolume()
+// result into the frame still carrying volumeId. Matches by volumeId (not
+// index) because tail-drop erases the front and shifts every index while the
+// disk read is in flight. No-ops when the session no longer holds the
+// volume, the frame is already resident, or chunk is null. Re-enforces the
+// budget excluding the installed frame. Returns true when installed.
+bool installPrefetchedChunk(RadarSession& session, const QString& volumeId,
+                            std::shared_ptr<DecodedChunk> chunk, int maximumHistoryFrames);
 
 }  // namespace cappedweather

@@ -12,6 +12,8 @@
 #include "app/nexrad_source.hpp"
 #include "app/opera_source.hpp"
 #include "app/shortcut_help_dialog.hpp"
+#include "app/session_store.hpp"
+#include "app/session_prefetch.hpp"
 #include "core/product.hpp"
 
 #include "app/alert_center.hpp"
@@ -1837,6 +1839,87 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         if (session.history.size() != 10 || session.frameIndex != 0 ||
             session.history.front().volumeId != QStringLiteral("v6")) {
             std::cerr << "Tail-drop at index 0 should clamp, not underflow\n";
+            return 1;
+        }
+    }
+    // Spill prefetch pick-list: forward-biased proximity (+1,-1,+2,-2),
+    // spilled frames only (resident and dropped frames skipped).
+    {
+        if (nextSpillIndexes(0, 0) != std::vector<int>{} ||
+            nextSpillIndexes(5, -1) != std::vector<int>{} ||
+            nextSpillIndexes(5, 5) != std::vector<int>{} ||
+            nextSpillIndexes(5, 2, 0) != std::vector<int>{}) {
+            std::cerr << "nextSpillIndexes should be empty for bad inputs\n";
+            return 1;
+        }
+        if (nextSpillIndexes(5, 2) != std::vector<int>({3, 1, 4, 0})) {
+            std::cerr << "nextSpillIndexes(5,2) should be +1,-1,+2,-2\n";
+            return 1;
+        }
+        if (nextSpillIndexes(5, 0) != std::vector<int>({1, 2})) {
+            std::cerr << "nextSpillIndexes should skip out-of-range, never clamp\n";
+            return 1;
+        }
+        if (nextSpillIndexes(5, 2, 2) != std::vector<int>({3, 1})) {
+            std::cerr << "nextSpillIndexes should honor count\n";
+            return 1;
+        }
+        RadarSession session;
+        session.radarId = QStringLiteral("KTLX");
+        for (int i = 0; i < 5; ++i) {
+            RadarFrame frame;
+            frame.volumeId = QStringLiteral("p%1").arg(i);
+            if (i == 1 || i == 3) {
+                frame.spilledPath = QStringLiteral("/tmp/p%1.cwdv").arg(i);  // spilled
+            } else if (i == 2) {
+                frame.chunk = std::make_shared<DecodedChunk>();  // resident: skip
+            }  // i==0,4 dropped (both empty): skip
+            session.history.push_back(std::move(frame));
+        }
+        session.frameIndex = 2;
+        if (SessionPrefetcher::pickSpillIndexes(session) != std::vector<int>({3, 1})) {
+            std::cerr << "pickSpillIndexes should return spilled neighbours only, +1 first\n";
+            return 1;
+        }
+    }
+    // Prefetch install matches by volumeId so a tail-drop shift mid-flight
+    // still lands on the right frame; never resurrects dropped frames.
+    {
+        RadarSession session;
+        session.radarId = QStringLiteral("KTLX");
+        for (int i = 0; i < 4; ++i) {
+            RadarFrame frame;
+            frame.volumeId = QStringLiteral("q%1").arg(i);
+            frame.spilledPath = QStringLiteral("/tmp/q%1.cwdv").arg(i);
+            session.history.push_back(std::move(frame));
+        }
+        session.frameIndex = 0;
+        auto loaded = std::make_shared<DecodedChunk>();
+        // Simulate the front dropping while the disk read is in flight.
+        session.history.erase(session.history.begin());
+        if (!installPrefetchedChunk(session, QStringLiteral("q2"), loaded, 12) ||
+            session.history.at(1).volumeId != QStringLiteral("q2") ||
+            session.history.at(1).chunk != loaded) {
+            std::cerr << "installPrefetchedChunk should match by volumeId after a shift\n";
+            return 1;
+        }
+        if (installPrefetchedChunk(session, QStringLiteral("q9"), loaded, 12)) {
+            std::cerr << "installPrefetchedChunk should fail for an evicted volume\n";
+            return 1;
+        }
+        RadarFrame dropped;
+        dropped.volumeId = QStringLiteral("qD");
+        session.history.push_back(std::move(dropped));
+        if (installPrefetchedChunk(session, QStringLiteral("qD"), loaded, 12)) {
+            std::cerr << "installPrefetchedChunk should never resurrect a dropped frame\n";
+            return 1;
+        }
+        if (installPrefetchedChunk(session, QStringLiteral("q2"), loaded, 12)) {
+            std::cerr << "installPrefetchedChunk should fail when already resident\n";
+            return 1;
+        }
+        if (installPrefetchedChunk(session, QStringLiteral("q1"), nullptr, 12)) {
+            std::cerr << "installPrefetchedChunk should fail for a null chunk\n";
             return 1;
         }
     }

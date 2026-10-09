@@ -203,6 +203,10 @@ private:
     // Keeps the newest maximumHistoryFrames_ volumes resident, spills older
     // ones to disk (up to kSpilledKeepVolumes), drops the rest entirely.
     void enforceSpillBudget(RadarSession& session, int excludeIndex = -1);
+    // Background spill warmer: faults the +1/-1 (+2) spilled neighbours back
+    // into RAM off the UI thread so the next scrub step hits memory. Queued
+    // from showFrame(); installs by volumeId via installPrefetchedChunk().
+    void scheduleSpillPrefetch();
 
     RadarListModel* model_ = nullptr;
     RadarMapCanvas* map_ = nullptr;
@@ -358,6 +362,9 @@ private:
     double chaseLongitude_ = -97.0;
     int maximumHistoryFrames_ = 12;
     int historyVolumeCount_ = 8;
+    // Spill-prefetch jobs in flight, keyed radarId/volumeId so fast scrubbing
+    // never stacks duplicate disk reads for the same volume.
+    QSet<QString> spillPrefetchInFlight_;
     bool synchronizePanels_ = true;
     bool synchronizingMapView_ = false;
     AppTheme theme_ = AppTheme::Prototype;

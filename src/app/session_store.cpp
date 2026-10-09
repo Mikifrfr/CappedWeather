@@ -92,4 +92,23 @@ void enforceSessionSpillBudget(RadarSession& session, int maximumHistoryFrames, 
     }
 }
 
+bool installPrefetchedChunk(RadarSession& session, const QString& volumeId,
+                            std::shared_ptr<DecodedChunk> chunk, int maximumHistoryFrames) {
+    if (!chunk || volumeId.isEmpty()) return false;
+    int found = -1;
+    for (int i = 0; i < static_cast<int>(session.history.size()); ++i) {
+        if (session.history.at(static_cast<std::size_t>(i)).volumeId == volumeId) {
+            found = i;
+            break;
+        }
+    }
+    if (found < 0) return false;
+    auto& frame = session.history.at(static_cast<std::size_t>(found));
+    if (frame.chunk) return false;  // already resident: someone faulted it in
+    if (frame.spilledPath.isEmpty()) return false;  // dropped: do not resurrect
+    frame.chunk = std::move(chunk);
+    enforceSessionSpillBudget(session, maximumHistoryFrames, found);
+    return true;
+}
+
 }  // namespace cappedweather

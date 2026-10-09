@@ -7,6 +7,7 @@
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
 #include "app/session_store.hpp"
+#include "app/session_prefetch.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/spc_convective.hpp"
 #include "app/placefile_source.hpp"
@@ -2499,6 +2500,50 @@ void MainWindow::enforceSpillBudget(RadarSession& session,
     enforceSessionSpillBudget(session, maximumHistoryFrames_, excludeIndex);
 }
 
+void MainWindow::scheduleSpillPrefetch() {
+    const auto session = activeSession();
+    if (!session || session->history.empty() || session->frameIndex < 0) return;
+    // Closest neighbours first; two is enough to cover scrub/next-playback
+    // without stacking volume-sized reads on field hardware.
+    const auto indexes = SessionPrefetcher::pickSpillIndexes(*session, session->frameIndex, 2);
+    if (indexes.empty()) return;
+    const QPointer<MainWindow> guard(this);
+    const QString radarId = session->radarId;
+    const int maxFrames = maximumHistoryFrames_;
+    for (const int index : indexes) {
+        if (index < 0 || index >= static_cast<int>(session->history.size())) continue;
+        const auto& frame = session->history.at(static_cast<std::size_t>(index));
+        if (frame.chunk || frame.spilledPath.isEmpty()) continue;
+        const QString volumeId = frame.volumeId;
+        const QString path = frame.spilledPath;
+        const QString jobKey = radarId + QLatin1Char('/') + volumeId;
+        if (spillPrefetchInFlight_.contains(jobKey)) continue;
+        spillPrefetchInFlight_.insert(jobKey);
+        QThreadPool::globalInstance()->start([guard, radarId, volumeId, path, jobKey, maxFrames] {
+            auto loaded = loadSpilledVolume(path.toStdString());
+            if (!guard) return;
+            QMetaObject::invokeMethod(
+                guard.data(),
+                [guard, radarId, volumeId, loaded, jobKey, maxFrames] {
+                    if (!guard) return;
+                    guard->spillPrefetchInFlight_.remove(jobKey);
+                    if (!loaded) return;  // unreadable: scrub path clears it
+                    const auto live = guard->sessionFor(radarId, false);
+                    if (!live) return;
+                    if (installPrefetchedChunk(*live, volumeId, loaded, maxFrames)) {
+                        // Installed silently: no showFrame() here (that would
+                        // recurse into another prefetch). The next scrub or
+                        // playback step hits RAM instead of disk.
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+    }
+    // A scrub storm can leave finished keys behind if the session was
+    // replaced mid-flight; keep the set bounded.
+    while (spillPrefetchInFlight_.size() > 16) spillPrefetchInFlight_.erase(spillPrefetchInFlight_.begin());
+}
+
 void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volumeId,
                                      const int chunkCount, const int failedChunks,
                                      const QDateTime& receivedAt,
@@ -2880,6 +2925,7 @@ void MainWindow::showFrame(const int index) {
     refreshLayerBadges();
     updatePanelAttribution();
     refreshCrossSection();
+    scheduleSpillPrefetch();
 }
 
 void MainWindow::updateProductAvailability() {
