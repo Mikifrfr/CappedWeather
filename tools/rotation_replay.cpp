@@ -21,6 +21,9 @@
 // processVelocity(Dealiased) -> detectCirculations + extractRadarStormFeatures
 // + appendDerivedProducts -> detectHailCores + detectDebrisSignatures.
 // Threshold sweeps for tuning change only the config, never the code path.
+// --vad prints the per-tilt VAD wind profile (same dealiased velocity the
+// scan pop-out fits) instead of detections:
+//   volume_time,volume_file,tilt,elev_deg,height_msl_m,from_deg,speed_mps,gates,rmse,quality
 
 #include "app/archive_level2.hpp"
 #include "core/circulation_detector.hpp"
@@ -29,6 +32,7 @@
 #include "core/hail_detector.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "core/shear_grid.hpp"
+#include "core/vad.hpp"
 #include "core/velocity_processing.hpp"
 
 #include <QByteArray>
@@ -54,7 +58,7 @@ void usage() {
                  "       [--min-gate V] [--same-sign-boost B] [--single-tilt-tvs 0/1]\n"
                  "       [--min-depth-tvs M] [--min-depth-meso M] [--rot-span V]\n"
                  "       [--rot-shear S] [--rot-grid DEG] [--max-phys V] [--shear S]\n"
-                 "       [--vertical-align KM] [--diagnose] [--persist 0/1]\n");
+                 "       [--vertical-align KM] [--diagnose] [--persist 0/1] [--vad]\n");
 }
 
 std::string isoTimeUtc(const QDateTime& t) {
@@ -94,6 +98,7 @@ int main(int argc, char** argv) {
     VelocityProcessingOptions velPrototype;
     bool csv = false;
     bool diagnose = false;
+    bool vad = false;
     bool persist = false;  // track persistence across volumes (live behavior):
     // a marker must repeat within 8 km before it is emitted, so single-volume
     // dealias glints never score. Mirrors persistCirculations (2 hits to show,
@@ -102,6 +107,11 @@ int main(int argc, char** argv) {
         const std::string flag = argv[i];
         if (flag == "--csv") {
             csv = true;
+            ++i;
+            continue;
+        }
+        if (flag == "--vad") {
+            vad = true;
             ++i;
             continue;
         }
@@ -175,7 +185,11 @@ int main(int argc, char** argv) {
     }
 
     if (csv) {
-        std::printf("volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts,min_cc,max_ref_dbz\n");
+        if (vad) {
+            std::printf("volume_time,volume_file,tilt,elev_deg,height_msl_m,from_deg,speed_mps,gates,rmse,quality\n");
+        } else {
+            std::printf("volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts,min_cc,max_ref_dbz\n");
+        }
     }
     int volumesOk = 0;
     int volumesFailed = 0;
@@ -242,6 +256,21 @@ int main(int argc, char** argv) {
             velOpts.mode = VelocityProcessingMode::Dealiased;
         }
         const auto dealised = processVelocity(decoded->decoded, velOpts);
+        if (vad) {
+            const auto levels = fitVadProfile(decoded->decoded, dealised, elev);
+            for (const auto& level : levels) {
+                const char* quality = level.quality == VadQuality::Good      ? "good"
+                                      : level.quality == VadQuality::Marginal ? "marginal"
+                                      : level.quality == VadQuality::Poor     ? "poor"
+                                                                             : "invalid";
+                std::printf("%s,%s,%d,%.2f,%.0f,%.0f,%.1f,%zu,%.2f,%s\n", volIso.c_str(),
+                            volFile.c_str(), level.elevationNumber, level.elevationDegrees,
+                            level.heightMslMeters, level.directionFromDegrees,
+                            level.speedMetersPerSecond, level.gateCount, level.rmseMetersPerSecond,
+                            quality);
+            }
+            continue;
+        }
         CirculationDiagnostics diag{};
         std::vector<ShearWatchCandidate> watch;
         const auto dets = detectCirculations(decoded->decoded, dealised, lat, lon, elev, circ,

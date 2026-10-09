@@ -62,6 +62,25 @@ air. Guidance only, never warnings. Core contract tests fit a known wind on
 a synthetic two-tilt volume (speed, FROM direction, tilt height separation)
 plus singular, all-missing, and infinite-gate fail-closed cases.
 
+## VAD live-volume check (KTLX, 2026-10-09)
+
+First real-data read, via `rotation_replay --vad` on three consecutive
+Archive-II volumes (16:37, 16:44, 16:51Z, ~6 MB each, VCP212-style splits).
+No tuning: default Nyquist, same dealiased velocity the dialog fits.
+
+- Tilts 7-12 (1.7-6.4 deg): FROM 177-202 deg at 4.4-6.3 m/s, RMSE 3-4,
+  Marginal/Good, nearly identical across all three volumes. A light
+  south-southwesterly flow, temporally stable over 14 minutes.
+- Tilts 2/4/6 (0.5-1.3 deg): correctly Poor, RMSE 5-17 with scattered
+  directions. Low tilts mix ground clutter, weak echo, and folded storm
+  gates; the quality flag withholds trust exactly where it should.
+- Same-hour METARs (KOUN 140/06, KOKC 190/08) show the same southerly
+  regime within 1-2 m/s: consistency context, not a calibration.
+- Limits: one light-wind October day only; reported heights are sample
+  medians near 1 km, not full-column soundings; convective-day and
+  strong-shear cases are still unmeasured. Re-run with
+  `rotation_replay <dir> --lat 35.333 --lon -97.278 --elev 371 --vad --csv`.
+
 ## Sampling and quality behavior
 
 - At least two distinct reflectivity elevation angles are required. Repeated supplemental scans at effectively the same angle are deduplicated so they cannot inflate VIL.
