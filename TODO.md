@@ -30,7 +30,6 @@ Short active list. Done work stays in git history and release notes, not in this
 
 Ready to build (data live now, testable hermetically plus replay):
 - [ ] SPC fire-weather outlooks Day 1/2. Same GeoJSON pipeline as categorical outlooks, different files, official colors. Verify: parser tests on live-shaped payload plus layer screenshot.
-- [ ] ZDR columns as updraft markers. NEXRAD dual-pol is live now: ZDR above 1 dB over the freezing level inside 40+ dBZ cores, multi-tilt column required. Verify: synthetic columns plus replay volumes against literature thresholds, guidance-only like hail.
 - [ ] Bright-band / melting-layer ring. Quasi-circular low-CC band in stratiform echo gives freezing-level height per volume; feeds ZDR-column gating and hail logic. Verify: synthetic rings plus stratiform replay cases.
 - [ ] TBSS hail-spike detector. Down-radial weak-echo spike behind 60+ dBZ cores (three-body scatter), range/azimuth geometry only. Verify: synthetic spikes plus hail-case replays.
 - [ ] Bunkers storm motion from VAD. 0-6 km mean wind from the existing profile fit, standard left/right-mover math, feeds storm-relative velocity and SRH. Verify: synthetic winds plus sounding-day replay consistency.
@@ -59,6 +58,8 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- ZDR columns as updraft markers (dual-pol stacks over 1.5 km on 2+ tilts topping 3 km, layer with badge and persisted toggle, core tests plus replay-ready).
+- World-file sidecars (.pgw) for snapshots and KML frames so every PNG loads in GIS.
 - Environment Canada alerts (open MSC GeoMet OGC feed, Canada-wide bbox, shared warning rows/colors/probe/cards with NWS, last-known-good on failure).
 - Case-pack import session rebuild as shared tested logic (copy plus decode check per volume, staged cleanup, radar guard) with fault-in coverage.
 - Spill prefetch fans out to every panel session for mixed-radar layouts.
