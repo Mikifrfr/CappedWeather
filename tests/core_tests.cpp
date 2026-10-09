@@ -6,6 +6,7 @@
 #include "core/scan_diagnostics.hpp"
 #include "core/velocity_processing.hpp"
 #include "core/vad.hpp"
+#include "core/zdr_column.hpp"
 #include "core/lightning_jump.hpp"
 #include "core/flash_rate_grid.hpp"
 #include "core/glm_l2_reader.hpp"
@@ -485,6 +486,80 @@ DecodedRay syntheticVadRay(const float azimuth, const std::uint8_t elevationNumb
     return ray;
 }
 }  // namespace
+
+namespace {
+DecodedRay syntheticZdrRay(const float azimuth, const std::uint8_t elevationNumber,
+                           const float elevationDegrees, const double zdrDb,
+                           const double reflectivityDbz, const int firstGateMeters = 0,
+                           const std::size_t gateCount = 40) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    const auto zdrIndex = static_cast<std::size_t>(ProductKind::DifferentialReflectivity);
+    const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    ray.fields.at(zdrIndex).assign(
+        gateCount, static_cast<std::uint16_t>(std::lround(zdrDb * 100.0)));
+    ray.firstGateByProduct.at(zdrIndex) = static_cast<std::int16_t>(firstGateMeters);
+    ray.gateSpacingByProduct.at(zdrIndex) = 1000;
+    ray.scaleByProduct.at(zdrIndex) = 100.0F;
+    ray.offsetByProduct.at(zdrIndex) = 0.0F;
+    ray.fields.at(refIndex).assign(
+        gateCount, static_cast<std::uint16_t>(std::lround(reflectivityDbz * 2.0 + 66.0)));
+    ray.firstGateByProduct.at(refIndex) = static_cast<std::int16_t>(firstGateMeters);
+    ray.gateSpacingByProduct.at(refIndex) = 1000;
+    ray.scaleByProduct.at(refIndex) = 2.0F;
+    ray.offsetByProduct.at(refIndex) = 66.0F;
+    return ray;
+}
+}  // namespace
+
+void testZdrColumns() {
+    // One compact column: 4 adjacent gates on two tilts (1 and 10 deg).
+    // Every candidate sits inside a 3 km ball, so seed-radius grouping
+    // yields exactly one column reaching past 3 km MSL with ~2.9 km depth.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticZdrRay(90.0F, 1, 1.0F, 2.5, 55.0, 15000, 4));
+    chunk.rays.push_back(syntheticZdrRay(90.0F, 2, 10.0F, 2.5, 55.0, 15000, 4));
+    const auto columns = detectZdrColumns(chunk, 35.0, -97.0, 300.0, {});
+    assert(columns.size() == 1);
+    assert(std::abs(columns.front().maxZdrDb - 2.5) < 0.05);
+    assert(columns.front().topMslMeters > 3000.0);
+    assert(columns.front().depthMeters > 1500.0);
+    assert(columns.front().tiltCount == 2);
+    assert(columns.front().maxReflectivityDbz > 50.0);
+    // High ZDR in weak echo is not a column.
+    {
+        DecodedChunk weak = chunk;
+        for (auto& ray : weak.rays) {
+            auto& ref = ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity));
+            std::fill(ref.begin(), ref.end(), static_cast<std::uint16_t>(66 + 20 * 2));
+        }
+        assert(detectZdrColumns(weak, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // One tilt is never a column, however hot.
+    {
+        DecodedChunk single;
+        single.radarId = "KTLX";
+        single.rays.push_back(syntheticZdrRay(90.0F, 2, 5.0F, 3.0, 60.0));
+        assert(detectZdrColumns(single, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // Single-pol volumes (no ZDR moments, like OPERA today) yield nothing.
+    {
+        DecodedChunk singlePol;
+        singlePol.radarId = "deneu";
+        singlePol.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 55.0));
+        assert(detectZdrColumns(singlePol, 50.0, 6.0, 100.0, {}).empty());
+    }
+    // Low-topped warmth stays out via the top guard.
+    {
+        ZdrColumnConfig low;
+        low.minTopMslMeters = 20000.0;
+        assert(detectZdrColumns(chunk, 35.0, -97.0, 300.0, low).empty());
+    }
+}
 
 void testVadProfile() {
     // Known wind: 10 m/s east + 5 m/s north. Vr(az) = (u sin + v cos) cos(el).
@@ -1892,6 +1967,7 @@ int main() {
     testScanDiagnostics();
     testVelocityProcessing();
     testVadProfile();
+    testZdrColumns();
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();
     testMessage31MalformedInputs();

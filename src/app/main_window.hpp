@@ -329,6 +329,8 @@ private:
     QLabel* tvsBadge_ = nullptr;
     QCheckBox* hailCoreCheck_ = nullptr;
     QLabel* hailCoreBadge_ = nullptr;
+    QCheckBox* zdrColumnCheck_ = nullptr;
+    QLabel* zdrColumnBadge_ = nullptr;
     QCheckBox* tdsCheck_ = nullptr;
     QLabel* tdsBadge_ = nullptr;
     QCheckBox* spcOutlookCheck_ = nullptr;

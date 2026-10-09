@@ -857,6 +857,16 @@ int RadarMapCanvas::hailCoreCount() const {
     return static_cast<int>(hailCores_.size());
 }
 
+void RadarMapCanvas::setZdrVisible(const bool visible) {
+    if (zdrVisible_ == visible) return;
+    zdrVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::zdrColumnCount() const {
+    return static_cast<int>(zdrColumns_.size());
+}
+
 void RadarMapCanvas::setTdsVisible(const bool visible) {
     if (tdsVisible_ == visible) return;
     tdsVisible_ = visible;
@@ -911,6 +921,7 @@ void RadarMapCanvas::invalidateLightningFusion() {
     radarFeatures_.clear();
     lightningAssociations_.clear();
     hailCores_.clear();
+    zdrColumns_.clear();
     tdsDetections_.clear();
     lightningFusionComputedGeneration_ = 0;
 }
@@ -955,6 +966,9 @@ void RadarMapCanvas::rebuildLightningFusion() {
             // off the raw (unpersisted) couplets. Display persistence for
             // TDS happens on the GUI thread below, next to circulations.
             auto hailCores = detectHailCores(*chunk, latitude, longitude, antennaElevM);
+            // ZDR columns ride free: same worker, same site fix, dual-pol
+            // volumes only (single-pol rays never enter the candidate set).
+            auto zdrColumns = detectZdrColumns(*chunk, latitude, longitude, antennaElevM);
             auto tds = dealiased ? detectDebrisSignatures(*chunk, circulations, latitude,
                                                            longitude, antennaElevM)
                                  : std::vector<TdsDetection>{};
@@ -965,6 +979,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                  associations = std::move(associations),
                  circulations = std::move(circulations),
                  watch = std::move(watch), hailCores = std::move(hailCores),
+                 zdrColumns = std::move(zdrColumns),
                  tds = std::move(tds)]() mutable {
                     if (!guard) return;
                     guard->lightningFusionBuildPending_ = false;
@@ -974,6 +989,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                         guard->shearWatch_ = std::move(watch);
                         guard->persistCirculations(std::move(circulations));
                         guard->hailCores_ = std::move(hailCores);
+                        guard->zdrColumns_ = std::move(zdrColumns);
                         guard->persistTds(std::move(tds));
                         guard->lightningFusionComputedGeneration_ = generation;
                         guard->refreshPinnedLightningInfo();
@@ -2754,6 +2770,7 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
     paintShearOverlay(painter);
     paintCirculationMarkers(painter);
     paintHailCores(painter);
+    paintZdrColumns(painter);
     paintTdsMarkers(painter);
 
     if (!lightningVisible_) return;
@@ -2976,6 +2993,33 @@ void RadarMapCanvas::paintHailCores(QPainter& painter) {
                 QStringLiteral("HAIL %1 g/m3 ~%2")
                     .arg(core.maxVildGPerCubicMeter, 0, 'f', 1)
                     .arg(QString::fromUtf8(hint.data(), static_cast<int>(hint.size()))));
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintZdrColumns(QPainter& painter) {
+    if (!zdrVisible_ || zdrColumns_.empty()) return;
+    // Updraft proxy: green square on the column centroid, labeled with peak
+    // ZDR and column-top height. Guidance only: a column marks a strong
+    // updraft, never a hail size or a warning.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& column : zdrColumns_) {
+        const auto point = screenPoint(column.latitudeDeg, column.longitudeDeg);
+        if (!rect().adjusted(-60, -60, 60, 60).contains(point.toPoint())) continue;
+        const QColor c(80, 220, 120);
+        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 70));
+        painter.setPen(QPen(c, 2.5));
+        painter.drawRect(QRectF(point.x() - 8.0, point.y() - 8.0, 16.0, 16.0));
+        if (zoom_ >= 5) {
+            painter.setPen(QColor(215, 245, 220));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(
+                QRectF(point.x() + 13, point.y() - 20, 240, 36), Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("ZDR %1 dB | top %2 km")
+                    .arg(column.maxZdrDb, 0, 'f', 1)
+                    .arg(column.topMslMeters / 1000.0, 0, 'f', 1));
         }
     }
     painter.restore();
