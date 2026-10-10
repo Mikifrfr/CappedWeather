@@ -12,7 +12,6 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] MTG Lightning Imager for European sessions. GLM covers GOES-18/19 only: MTG LI L2 lives behind EUMETSAT Data Store registration plus OAuth (no anonymous feed like NOAA S3), so this needs a user-supplied credential flow first. No code until then.
 
 ### Playback and export
-- [ ] Case-pack export/import. Zip of loaded volumes plus placefiles plus timeline state, so a shared case reproduces exactly.
 - [ ] GIS export follow-on: GeoTIFF for one frame (needs a native TIFF dependency on every platform plus CI wiring). KML GroundOverlay is wired; uses current georeferencing only, no reprojection magic.
 
 ### Platform and UX
@@ -41,6 +40,8 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Case-pack export/import (.cwcase zip of spilled volumes plus manifest plus placefiles, File menu actions with progress and cancel, shared tested manifest/zip/rebuild logic with fault-in coverage).
+- Nearest-radar mosaic seam probe (`tools/mosaic_probe.cpp`, Moore 2013 KTLX+KINX scored in `docs/mosaic-seams.md`: same-tilt compositing fails on beam mismatch, mosaic stays a probe until lowest-beam-wins or CAPPI matching lands).
 - GOES ABI infrared (anonymous S3 RadC C13/C07 brightness temperature via fixed-grid remap validated against the file's own extent record, observed context under echo with scan time and band picker, layer with badge and persisted toggle, hermetic tests on a committed fixture).
 - HRRR simulated reflectivity (TDS NCSS REFC subset, Lambert math validated against the live grid, model-context raster under echo with valid hour, layer with badge and persisted toggle, hermetic tests on a committed fixture).
 - RAOB sounding hodograph (IEM 00Z/12Z fetch with station memory, height-colored trace plus storm-motion vector, sounding-vs-VAD SRH ground truth sharing one integrator, freezing-level readout, hermetic parser/clock/paint tests, live-verified payload shape).

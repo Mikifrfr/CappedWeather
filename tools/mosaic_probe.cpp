@@ -249,10 +249,8 @@ int main(int argc, char** argv) {
              lon += stepDeg) {
             const auto sa = sampleVolume(a, lat, lon, threshDbz);
             const auto sb = sampleVolume(b, lat, lon, threshDbz);
-            if (!sa.hasEcho && !sb.hasEcho && (std::isnan(sa.dbz) || std::isnan(sb.dbz))) {
-                // Outside both coverages: not a seam data point.
-                if (std::isnan(sa.dbz) && std::isnan(sb.dbz)) continue;
-            }
+            // Outside both coverages (no gate from either radar): not data.
+            if (std::isnan(sa.dbz) && std::isnan(sb.dbz)) continue;
             ++cells;
             if (sa.hasEcho) ++echoA;
             if (sb.hasEcho) ++echoB;
@@ -299,13 +297,14 @@ int main(int argc, char** argv) {
                 bothN > 0 ? sumBeamDelta / bothN : 0.0, percentile(beamDeltas, 0.5),
                 percentile(beamDeltas, 0.9));
     std::printf("seam by beam mismatch: [beam<=m] n bias rmse\n");
-    for (const auto& bin : seamBins) {
-        const double edge = bin.maxBeamDelta > 1e11 ? 1e12 : bin.maxBeamDelta;
+    const char* edges[] = {"<=1000", "<=2000", "<=4000", "<=rest"};
+    for (std::size_t i = 0; i < seamBins.size(); ++i) {
+        const auto& bin = seamBins[i];
         if (bin.n > 0) {
-            std::printf("  <=%.0f n=%lld bias=%+.2f rmse=%.2f\n", edge, bin.n, bin.sum / bin.n,
+            std::printf("  %s n=%lld bias=%+.2f rmse=%.2f\n", edges[i], bin.n, bin.sum / bin.n,
                         std::sqrt(bin.sumSq / bin.n));
         } else {
-            std::printf("  <=%.0f n=0\n", edge);
+            std::printf("  %s n=0\n", edges[i]);
         }
     }
     return EXIT_SUCCESS;
