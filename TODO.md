@@ -40,6 +40,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- IEM NEXRAD national mosaic (5-minute N0Q archive PNG plus world file, exact filename timestamps, scaled decode to paint budget, native colors under echo with scan time, layer with badge and persisted toggle, hermetic parser/decode/paint tests on a committed fixture).
 - Case-pack export/import (.cwcase zip of spilled volumes plus manifest plus placefiles, File menu actions with progress and cancel, shared tested manifest/zip/rebuild logic with fault-in coverage).
 - Nearest-radar mosaic seam probe (`tools/mosaic_probe.cpp`, Moore 2013 KTLX+KINX scored in `docs/mosaic-seams.md`: same-tilt compositing fails on beam mismatch, mosaic stays a probe until lowest-beam-wins or CAPPI matching lands).
 - GOES ABI infrared (anonymous S3 RadC C13/C07 brightness temperature via fixed-grid remap validated against the file's own extent record, observed context under echo with scan time and band picker, layer with badge and persisted toggle, hermetic tests on a committed fixture).
