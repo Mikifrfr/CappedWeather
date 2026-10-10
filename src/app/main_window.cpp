@@ -596,6 +596,10 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) panel->setZdrVisible(visible);
         refreshLayerBadges();
     });
+    connect(tbssCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setTbssVisible(visible);
+        refreshLayerBadges();
+    });
     connect(tdsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setTdsVisible(visible);
         refreshLayerBadges();
@@ -1393,6 +1397,11 @@ void MainWindow::buildUi() {
                  QStringLiteral("Dual-pol updraft proxy, guidance only"), zdrColumnBadge_,
                  QStringLiteral("zdrColumnBadge"), true,
                  QStringLiteral("ZDR columns mark strong updrafts lofting big drops (ZDR 1+ dB in 40+ dBZ over 1.5+ km on 2+ tilts). No columns on single-pol volumes. Guidance only, never a hail size."));
+    makeLayerRow(tbssCheck_, QStringLiteral("Hail spike (TBSS)"),
+                 QStringLiteral("tbssCheck"),
+                 QStringLiteral("Down-radial weak-echo spike, guidance only"), tbssBadge_,
+                 QStringLiteral("tbssBadge"), true,
+                 QStringLiteral("Three-body scatter spikes behind 60+ dBZ cores: weak echo running 4+ km downrange on 3+ adjacent rays. Large hail is likely inside the core. Guidance only, never a size."));
     makeLayerRow(tdsCheck_, QStringLiteral("Debris signature (TDS)"),
                  QStringLiteral("tdsCheck"),
                  QStringLiteral("CC drop at a live couplet, persisted"), tdsBadge_,
@@ -3218,6 +3227,7 @@ void MainWindow::restoreSettings() {
     tvsCheck_->setChecked(settings.value(QStringLiteral("overlays/tvs"), true).toBool());
     hailCoreCheck_->setChecked(settings.value(QStringLiteral("overlays/hailCores"), true).toBool());
     zdrColumnCheck_->setChecked(settings.value(QStringLiteral("overlays/zdrColumns"), true).toBool());
+    tbssCheck_->setChecked(settings.value(QStringLiteral("overlays/tbss"), true).toBool());
     tdsCheck_->setChecked(settings.value(QStringLiteral("overlays/tds"), true).toBool());
     for (auto* panel : maps_) {
         panel->setStormTrailVisible(trailCheck_->isChecked());
@@ -3226,6 +3236,7 @@ void MainWindow::restoreSettings() {
         panel->setTvsVisible(tvsCheck_->isChecked());
         panel->setHailVisible(hailCoreCheck_->isChecked());
         panel->setZdrVisible(zdrColumnCheck_->isChecked());
+        panel->setTbssVisible(tbssCheck_->isChecked());
         panel->setTdsVisible(tdsCheck_->isChecked());
         panel->setSpcOutlookVisible(spcOutlookCheck_->isChecked());
         panel->setSpcFireVisible(spcFireCheck_->isChecked());
@@ -3285,6 +3296,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/tvs"), tvsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/hailCores"), hailCoreCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/zdrColumns"), zdrColumnCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/tbss"), tbssCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/tds"), tdsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/warnings"), warningsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/reports"), reportsCheck_->isChecked());
@@ -4366,6 +4378,11 @@ void MainWindow::refreshLayerBadges() {
         const auto n = map_->zdrColumnCount();
         zdrColumnBadge_->setText(!zdrColumnCheck_ || !zdrColumnCheck_->isChecked() ? QStringLiteral("off")
                                  : n > 0 ? QString::number(n) : QStringLiteral("idle"));
+    }
+    if (tbssBadge_) {
+        const auto n = map_->tbssCount();
+        tbssBadge_->setText(!tbssCheck_ || !tbssCheck_->isChecked() ? QStringLiteral("off")
+                            : n > 0 ? QString::number(n) : QStringLiteral("idle"));
     }
     if (tdsBadge_) {
         const auto n = map_->tdsCount();

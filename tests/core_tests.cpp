@@ -7,6 +7,7 @@
 #include "core/velocity_processing.hpp"
 #include "core/vad.hpp"
 #include "core/bright_band.hpp"
+#include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
 #include "core/lightning_jump.hpp"
 #include "core/flash_rate_grid.hpp"
@@ -641,6 +642,90 @@ void testBrightBand() {
                 syntheticBrightBandRay(static_cast<float>(step * 3), 1, 1.5F));
         const auto narrow = estimateBrightBand(sector, 300.0, {});
         assert(narrow.quality != BrightBandQuality::Good);
+    }
+}
+
+namespace {
+DecodedRay syntheticTbssRay(const float azimuth, const std::uint8_t elevationNumber,
+                            const float elevationDegrees, const double coreDbz = 65.0,
+                            const std::size_t spikeGates = 10) {
+    // Core at gates 20-24, weak-echo spike immediately behind (gates 25+),
+    // echo-free (encoded 1) everywhere else.
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    ray.fields.at(refIndex).assign(60, static_cast<std::uint16_t>(1));
+    ray.firstGateByProduct.at(refIndex) = 0;
+    ray.gateSpacingByProduct.at(refIndex) = 1000;
+    ray.scaleByProduct.at(refIndex) = 2.0F;
+    ray.offsetByProduct.at(refIndex) = 66.0F;
+    const auto setDbz = [&](const std::size_t gate, const double dbz) {
+        ray.fields.at(refIndex).at(gate) =
+            static_cast<std::uint16_t>(std::lround(dbz * 2.0 + 66.0));
+    };
+    for (std::size_t gate = 20; gate <= 24; ++gate) setDbz(gate, coreDbz);
+    for (std::size_t gate = 25; gate < 25 + spikeGates && gate < 60; ++gate) setDbz(gate, 15.0);
+    return ray;
+}
+}  // namespace
+
+void testTbss() {
+    // Three adjacent rays with core + 10 km spike: one detection.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticTbssRay(90.0F, 1, 0.5F));
+    chunk.rays.push_back(syntheticTbssRay(91.0F, 1, 0.5F));
+    chunk.rays.push_back(syntheticTbssRay(92.0F, 1, 0.5F));
+    const auto detections = detectTbss(chunk, 35.0, -97.0, 300.0, {});
+    assert(detections.size() == 1);
+    assert(detections.front().rayCount == 3);
+    assert(std::abs(detections.front().maxCoreDbz - 65.0) < 0.6);
+    assert(std::abs(detections.front().spikeLengthKm - 9.0) < 0.6);
+    // Sub-60 core is not TBSS territory.
+    {
+        DecodedChunk weak = chunk;
+        for (auto& ray : weak.rays)
+            for (std::size_t gate = 20; gate <= 24; ++gate)
+                ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).at(gate) =
+                    static_cast<std::uint16_t>(std::lround(55.0 * 2.0 + 66.0));
+        assert(detectTbss(weak, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // A 2 km flicker is speckle, not a spike.
+    {
+        DecodedChunk shortSpike;
+        shortSpike.radarId = "KTLX";
+        shortSpike.rays.push_back(syntheticTbssRay(90.0F, 1, 0.5F, 65.0, 2));
+        shortSpike.rays.push_back(syntheticTbssRay(91.0F, 1, 0.5F, 65.0, 2));
+        shortSpike.rays.push_back(syntheticTbssRay(92.0F, 1, 0.5F, 65.0, 2));
+        assert(detectTbss(shortSpike, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // One lonely ray never marks, however clean the spike.
+    {
+        DecodedChunk single;
+        single.radarId = "KTLX";
+        single.rays.push_back(syntheticTbssRay(90.0F, 1, 0.5F));
+        assert(detectTbss(single, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // A spike running to the last gate is unterminated edge, not TBSS.
+    {
+        DecodedChunk edge;
+        edge.radarId = "KTLX";
+        for (const float azimuth : {90.0F, 91.0F, 92.0F}) {
+            auto ray = syntheticTbssRay(azimuth, 1, 0.5F, 65.0, 35);
+            edge.rays.push_back(ray);
+        }
+        assert(detectTbss(edge, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // Strong echo right behind the core is another cell, not an artifact.
+    {
+        DecodedChunk secondCell = chunk;
+        for (auto& ray : secondCell.rays)
+            ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).at(25) =
+                static_cast<std::uint16_t>(std::lround(50.0 * 2.0 + 66.0));
+        assert(detectTbss(secondCell, 35.0, -97.0, 300.0, {}).empty());
     }
 }
 
@@ -2051,6 +2136,7 @@ int main() {
     testVelocityProcessing();
     testVadProfile();
     testBrightBand();
+    testTbss();
     testZdrColumns();
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();

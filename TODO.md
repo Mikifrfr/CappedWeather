@@ -29,7 +29,6 @@ Short active list. Done work stays in git history and release notes, not in this
 ## Proposed (researched, not committed)
 
 Ready to build (data live now, testable hermetically plus replay):
-- [ ] TBSS hail-spike detector. Down-radial weak-echo spike behind 60+ dBZ cores (three-body scatter), range/azimuth geometry only. Verify: synthetic spikes plus hail-case replays.
 - [ ] Bunkers storm motion from VAD. 0-6 km mean wind from the existing profile fit, standard left/right-mover math, feeds storm-relative velocity and SRH. Verify: synthetic winds plus sounding-day replay consistency.
 - [ ] Storm-relative helicity estimate. VAD profile plus Bunkers motion integrated 0-1 and 0-3 km, shown in the scan pop-out with the same quality flags. Verify: synthetic hodographs with closed-form SRH.
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
@@ -54,6 +53,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- TBSS hail-spike detector (60+ dBZ core with 4-30 km down-radial weak-echo spike on 3+ adjacent rays, map layer with badge and persisted toggle, six-case core tests).
 - Basemap preset gallery (one-click IEM US + RainViewer global mosaic templates in Settings, keyless Custom no longer falls back to Esri, RainViewer frame resolver with hermetic tests, live 200-PNG verification, documented in europe-sources).
 - Warning inbox expiry countdowns (per-item time-to-expire from onset/expiry, soonest-first within severity, 30 s ticker, hermetic clock tests).
 - SPC fire-weather outlooks Day 1/2 (DryT + WindRH GeoJSON, same schema as categorical, official orange colors, layer with badge and persisted toggle, live-shaped parser tests).

@@ -4,6 +4,7 @@
 #include "core/circulation_detector.hpp"
 #include "core/debris_detector.hpp"
 #include "core/hail_detector.hpp"
+#include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
 #include "app/spc_convective.hpp"
 #include "app/metar_source.hpp"
@@ -162,6 +163,9 @@ public:
     void setZdrVisible(bool visible);
     [[nodiscard]] bool zdrVisible() const { return zdrVisible_; }
     [[nodiscard]] int zdrColumnCount() const;
+    void setTbssVisible(bool visible);
+    [[nodiscard]] bool tbssVisible() const { return tbssVisible_; }
+    [[nodiscard]] int tbssCount() const;
     [[nodiscard]] int hailCoreCount() const;
     void setTdsVisible(bool visible);
     [[nodiscard]] bool tdsVisible() const { return tdsVisible_; }
@@ -537,6 +541,8 @@ private:
     void paintHailCores(QPainter& painter);
     std::vector<ZdrColumn> zdrColumns_;
     void paintZdrColumns(QPainter& painter);
+    std::vector<TbssDetection> tbssDetections_;
+    void paintTbss(QPainter& painter);
     // Debris signatures ride the same 2-hit persistence as circulations: a
     // one-volume CC dip is hail or clutter until it repeats.
     struct PersistedTds {
@@ -623,6 +629,7 @@ private:
     bool tvsVisible_ = true;
     bool hailVisible_ = true;
     bool zdrVisible_ = true;
+    bool tbssVisible_ = true;
     bool tdsVisible_ = true;
     bool stormTrailVisible_ = true;
     bool displaySmoothing_ = false;

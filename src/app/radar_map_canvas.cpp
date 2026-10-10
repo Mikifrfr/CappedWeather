@@ -912,6 +912,16 @@ int RadarMapCanvas::zdrColumnCount() const {
     return static_cast<int>(zdrColumns_.size());
 }
 
+void RadarMapCanvas::setTbssVisible(const bool visible) {
+    if (tbssVisible_ == visible) return;
+    tbssVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::tbssCount() const {
+    return static_cast<int>(tbssDetections_.size());
+}
+
 void RadarMapCanvas::setTdsVisible(const bool visible) {
     if (tdsVisible_ == visible) return;
     tdsVisible_ = visible;
@@ -967,6 +977,7 @@ void RadarMapCanvas::invalidateLightningFusion() {
     lightningAssociations_.clear();
     hailCores_.clear();
     zdrColumns_.clear();
+    tbssDetections_.clear();
     tdsDetections_.clear();
     lightningFusionComputedGeneration_ = 0;
 }
@@ -1014,6 +1025,9 @@ void RadarMapCanvas::rebuildLightningFusion() {
             // ZDR columns ride free: same worker, same site fix, dual-pol
             // volumes only (single-pol rays never enter the candidate set).
             auto zdrColumns = detectZdrColumns(*chunk, latitude, longitude, antennaElevM);
+            // TBSS rides free too: same worker, reflectivity-only geometry
+            // (works on single-pol OPERA volumes unlike ZDR columns).
+            auto tbss = detectTbss(*chunk, latitude, longitude, antennaElevM);
             auto tds = dealiased ? detectDebrisSignatures(*chunk, circulations, latitude,
                                                            longitude, antennaElevM)
                                  : std::vector<TdsDetection>{};
@@ -1024,7 +1038,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                  associations = std::move(associations),
                  circulations = std::move(circulations),
                  watch = std::move(watch), hailCores = std::move(hailCores),
-                 zdrColumns = std::move(zdrColumns),
+                 zdrColumns = std::move(zdrColumns), tbss = std::move(tbss),
                  tds = std::move(tds)]() mutable {
                     if (!guard) return;
                     guard->lightningFusionBuildPending_ = false;
@@ -1035,6 +1049,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                         guard->persistCirculations(std::move(circulations));
                         guard->hailCores_ = std::move(hailCores);
                         guard->zdrColumns_ = std::move(zdrColumns);
+                        guard->tbssDetections_ = std::move(tbss);
                         guard->persistTds(std::move(tds));
                         guard->lightningFusionComputedGeneration_ = generation;
                         guard->refreshPinnedLightningInfo();
@@ -2879,6 +2894,7 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
     paintCirculationMarkers(painter);
     paintHailCores(painter);
     paintZdrColumns(painter);
+    paintTbss(painter);
     paintTdsMarkers(painter);
 
     if (!lightningVisible_) return;
@@ -3128,6 +3144,36 @@ void RadarMapCanvas::paintZdrColumns(QPainter& painter) {
                 QStringLiteral("ZDR %1 dB | top %2 km")
                     .arg(column.maxZdrDb, 0, 'f', 1)
                     .arg(column.topMslMeters / 1000.0, 0, 'f', 1));
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintTbss(QPainter& painter) {
+    if (!tbssVisible_ || tbssDetections_.empty()) return;
+    // Hail-spike flag: magenta down-triangle on the core, labeled with core
+    // strength and spike length. Guidance only: a spike says large hail is
+    // likely inside, never a size or a warning.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& det : tbssDetections_) {
+        const auto point = screenPoint(det.latitudeDeg, det.longitudeDeg);
+        if (!rect().adjusted(-60, -60, 60, 60).contains(point.toPoint())) continue;
+        const QColor c(255, 80, 200);
+        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 70));
+        painter.setPen(QPen(c, 2.5));
+        QPolygonF marker;
+        marker << point + QPointF(0.0, 10.0) << point + QPointF(-9.0, -7.0)
+               << point + QPointF(9.0, -7.0);
+        painter.drawPolygon(marker);
+        if (zoom_ >= 5) {
+            painter.setPen(QColor(250, 210, 240));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(
+                QRectF(point.x() + 13, point.y() - 20, 240, 36), Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("TBSS %1 dBZ | %2 km")
+                    .arg(det.maxCoreDbz, 0, 'f', 0)
+                    .arg(det.spikeLengthKm, 0, 'f', 1));
         }
     }
     painter.restore();
