@@ -25,6 +25,21 @@ even the 72 beam-matched cells disagree at RMSE 11 dB (64 s time offset
 moves the storm ~1.5 km, comparable to the grid step, on top of resolution
 and partial-beam differences).
 
+## Second pair excluded: sector-scan trap (KTLX 20:20:58Z + KINX 20:21:24Z)
+
+The tool's tilt QC line caught it before the numbers could mislead:
+
+- KTLX 0.46 deg: 208 rays, 1.5% echo, only 14/72 five-degree bins covered
+- KINX 0.45 deg: 1407 rays, 6.9% echo, 72/72 bins covered (first pair: KTLX
+  261 rays at 28/72 bins, so KTLX was already sector-scanning at 20:12 and
+  narrowed further by 20:20)
+
+KTLX sector-scanned the storm while KINX ran full surveillance at super-res
+density. A same-tilt composite would silently mosaic a 70-degree wedge
+against full coverage (both=35 cells). Excluded from the decision; the
+lesson stays in the tool: rays, echo fraction, and bin coverage print on
+every run, so degenerate pairs fail loudly instead of scoring quietly.
+
 ## Decision (2026-10-10)
 
 Naive same-tilt max/nearest compositing is not trustworthy: it mixes

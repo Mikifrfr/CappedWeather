@@ -98,15 +98,47 @@ bool loadVolume(const std::string& path, const std::string& radarId, double targ
     }
     out.tiltElevationDegrees = tiltElev;
     out.chunk = chunk;
+    long long tiltGates = 0, tiltEcho = 0;
+    constexpr std::size_t kRef = static_cast<std::size_t>(cappedweather::ProductKind::Reflectivity);
     for (std::size_t i = 0; i < out.chunk.rays.size(); ++i) {
         const auto& ray = out.chunk.rays[i];
         if (!ray.has(cappedweather::ProductKind::Reflectivity)) continue;
         if (std::abs(ray.elevationDegrees - tiltElev) > 0.05) continue;
         out.rayIndex.emplace_back(ray.azimuthDegrees, i);
+        for (const auto encoded : ray.fields.at(kRef)) {
+            ++tiltGates;
+            const auto value = cappedweather::nativeValue(
+                encoded, ray.scaleByProduct.at(kRef), ray.offsetByProduct.at(kRef));
+            if (value.has_value() && *value >= 10.0) ++tiltEcho;
+        }
     }
     if (out.rayIndex.empty()) {
         error = "matched tilt is empty in " + path;
         return false;
+    }
+    std::printf("tilt %.2f deg: %zu rays, %lld gates, %.1f%% echo>=10dBZ\n", tiltElev,
+                out.rayIndex.size(), tiltGates,
+                tiltGates > 0 ? 100.0 * tiltEcho / tiltGates : 0.0);
+    if (!out.rayIndex.empty()) {
+        // Azimuth coverage in 5-degree bins: a sector scan (or truncated
+        // cut) shows up as missing bins and explains sparse grids without
+        // blaming the sampler. Bins (not max-gap) so overlapping duplicate
+        // sweeps cannot fake coverage or a fake gap.
+        int coveredBins = 0;
+        for (int bin = 0; bin < 72; ++bin) {
+            const double lo = bin * 5.0, hi = lo + 5.0;
+            for (const auto& [az, unused] : out.rayIndex) {
+                (void)unused;
+                double wrapped = az;
+                while (wrapped < 0.0) wrapped += 360.0;
+                while (wrapped >= 360.0) wrapped -= 360.0;
+                if (wrapped >= lo && wrapped < hi) {
+                    ++coveredBins;
+                    break;
+                }
+            }
+        }
+        std::printf("tilt %.2f deg: %d/72 five-degree bins covered\n", tiltElev, coveredBins);
     }
     std::sort(out.rayIndex.begin(), out.rayIndex.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
