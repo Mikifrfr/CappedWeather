@@ -19,7 +19,7 @@ constexpr qint64 kMaxRadBytes = 12 * 1024 * 1024;  // C13/C07 run ~4 MB; C02 ref
 }  // namespace
 
 bool goesChannelSupported(const int channel) {
-    return channel == 13 || channel == 7;
+    return channel >= 7 && channel <= 16;
 }
 
 QUrl goesListUrl(const QString& bucket, const QDateTime& hourUtc) {

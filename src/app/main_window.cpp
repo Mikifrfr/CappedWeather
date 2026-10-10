@@ -1569,8 +1569,8 @@ void MainWindow::buildUi() {
                  QStringLiteral("goesBadge"), true,
                  QStringLiteral("GOES ABI infrared brightness temperature under live echo in grayscale (cold white). Observed context with its scan time on display."));
     {
-        // Channel picker lives directly under its layer row: clean-window
-        // IR (13) or shortwave IR (7). Visible channels stay out (file size
+        // Channel picker lives directly under its layer row: clean IR (13),
+        // upper water vapor (8), shortwave IR (7). Visible channels stay out
         // plus a solar path the IR painter does not need).
         auto* goesChannelRow = new QHBoxLayout();
         goesChannelRow->setSpacing(8);
@@ -1578,6 +1578,7 @@ void MainWindow::buildUi() {
         goesChannelCombo_ = new QComboBox(controlBody);
         goesChannelCombo_->setObjectName(QStringLiteral("goesChannelCombo"));
         goesChannelCombo_->addItem(QStringLiteral("13 clean IR"), 13);
+        goesChannelCombo_->addItem(QStringLiteral("8 upper water vapor"), 8);
         goesChannelCombo_->addItem(QStringLiteral("7 shortwave IR"), 7);
         goesChannelCombo_->setToolTip(QStringLiteral("GOES ABI infrared band. Refetches on change."));
         goesChannelRow->addWidget(goesChannelLabel);

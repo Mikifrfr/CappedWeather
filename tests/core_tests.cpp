@@ -1325,6 +1325,41 @@ void testGoesFixture() {
     assert(!readGoesRad("tests/fixtures/does-not-exist.nc").has_value());
 }
 
+void testGoes08Fixture() {
+    // Water-vapor twin of the C13 contract: band 8 from GOES-19/East,
+    // uint16 counts in int16 containers plus out-of-range strays, so this
+    // exercises the _Unsigned reinterpretation and the valid_range gate
+    // the C13 fixture never touches.
+    if (!goesReaderAvailable()) return;
+    const auto path = fixturePath("goes08_ok.nc");
+    assert(!path.empty());
+    const auto frame = readGoesRad(path);
+    assert(frame.has_value());
+    assert(frame->nx == 250 && frame->ny == 150);
+    assert(frame->brightnessCelsius.size() == 250 * 150);
+    assert(frame->channel == 8);
+    assert(std::abs(frame->grid.subpointLongitudeDeg + 75.0) < 1e-9);
+    assert(frame->validEpochSeconds == 1791644556LL);
+    // Upper-tropospheric water vapor: cold throughout (-78..-18 C,
+    // median near -36 C), 500 off-disc gates NaN, spot gate near -30 C.
+    std::size_t finite = 0;
+    float finiteMin = std::numeric_limits<float>::infinity();
+    float finiteMax = -std::numeric_limits<float>::infinity();
+    double sum = 0.0;
+    for (const float value : frame->brightnessCelsius) {
+        if (!std::isfinite(value)) continue;
+        ++finite;
+        finiteMin = std::min(finiteMin, value);
+        finiteMax = std::max(finiteMax, value);
+        sum += value;
+    }
+    assert(finite == 37000);
+    assert(finiteMin > -85.0F && finiteMin < -70.0F);
+    assert(finiteMax > -25.0F && finiteMax < -10.0F);
+    assert(sum / finite > -45.0 && sum / finite < -25.0);
+    assert(std::abs(frame->brightnessCelsius[75 * 250 + 125] - -30.11F) < 0.5F);
+}
+
 void testMosaicFrame() {
     // Filename clock: n0q_202610101730.png is 2026-10-10 17:30Z (1791653400).
     // Full keys, query suffixes, and garbage behave.
@@ -2771,6 +2806,7 @@ int main() {
     testHrrrFixture();
     testFixedGrid();
     testGoesFixture();
+    testGoes08Fixture();
     testMosaicFrame();
     testSounding();
     testSrh();

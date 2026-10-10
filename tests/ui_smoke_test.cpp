@@ -2409,7 +2409,8 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
         if (!goesChannelSupported(13) || !goesChannelSupported(7) ||
-            goesChannelSupported(2) || goesChannelSupported(16)) {
+            !goesChannelSupported(8) || !goesChannelSupported(16) ||
+            goesChannelSupported(2) || goesChannelSupported(6) || goesChannelSupported(17)) {
             std::cerr << "GOES channel gate is wrong\n";
             return 1;
         }

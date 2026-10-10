@@ -5,10 +5,11 @@
 // 2026-10-10; GOES-19/East is the default because its RadC fixed-grid
 // scene covers CONUS chase country, while GOES-18/West looks at the
 // Pacific plus the western states), discovered by hour-directory listing (filenames carry scan
-// times; the newest C13/C07 key wins, one hour of fallback). v1 renders
-// clean-window IR (C13) and shortwave IR (C07) brightness temperature;
-// visible channels stay out (C02 runs ~52 MB per 5 minutes, and
-// reflectance needs a solar path the IR painter does not).
+// times; the newest channel key wins, one hour of fallback). v1 renders
+// thermal-IR (C07-C16) brightness temperature; the picker offers clean
+// IR (13), upper water vapor (8), and shortwave IR (7). Visible channels
+// stay out (C02 runs ~52 MB per 5 minutes, and reflectance needs a solar
+// path the IR painter does not).
 // Painted with its scan time on display, under live echo like HRRR.
 // Anything malformed fails closed to empty.
 //
@@ -29,7 +30,10 @@ class QTimer;
 
 namespace cappedweather {
 
-// Supported IR channels (CONUS 2 km). Others are refused, never coerced.
+// Supported IR channels (CONUS 2 km thermal bands 7-16, all brightness
+// temperature through the file's own Planck terms). Visible/near-IR stay
+// out (C02 runs ~52 MB per 5 minutes, and reflectance needs a solar path
+// the IR painter does not). Others are refused, never coerced.
 bool goesChannelSupported(int channel);
 // Hour-directory listing URL for a UTC day/hour on the given bucket.
 QUrl goesListUrl(const QString& bucket, const QDateTime& hourUtc);

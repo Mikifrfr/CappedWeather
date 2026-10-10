@@ -145,8 +145,14 @@ std::optional<GoesFrame> readGoesRad(const std::string& path) {
         std::size_t count[2] = {ny, nx};
         if (nc_get_vara_float(ncid, radVar, start, count, rawFloat.data()) != NC_NOERR)
             return closeFail();
-        for (std::size_t i = 0; i < nx * ny; ++i)
-            radiance[i] = static_cast<double>(rawFloat[i]);
+        double floatFill = 0.0;
+        const bool hasFloatFill =
+            nc_get_att_double(ncid, radVar, "_FillValue", &floatFill) == NC_NOERR;
+        for (std::size_t i = 0; i < nx * ny; ++i) {
+            const double value = static_cast<double>(rawFloat[i]);
+            radiance[i] =
+                (hasFloatFill && value == floatFill) ? std::numeric_limits<double>::quiet_NaN() : value;
+        }
     } else {
         std::vector<int> raw(nx * ny, 0);
         std::size_t start[2] = {0, 0};
@@ -155,12 +161,33 @@ std::optional<GoesFrame> readGoesRad(const std::string& path) {
             return closeFail();
         double fillValue = 0.0;
         const bool hasFill = nc_get_att_double(ncid, radVar, "_FillValue", &fillValue) == NC_NOERR;
+        // valid_range bounds the physical counts (fill excluded): anything
+        // outside is missing data, never a radiance. C08 trims carry
+        // out-of-range strays that would otherwise convert to +100 C
+        // phantoms; C13 happens to be clean, the gate is still required.
+        double validRange[2] = {0.0, 0.0};
+        std::size_t validRangeLen = 0;
+        const bool hasValidRange =
+            nc_inq_attlen(ncid, radVar, "valid_range", &validRangeLen) == NC_NOERR &&
+            validRangeLen == 2 &&
+            nc_get_att_double(ncid, radVar, "valid_range", validRange) == NC_NOERR &&
+            validRange[0] <= validRange[1];
+        // ABI L1b stores uint16 counts in int16 containers (_Unsigned=true):
+        // large counts arrive sign-wrapped negative and must be reinterpreted
+        // before scaling, or half the water-vapor disc masks as missing.
+        char unsignedFlag[16] = {};
+        const bool storedUnsigned =
+            nc_get_att_text(ncid, radVar, "_Unsigned", unsignedFlag) == NC_NOERR &&
+            std::string(unsignedFlag, 4) == "true";
         for (std::size_t i = 0; i < nx * ny; ++i) {
-            if (hasFill && static_cast<double>(raw[i]) == fillValue) {
+            double countValue = static_cast<double>(raw[i]);
+            if (storedUnsigned && countValue < 0.0) countValue += 65536.0;
+            if ((hasFill && countValue == fillValue) ||
+                (hasValidRange && (countValue < validRange[0] || countValue > validRange[1]))) {
                 radiance[i] = std::numeric_limits<double>::quiet_NaN();
                 continue;
             }
-            radiance[i] = static_cast<double>(raw[i]) * radScale + radOffset;
+            radiance[i] = countValue * radScale + radOffset;
         }
     }
     // DQF mask when present: 0 good, 1 conditionally usable, >=2 unusable.
