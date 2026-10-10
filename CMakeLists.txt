@@ -305,6 +305,11 @@ if(CAPPEDWEATHER_BUILD_APP)
         )
         target_link_libraries(rotation_replay PRIVATE cappedweather_ui)
 
+        qt_add_executable(mosaic_probe
+            tools/mosaic_probe.cpp
+        )
+        target_link_libraries(mosaic_probe PRIVATE cappedweather_ui)
+
         qt_add_executable(offline_pack
             tools/offline_pack.cpp
         )
