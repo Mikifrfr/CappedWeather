@@ -1,4 +1,5 @@
 #include "core/hrrr_frame.hpp"
+#include "core/hdf5_serial.hpp"
 
 #ifdef CAPPEDWEATHER_HAS_NETCDF
 #include <netcdf.h>
@@ -6,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace cappedweather {
 
@@ -19,8 +21,12 @@ bool hrrrReaderAvailable() {
 
 std::optional<HrrrFrame> readHrrrRefc(const std::string& path) {
 #ifdef CAPPEDWEATHER_HAS_NETCDF
-    // TDS subsets arrive NetCDF-3 classic (no HDF5 layer), so plain
-    // open/close pairing on every exit path (closeFail) suffices.
+    // Same lock as the HDF5-backed readers: netCDF-C shares process-global
+    // state across formats, and a worker-pool ODIM/GLM decode may be inside
+    // hdf5.dll while this runs (see hdf5_serial.hpp). TDS subsets arrive
+    // NetCDF-3 classic, so plain open/close pairing on every exit path
+    // (closeFail) still suffices for the handle itself.
+    const Hdf5SerialLock hdf5Lock;
     int ncid = -1;
     if (nc_open(path.c_str(), NC_NOWRITE, &ncid) != NC_NOERR) return std::nullopt;
     const auto closeFail = [&] {
@@ -129,9 +135,31 @@ std::optional<HrrrFrame> readHrrrRefc(const std::string& path) {
         baseIso = units.substr(since + 7);
     }
     int baseYear = 0, baseMonth = 0, baseDay = 0, baseHour = 0, baseMinute = 0, baseSecond = 0;
-    if (std::sscanf(baseIso.c_str(), "%d-%d-%dT%d:%d:%d", &baseYear, &baseMonth, &baseDay,
-                    &baseHour, &baseMinute, &baseSecond) < 3)
-        return closeFail();
+    // sscanf-free ISO date parse (warn-clean on MSVC): strict digit runs,
+    // fail closed on anything else.
+    {
+        const auto takeNumber = [&](std::size_t pos, std::size_t width, int& out) {
+            if (pos + width > baseIso.size()) return false;
+            int value = 0;
+            for (std::size_t i = 0; i < width; ++i) {
+                const char digit = baseIso[pos + i];
+                if (digit < '0' || digit > '9') return false;
+                value = value * 10 + (digit - '0');
+            }
+            out = value;
+            return true;
+        };
+        // Minimum "YYYY-MM-DD"; time part optional (defaults midnight).
+        if (!takeNumber(0, 4, baseYear) || baseIso.size() < 10 || baseIso[4] != '-' ||
+            !takeNumber(5, 2, baseMonth) || baseIso[7] != '-' || !takeNumber(8, 2, baseDay))
+            return closeFail();
+        if (baseIso.size() > 10) {
+            if (baseIso.size() < 19 || baseIso[10] != 'T' || !takeNumber(11, 2, baseHour) ||
+                baseIso[13] != ':' || !takeNumber(14, 2, baseMinute) || baseIso[16] != ':' ||
+                !takeNumber(17, 2, baseSecond))
+                return closeFail();
+        }
+    }
     // Civil-to-epoch via days-from-civil (Howard Hinnant), UTC, no libc TZ.
     const auto daysFromCivil = [](int y, unsigned m, unsigned d) {
         y -= m <= 2 ? 1 : 0;

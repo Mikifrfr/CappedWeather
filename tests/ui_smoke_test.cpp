@@ -28,6 +28,8 @@
 #include "app/offline_pack.hpp"
 #include "core/volume_spill.hpp"
 #include "core/product.hpp"
+#include "core/goes_frame.hpp"
+#include "core/hrrr_frame.hpp"
 
 #include "app/alert_center.hpp"
 #include "core/lightning_overlay.hpp"
@@ -57,6 +59,7 @@
 #include <QTabWidget>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QPixmap>
 #include <QTimeZone>
 #include <QToolButton>
 
@@ -65,6 +68,8 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <string>
 #include <optional>
 #include <vector>
 
@@ -1538,6 +1543,8 @@ static bool testContextMenuToolModes(QString* error) {
 
 int main(int argc, char** argv) {
     QApplication application(argc, argv);
+    // Unbuffered stdout: crash runs must keep their progress markers.
+    std::cout << std::unitbuf;
     application.setOrganizationName(QStringLiteral("CappedWeatherTests"));
     application.setApplicationName(QStringLiteral("CappedWeatherUiSmoke"));
     QStandardPaths::setTestModeEnabled(true);
@@ -1554,6 +1561,17 @@ int main(int argc, char** argv) {
     if (auto* liveOverlays = window.findChild<WeatherOverlaySource*>()) liveOverlays->disconnect();
     if (auto* liveGlm = window.findChild<GlmSource*>()) liveGlm->disconnect();
     if (auto* liveSpc = window.findChild<SpcConvectiveSource*>()) liveSpc->disconnect();
+    // Same treatment for every source added since: context layers (model
+    // HRRR, satellite GOES, METAR, NHC/WPC/HMS/DAT) fetch live payloads on
+    // the overlay timer too, and a 4 MB GOES frame landing mid-suite costs
+    // seconds of main-thread parsing per panel repaint.
+    if (auto* liveNhc = window.findChild<NhcCycloneSource*>()) liveNhc->disconnect();
+    if (auto* liveWpc = window.findChild<WpcEroSource*>()) liveWpc->disconnect();
+    if (auto* liveHms = window.findChild<HmsSmokeSource*>()) liveHms->disconnect();
+    if (auto* liveDat = window.findChild<DatPathSource*>()) liveDat->disconnect();
+    if (auto* liveHrrr = window.findChild<HrrrSource*>()) liveHrrr->disconnect();
+    if (auto* liveGoes = window.findChild<GoesSource*>()) liveGoes->disconnect();
+    if (auto* liveMetar = window.findChild<MetarSource*>()) liveMetar->disconnect();
 
     auto* map = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
     auto* secondMap = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
@@ -3509,6 +3527,69 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         // Restore main-map view that preset/speed probes may have touched.
         map->activated();
         application.processEvents();
+        // Raster-context paint: committed GOES/HRRR fixtures through the
+        // production frame path (set + repaint + grab). Deterministic proof
+        // the painters survive real grid shapes, row orders, and value
+        // ranges; live frames share this exact path.
+        {
+            const std::string roots[] = {
+                "tests/fixtures/",
+                "../tests/fixtures/",
+                "../../tests/fixtures/",
+            };
+            const auto findFixture = [&](const char* name) {
+                for (const auto& root : roots) {
+                    const std::string path = root + name;
+                    std::ifstream file(path, std::ios::binary);
+                    if (file) return path;
+                }
+                return std::string{};
+            };
+            if (goesReaderAvailable()) {
+                const auto goesPath = findFixture("goes13_ok.nc");
+                if (goesPath.empty()) {
+                    std::cerr << "GOES fixture missing\n";
+                    return 1;
+                }
+                const auto frame = readGoesRad(goesPath);
+                if (!frame.has_value()) {
+                    std::cerr << "GOES fixture did not parse\n";
+                    return 1;
+                }
+                map->setGoesVisible(true);
+                map->setGoesFrame(frame);
+                map->setView({-137.0, 30.0}, 4);
+                application.processEvents();
+                const QPixmap goesShot = map->grab();
+                if (goesShot.isNull()) {
+                    std::cerr << "GOES frame paint produced nothing\n";
+                    return 1;
+                }
+                map->setGoesFrame(std::nullopt);
+            }
+            if (hrrrReaderAvailable()) {
+                const auto hrrrPath = findFixture("hrrr_refc_ok.nc");
+                if (hrrrPath.empty()) {
+                    std::cerr << "HRRR fixture missing\n";
+                    return 1;
+                }
+                const auto frame = readHrrrRefc(hrrrPath);
+                if (!frame.has_value()) {
+                    std::cerr << "HRRR fixture did not parse\n";
+                    return 1;
+                }
+                map->setHrrrVisible(true);
+                map->setHrrrFrame(frame);
+                map->setView({-97.28, 35.33}, 6);
+                application.processEvents();
+                const QPixmap hrrrShot = map->grab();
+                if (hrrrShot.isNull()) {
+                    std::cerr << "HRRR frame paint produced nothing\n";
+                    return 1;
+                }
+                map->setHrrrFrame(std::nullopt);
+            }
+        }
         std::cout << "P1 hermetic UI checks passed\n";
     }
 

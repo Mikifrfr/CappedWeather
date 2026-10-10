@@ -1,4 +1,5 @@
 #include "core/goes_frame.hpp"
+#include "core/hdf5_serial.hpp"
 
 #ifdef CAPPEDWEATHER_HAS_NETCDF
 #include <netcdf.h>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace cappedweather {
 
@@ -20,6 +22,9 @@ bool goesReaderAvailable() {
 
 std::optional<GoesFrame> readGoesRad(const std::string& path) {
 #ifdef CAPPEDWEATHER_HAS_NETCDF
+    // netCDF-4 rides on HDF5 global state (see hdf5_serial.hpp): serialize
+    // against worker-pool ODIM/GLM decodes. The vcpkg HDF5 has no threadsafety.
+    const Hdf5SerialLock hdf5Lock;
     int ncid = -1;
     if (nc_open(path.c_str(), NC_NOWRITE, &ncid) != NC_NOERR) return std::nullopt;
     const auto closeFail = [&] {
