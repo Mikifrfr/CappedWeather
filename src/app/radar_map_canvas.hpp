@@ -225,14 +225,23 @@ public:
     void setHrrrVisible(bool visible);
     [[nodiscard]] bool hrrrVisible() const { return hrrrVisible_; }
     [[nodiscard]] bool hrrrHasFrame() const { return hrrrFrame_.has_value(); }
+    [[nodiscard]] long long hrrrValidEpoch() const {
+        return hrrrFrame_ ? hrrrFrame_->validEpochSeconds : 0;
+    }
     void setGoesFrame(std::optional<GoesFrame> frame);
     void setGoesVisible(bool visible);
     [[nodiscard]] bool goesVisible() const { return goesVisible_; }
     [[nodiscard]] bool goesHasFrame() const { return goesFrame_.has_value(); }
+    [[nodiscard]] long long goesValidEpoch() const {
+        return goesFrame_ ? goesFrame_->validEpochSeconds : 0;
+    }
     void setMosaicFrame(std::optional<MosaicFrame> frame);
     void setMosaicVisible(bool visible);
     [[nodiscard]] bool mosaicVisible() const { return mosaicVisible_; }
     [[nodiscard]] bool mosaicHasFrame() const { return mosaicFrame_.has_value(); }
+    [[nodiscard]] long long mosaicValidEpoch() const {
+        return mosaicFrame_ ? mosaicFrame_->validEpochSeconds : 0;
+    }
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }

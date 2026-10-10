@@ -91,6 +91,24 @@ int main(int argc, char** argv) {
         std::cerr << "metar timeout: no stations near KTLX\n";
         return 6;
     }
+    // Raster-context first light: HRRR (168 KB subset), GOES (4 MB Rad),
+    // mosaic (3.4 MB PNG) all ride the overlay refresh at startup. Fail
+    // closed per layer so a sick feed names itself instead of blocking the
+    // rest of the verification.
+    if (!waitUntil(application, 180000, [&] { return map->hrrrHasFrame(); })) {
+        std::cerr << "hrrr timeout: no model frame\n";
+        return 11;
+    }
+    if (!waitUntil(application, 240000, [&] { return map->goesHasFrame(); })) {
+        std::cerr << "goes timeout: no satellite frame\n";
+        return 12;
+    }
+    if (!waitUntil(application, 240000, [&] { return map->mosaicHasFrame(); })) {
+        std::cerr << "mosaic timeout: no national frame\n";
+        return 13;
+    }
+    std::cout << "raster=" << map->hrrrValidEpoch() << ',' << map->goesValidEpoch() << ','
+              << map->mosaicValidEpoch() << '\n';
     map->setView(QPointF(-97.5, 35.5), 7);
     waitUntil(application, 8000, [&] { return map->tiltDiagnostics().size() >= 4; });
     application.processEvents();
