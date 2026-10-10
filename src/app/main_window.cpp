@@ -3590,6 +3590,79 @@ void MainWindow::showSettingsDialog() {
     basemapForm->addRow(QStringLiteral("CARTO API key"), basemapKey);
     basemapForm->addRow(QStringLiteral("Custom template"), basemapTemplate);
     basemapForm->addRow(QStringLiteral("Custom attribution"), basemapCredit);
+    // One-click radar-mosaic presets for the Custom slot (keyless by design:
+    // IEM US NEXRAD mosaic, RainViewer global mosaic which blends ECCC
+    // radars over Canada). Documented in docs/europe-sources.md.
+    auto* presetRow = new QWidget(&dialog);
+    auto* presetLayout = new QHBoxLayout(presetRow);
+    presetLayout->setContentsMargins(0, 0, 0, 0);
+    auto* iemButton = new QPushButton(QStringLiteral("IEM US mosaic"), presetRow);
+    iemButton->setToolTip(QStringLiteral("Fill the Custom template with the Iowa Environmental Mesonet "
+                                          "NEXRAD mosaic (no key needed)."));
+    auto* rainviewerButton = new QPushButton(QStringLiteral("RainViewer global"), presetRow);
+    rainviewerButton->setToolTip(QStringLiteral("Fetch the latest RainViewer frame list (anonymous) and fill "
+                                                "the Custom template with the newest global mosaic, "
+                                                "including Canadian ECCC radars."));
+    auto* presetStatus = new QLabel(presetRow);
+    presetStatus->setWordWrap(true);
+    presetLayout->addWidget(iemButton);
+    presetLayout->addWidget(rainviewerButton);
+    presetLayout->addWidget(presetStatus, 1);
+    basemapForm->addRow(QStringLiteral("Mosaic presets"), presetRow);
+    connect(iemButton, &QPushButton::clicked, &dialog,
+            [basemapProvider, basemapTemplate, basemapCredit, presetStatus, syncBasemapRows] {
+                const auto presets = basemapPresets();
+                if (presets.isEmpty()) return;
+                basemapProvider->setCurrentIndex(
+                    basemapProvider->findData(static_cast<int>(BasemapProvider::Custom)));
+                basemapTemplate->setText(presets.front().templateUrl);
+                basemapCredit->setText(presets.front().attribution);
+                syncBasemapRows();
+                presetStatus->setText(QStringLiteral("IEM template filled. Apply with OK."));
+            });
+    connect(rainviewerButton, &QPushButton::clicked, &dialog,
+            [basemapProvider, basemapTemplate, basemapCredit, presetStatus, syncBasemapRows,
+             rainviewerButton] {
+                rainviewerButton->setEnabled(false);
+                presetStatus->setText(QStringLiteral("Fetching RainViewer frames…"));
+                auto* nam = new QNetworkAccessManager(rainviewerButton);
+                auto* reply = nam->get(makeRequest(
+                    QUrl(QStringLiteral("https://api.rainviewer.com/public/weather-maps.json")),
+                    QStringLiteral("application/json"), QStringLiteral(" (basemap preset)")));
+                QTimer::singleShot(15'000, reply, [reply]() {
+                    if (reply->isRunning()) reply->abort();
+                });
+                QObject::connect(
+                    reply, &QNetworkReply::finished, rainviewerButton,
+                    [reply, nam, basemapProvider, basemapTemplate, basemapCredit, presetStatus,
+                     syncBasemapRows, rainviewerButton]() {
+                        rainviewerButton->setEnabled(true);
+                        if (reply->error() != QNetworkReply::NoError) {
+                            presetStatus->setText(QStringLiteral("RainViewer fetch failed: %1")
+                                                      .arg(reply->errorString()));
+                            reply->deleteLater();
+                            nam->deleteLater();
+                            return;
+                        }
+                        QString error;
+                        const auto templateUrl = rainviewerTileTemplate(reply->readAll(), &error);
+                        reply->deleteLater();
+                        nam->deleteLater();
+                        if (templateUrl.isEmpty()) {
+                            presetStatus->setText(
+                                QStringLiteral("RainViewer resolve failed: %1").arg(error));
+                            return;
+                        }
+                        basemapProvider->setCurrentIndex(basemapProvider->findData(
+                            static_cast<int>(BasemapProvider::Custom)));
+                        basemapTemplate->setText(templateUrl);
+                        basemapCredit->setText(QStringLiteral(
+                            "Radar (c) RainViewer + ECCC/NWS/data providers"));
+                        syncBasemapRows();
+                        presetStatus->setText(
+                            QStringLiteral("RainViewer template filled. Apply with OK."));
+                    });
+            });
     memoryCache->setToolTip(QStringLiteral("Requires restart: the map tile store reads this once at first use."));
     diskCache->setToolTip(QStringLiteral("Requires restart: the map tile store reads this once at first use."));
 

@@ -4,6 +4,30 @@ All endpoints below were probed live on 2026-09-05. No API keys were used.
 User direction: verify access first, skip the composite-layer detour, go
 straight at ODIM polar volumes.
 
+## Radar-mosaic basemap presets (verified live 2026-10-10)
+
+Settings: Basemap keeps a Custom XYZ slot with one-click presets, all
+keyless and verified with HTTP 200 PNG tiles:
+
+- IEM US NEXRAD mosaic: fixed template
+  `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png`,
+  credit Iowa Environmental Mesonet. CONUS reflectivity composite, 5-minute
+  refresh on IEM's side.
+- RainViewer global mosaic (covers Canadian ECCC radars plus 1200+ radars
+  in 150+ countries): anonymous metadata at
+  `https://api.rainviewer.com/public/weather-maps.json` pins the newest
+  past frame to a static template
+  `{host}{path}/256/{z}/{x}/{y}/2/1_1.png` (frame paths rotate every
+  5 minutes and are hash-based; timestamps went 410 Gone in 2026, so the
+  path always comes from the payload). The preset button fetches and fills
+  it; `rainviewerTileTemplate()` is hermetic-tested on a live-shaped
+  payload and fails closed on bad JSON or empty frame lists.
+
+Both flow through the production tile URL builder, so offline packs and
+the painted attribution pick them up unchanged. They render radar on a
+dark background: context for chasing, not a replacement for Level II
+volumes.
+
 ## What is open (verified)
 
 ### 1. OPERA single-site volumes on anonymous S3: the primary path

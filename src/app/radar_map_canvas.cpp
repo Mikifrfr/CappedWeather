@@ -7,6 +7,9 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QNetworkDiskCache>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QAccessible>
 #include <QAction>
 #include <QApplication>
@@ -413,12 +416,13 @@ BasemapProvider effectiveProvider(const BasemapProvider selected, const QString&
                                   const QString& customTemplate) {
     // No key, no CARTO: keyless CARTO tiles come back watermarked, so fall
     // back to Esri instead of showing branded tiles. Same when the custom
-    // template is empty (nothing to substitute).
+    // template is empty (nothing to substitute). A filled custom template
+    // serves without any CARTO key: radar-mosaic presets (IEM, RainViewer)
+    // are keyless by design and must not fall back.
     if (selected == BasemapProvider::Custom && customTemplate.isEmpty())
         return BasemapProvider::EsriDark;
     if (apiKey.isEmpty() && (selected == BasemapProvider::CartoDark ||
-                             selected == BasemapProvider::CartoLight ||
-                             selected == BasemapProvider::Custom))
+                             selected == BasemapProvider::CartoLight))
         return BasemapProvider::EsriDark;
     return selected;
 }
@@ -454,6 +458,47 @@ QString basemapAttribution() {
         return basemapAttribution(effectiveProvider(provider, apiKey, customTemplate),
                                   basemapCustomAttributionFromSettings());
     return basemapAttribution(effectiveProvider(provider, apiKey, customTemplate), QString());
+}
+
+QVector<BasemapPreset> basemapPresets() {
+    // Static radar-mosaic templates for the Custom slot. Both verified live
+    // (HTTP 200 PNG tiles, Oct 2026): IEM is a fixed XYZ path, RainViewer
+    // needs its rotating frame path resolved first via
+    // rainviewerTileTemplate(). Neither needs a key.
+    return {
+        {QStringLiteral("IEM US mosaic"),
+         QStringLiteral("https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/"
+                        "nexrad-n0q-900913/{z}/{x}/{y}.png"),
+         QStringLiteral("Radar mosaic (c) Iowa Environmental Mesonet")},
+    };
+}
+
+QString rainviewerTileTemplate(const QByteArray& weatherMapsJson, QString* error) {
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(weatherMapsJson, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        if (error)
+            *error = QStringLiteral("Invalid RainViewer metadata: %1").arg(parseError.errorString());
+        return {};
+    }
+    const auto past =
+        document.object().value(QStringLiteral("radar")).toObject().value(QStringLiteral("past")).toArray();
+    if (past.isEmpty()) {
+        if (error) *error = QStringLiteral("RainViewer metadata has no past frames");
+        return {};
+    }
+    // Latest frame is last; paths are hash-based (timestamps went 410 Gone
+    // in 2026), so the host + path must come from the payload, never be
+    // reconstructed.
+    const auto frame = past.at(past.size() - 1).toObject();
+    const auto host = document.object().value(QStringLiteral("host")).toString();
+    const auto path = frame.value(QStringLiteral("path")).toString();
+    if (host.isEmpty() || path.isEmpty() || !path.startsWith(QStringLiteral("/"))) {
+        if (error) *error = QStringLiteral("RainViewer frame is missing host or path");
+        return {};
+    }
+    if (error) error->clear();
+    return host + path + QStringLiteral("/256/{z}/{x}/{y}/2/1_1.png");
 }
 
 // Same linkage treatment as basemapTileUrls above: declared in the header,

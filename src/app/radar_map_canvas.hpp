@@ -81,6 +81,20 @@ BasemapTileUrls basemapTileUrls(int zoom, int x, int y, BasemapProvider provider
 // OSM + CARTO credit to stay visible).
 QString basemapAttribution();
 QString basemapAttribution(BasemapProvider provider, const QString& customAttribution);
+// One-click custom-template gallery for the Settings dialog. Static presets
+// fill the template + attribution fields and switch the provider to Custom;
+// the RainViewer mosaic needs one anonymous metadata fetch first (its tile
+// path rotates every 5 minutes), resolved by rainviewerTileTemplate().
+struct BasemapPreset {
+    QString name;
+    QString templateUrl;  // {z}/{x}/{y} placeholders, ready for Custom
+    QString attribution;
+};
+QVector<BasemapPreset> basemapPresets();
+// Resolves the latest RainViewer past frame from a weather-maps.json payload
+// (https://api.rainviewer.com/public/weather-maps.json) into a static Custom
+// template. Pure, hermetic-testable; empty template + error on bad input.
+QString rainviewerTileTemplate(const QByteArray& weatherMapsJson, QString* error = nullptr);
 // Interface text scale multiplier for all canvas HUD painters.
 void setHudFontScale(double scale);
 

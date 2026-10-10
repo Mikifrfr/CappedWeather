@@ -510,6 +510,42 @@ static bool testBasemapTileUrls(QString* error) {
         *error = QStringLiteral("keyless settings should fall back to Esri, keyed to CARTO");
         return false;
     }
+    // Preset gallery: IEM template is a fixed XYZ path that serves without a
+    // CARTO key (keyless Custom must not fall back to Esri), and the
+    // RainViewer resolver pins the newest past frame from live-shaped JSON.
+    const auto presets = basemapPresets();
+    if (presets.isEmpty() || !presets.front().templateUrl.contains(QStringLiteral("{z}/{x}/{y}"))) {
+        *error = QStringLiteral("basemap presets should ship a usable XYZ template");
+        return false;
+    }
+    const auto iem = basemapTileUrls(4, 4, 5, BasemapProvider::Custom, QString(),
+                                     presets.front().templateUrl);
+    if (!iem.base.toString().contains(QStringLiteral("mesonet.agron.iastate.edu")) ||
+        !iem.base.toString().endsWith(QStringLiteral("/4/4/5.png"))) {
+        *error = QStringLiteral("IEM preset should substitute z/x/y, got %1")
+                      .arg(iem.base.toString());
+        return false;
+    }
+    const QByteArray rainviewer = R"JSON({"host":"https://tilecache.rainviewer.com","radar":{"past":[
+      {"time":1791639600,"path":"/v2/radar/317ddcb9a978"},{"time":1791640200,"path":"/v2/radar/09738d02d97f"}]}})JSON";
+    QString rainError;
+    const auto rainTemplate = rainviewerTileTemplate(rainviewer, &rainError);
+    if (!rainError.isEmpty() ||
+        rainTemplate !=
+            QStringLiteral("https://tilecache.rainviewer.com/v2/radar/09738d02d97f/"
+                           "256/{z}/{x}/{y}/2/1_1.png")) {
+        *error = QStringLiteral("RainViewer resolver should pin the newest frame, got %1 (%2)")
+                      .arg(rainTemplate, rainError);
+        return false;
+    }
+    if (!rainviewerTileTemplate(QByteArray("{bad json"), &rainError).isEmpty() ||
+        rainError.isEmpty() ||
+        !rainviewerTileTemplate(QByteArray(R"JSON({"host":"https://x","radar":{"past":[]}})JSON"),
+                                &rainError)
+             .isEmpty()) {
+        *error = QStringLiteral("RainViewer resolver should fail closed on bad input");
+        return false;
+    }
     return true;
 }
 
