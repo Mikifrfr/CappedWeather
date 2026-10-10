@@ -46,7 +46,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 - NWS DAT tornado survey paths (last 90 days) in EF severity colors.
 - HRRR simulated reflectivity (TDS NetCDF subset, model context under echo with valid hour).
 - IEM NEXRAD national mosaic (5-minute N0Q composite, observed context under echo with scan time).
-- GOES ABI infrared cloud tops (C13/C07 brightness temperature, observed context under echo with scan time).
+- GOES ABI infrared cloud tops (C13/C07/C08 brightness temperature, observed context under echo with scan time).
 - RAOB sounding hodograph (IEM 00Z/12Z) with sounding-vs-VAD SRH ground truth and freezing level.
 - GOES GLM lightning-jump cells (2σ LJA) fused with reflectivity objects ([engine](docs/lightning-jump-engine.md)); honestly disabled without netCDF, live out of the box in releases.
 - Meteoalarm warnings for European sites; 130+ bucket-active OPERA radars as first-class sessions (CC BY 4.0 EUMETNET, [sources](docs/europe-sources.md)).

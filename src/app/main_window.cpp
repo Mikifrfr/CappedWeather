@@ -17,6 +17,7 @@
 #include "app/hrrr_source.hpp"
 #include "app/goes_source.hpp"
 #include "app/mosaic_source.hpp"
+#include "app/palette_import.hpp"
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
 #include "app/metar_source.hpp"
@@ -1805,7 +1806,7 @@ void MainWindow::buildUi() {
     auto* paletteButton = new QToolButton(controlBody);
     paletteButton->setObjectName(QStringLiteral("paletteButton"));
     paletteButton->setText(QStringLiteral("Palette…"));
-    paletteButton->setToolTip(QStringLiteral("Import a value,color palette text file"));
+    paletteButton->setToolTip(QStringLiteral("Import a value,color palette text file or a GRLevelX color table (.pal)"));
     paletteButton->setMinimumWidth(0);
     paletteButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(paletteButton, &QToolButton::clicked, this, &MainWindow::importCustomPalette);
@@ -5373,8 +5374,32 @@ void MainWindow::importCustomPalette() {
         QMessageBox::warning(this, QStringLiteral("Palette error"), QStringLiteral("Could not open %1").arg(path));
         return;
     }
-    QVector<RadarMapCanvas::PaletteStop> stops;
     QTextStream stream(&file);
+    const QString text = stream.readAll();
+    // GRLevelX color tables take their own path (detected by statement
+    // keywords); everything else stays on the value,color CSV path.
+    if (looksLikeGrColorTable(text)) {
+        QString parseError;
+        const auto table = parseGrColorTable(text, &parseError);
+        if (!table.has_value()) {
+            QMessageBox::warning(this, QStringLiteral("Palette error"), parseError);
+            return;
+        }
+        for (auto* panel : maps_) {
+            panel->setCustomPalette(table->stops);
+            panel->setPalette(RadarMapCanvas::PaletteKind::Custom);
+        }
+        paletteCombo_->setCurrentIndex(static_cast<int>(RadarMapCanvas::PaletteKind::Custom));
+        refreshPalettePreview();
+        const QString what =
+            table->product.isEmpty()
+                ? QStringLiteral("%1 palette stops").arg(table->stops.size())
+                : QStringLiteral("%1 palette stops (%2)").arg(table->stops.size()).arg(table->product);
+        statusBar()->showMessage(QStringLiteral("Imported %1 from %2").arg(what, path), 5000);
+        return;
+    }
+    QVector<RadarMapCanvas::PaletteStop> stops;
+    stream.seek(0);
     int lineNumber = 0;
     while (!stream.atEnd()) {
         ++lineNumber;

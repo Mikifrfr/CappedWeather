@@ -237,6 +237,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/goes_source.hpp
             src/app/mosaic_source.cpp
             src/app/mosaic_source.hpp
+            src/app/palette_import.cpp
+            src/app/palette_import.hpp
             src/app/offline_pack.cpp
             src/app/offline_pack.hpp
             src/app/case_pack.cpp

@@ -12,6 +12,7 @@
 #include "app/hrrr_source.hpp"
 #include "app/goes_source.hpp"
 #include "app/mosaic_source.hpp"
+#include "app/palette_import.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2435,6 +2436,55 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         if (latestGoesSlot(at(15, 37)) != at(15, 25) || latestGoesSlot(at(15, 4)) != at(14, 50) ||
             latestGoesSlot(QDateTime()).isValid()) {
             std::cerr << "GOES slot clock is wrong\n";
+            return 1;
+        }
+    }
+    // GRLevelX color tables: header plus Color/Color4/SolidColor rules in
+    // the live RTWX_REF shape (comments, mixed case, trailing junk).
+    {
+        const QString gr =
+            QStringLiteral("; RTWX-style reflectivity curve\n"
+                           "Product: BR\n"
+                           "Units: DBZ\n"
+                           "Step: 5\n"
+                           "Color: -15 115 98 130\n"
+                           "color: 0 150 155 180\n"
+                           "Color: 30 11 141 15\n"
+                           "Color: 20 82 214 162 90 200 170\n"
+                           "Color4: 30 11 141 15 200\n"
+                           "SolidColor: 40 234 210 4\n"
+                           "SOLIDCOLOR4: 50 227 0 0 255\n");
+        if (!looksLikeGrColorTable(gr) || looksLikeGrColorTable(QStringLiteral("-30,#04e9e7\n"))) {
+            std::cerr << "GR color-table detection is wrong\n";
+            return 1;
+        }
+        QString parseError;
+        const auto table = parseGrColorTable(gr, &parseError);
+        if (!table.has_value() || table->product != QStringLiteral("BR") ||
+            table->units != QStringLiteral("DBZ") || table->stops.size() != 7) {
+            std::cerr << "GR color-table parse failed: " << parseError.toStdString() << '\n';
+            return 1;
+        }
+        // Sorted stops with exact values and colors (RGB2/alpha collapse;
+        // the out-of-order 30/20 pair plus the duplicate 30 prove sorting).
+        const double values[] = {-15.0, 0.0, 20.0, 30.0, 30.0, 40.0, 50.0};
+        const int reds[] = {115, 150, 82, 11, 11, 234, 227};
+        for (int i = 0; i < 7; ++i) {
+            if (std::abs(table->stops.at(i).value - values[i]) > 1e-9 ||
+                table->stops.at(i).color.red() != reds[i]) {
+                std::cerr << "GR color-table stop is wrong at index " << i << '\n';
+                return 1;
+            }
+        }
+        if (parseGrColorTable(QStringLiteral("Color: 0 300 0 0\nColor: 5 0 0 0\n"),
+                              &parseError)
+                .has_value() ||
+            parseGrColorTable(QStringLiteral("Bogus: 1 2 3\nColor: 0 0 0 0\nColor: 5 0 0 0\n"),
+                              &parseError)
+                .has_value() ||
+            parseGrColorTable(QStringLiteral("Color: 0 0 0 0\n"), &parseError).has_value() ||
+            parseError.isEmpty()) {
+            std::cerr << "GR color-table garbage should fail closed\n";
             return 1;
         }
     }
