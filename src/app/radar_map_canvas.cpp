@@ -4871,8 +4871,9 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
         }
     }
     if (datVisible_) {
-        // Survey lines win over polygons (a path inside a watch polygon is
-        // the more specific hit) but lose to live warnings above.
+        // Lowest click priority alongside the other background context:
+        // live warnings, cyclones, and outlooks all win the click above.
+        // Ground truth, but stale by nature: never steal a live click.
         const DatPath* best = nullptr;
         double bestDistance = 10.0;
         for (const auto& path : datPaths_) {
