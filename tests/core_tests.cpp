@@ -9,6 +9,7 @@
 #include "core/bright_band.hpp"
 #include "core/bunkers.hpp"
 #include "core/hail_swath.hpp"
+#include "core/sounding.hpp"
 #include "core/srh.hpp"
 #include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
@@ -993,6 +994,102 @@ void testHailSwaths() {
                    std::numeric_limits<double>::quiet_NaN());
         bad.update(tracks, {coreAt(35.01, -97.0, 2)}, -5.0);
         assert(bad.swaths().empty());
+    }
+}
+
+void testSounding() {
+    // SRH parity: the same sheared hodograph through sounding levels must
+    // integrate identically to the VAD path (18.75 / 84.38 closed form).
+    // Sounding winds ride knots + FROM degrees; heights go MSL with the
+    // first level as the AGL anchor.
+    {
+        Sounding sounding;
+        sounding.stationId = "KOUN";
+        sounding.validEpochSeconds = 1000;
+        const double winds[][3] = {
+            {550.0, 11.25, 0.0}, {1050.0, 13.75, 0.0}, {1800.0, 17.5, 0.0}, {2800.0, 22.5, 0.0}};
+        for (const auto& [msl, u, v] : winds) {
+            SoundingLevel level;
+            level.heightMslMeters = msl;
+            level.tempCelsius = 10.0;
+            // u/vwesterly-equivalent: FROM 270 at the matching speed.
+            const double speed = std::hypot(u, v);
+            level.directionFromDegrees =
+                std::fmod(std::atan2(-u, -v) * 180.0 / 3.14159265358979323846 + 360.0, 360.0);
+            level.speedKnots = speed / 0.5144444444444445;
+            sounding.levels.push_back(level);
+        }
+        const auto points = soundingWindPoints(sounding);
+        assert(points.size() == 4);
+        assert(std::abs(points.front().aglMeters - 0.0) < 0.01);
+        assert(std::abs(points.back().aglMeters - 2250.0) < 0.01);
+        BunkersMotion motion;
+        motion.valid = true;
+        motion.weakShear = false;
+        motion.rightFromDegrees = 301.0;
+        motion.rightSpeedMps = 14.58;
+        motion.quality = VadQuality::Good;
+        double cx = 0.0, cy = 0.0;
+        assert(resolveStormMotionUv(motion, cx, cy));
+        const auto srh = integrateSrhPoints(points, cx, cy, {});
+        assert(srh.valid && srh.srh01Valid && srh.srh03Valid);
+        assert(srh.quality == VadQuality::Good);
+        assert(std::abs(srh.srh01M2PerS2 - 18.75) < 1.5);
+        assert(std::abs(srh.srh03M2PerS2 - 84.38) < 3.0);
+    }
+    // Windless levels never steer: null winds are skipped, not zeroed.
+    {
+        Sounding sounding;
+        SoundingLevel calm;
+        calm.heightMslMeters = 500.0;
+        calm.tempCelsius = 10.0;
+        sounding.levels.push_back(calm);
+        SoundingLevel windy;
+        windy.heightMslMeters = 1000.0;
+        windy.tempCelsius = 8.0;
+        windy.directionFromDegrees = 270.0;
+        windy.speedKnots = 20.0;
+        sounding.levels.push_back(windy);
+        const auto points = soundingWindPoints(sounding);
+        assert(points.size() == 1);
+        assert(std::abs(points.front().aglMeters - 500.0) < 0.01);
+    }
+    // Freezing level: linear interpolation of the first upward crossing.
+    {
+        Sounding sounding;
+        const double profile[][2] = {{500.0, 5.0}, {1500.0, 2.0}, {2500.0, -2.0}, {3500.0, -6.0}};
+        for (const auto& [msl, temp] : profile) {
+            SoundingLevel level;
+            level.heightMslMeters = msl;
+            level.tempCelsius = temp;
+            sounding.levels.push_back(level);
+        }
+        // Crosses between 1500 (2 C) and 2500 (-2 C): 2000 m.
+        assert(std::abs(soundingFreezingLevelMsl(sounding) - 2000.0) < 0.01);
+    }
+    // Never crosses: NaN, never a guess. All-below-freezing included.
+    {
+        Sounding warm;
+        SoundingLevel a;
+        a.heightMslMeters = 500.0;
+        a.tempCelsius = 10.0;
+        SoundingLevel b;
+        b.heightMslMeters = 1500.0;
+        b.tempCelsius = 5.0;
+        warm.levels = {a, b};
+        assert(std::isnan(soundingFreezingLevelMsl(warm)));
+        Sounding cold;
+        SoundingLevel c;
+        c.heightMslMeters = 500.0;
+        c.tempCelsius = -5.0;
+        SoundingLevel d;
+        d.heightMslMeters = 1500.0;
+        d.tempCelsius = -10.0;
+        cold.levels = {c, d};
+        assert(std::isnan(soundingFreezingLevelMsl(cold)));
+        Sounding empty;
+        assert(std::isnan(soundingFreezingLevelMsl(empty)));
+        assert(soundingWindPoints(empty).empty());
     }
 }
 
@@ -2405,6 +2502,7 @@ int main() {
     testBrightBand();
     testBunkers();
     testHailSwaths();
+    testSounding();
     testSrh();
     testTbss();
     testZdrColumns();

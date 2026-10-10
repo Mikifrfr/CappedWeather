@@ -47,6 +47,7 @@ add_library(cappedweather_core STATIC
     src/core/bright_band.cpp
     src/core/bunkers.cpp
     src/core/hail_swath.cpp
+    src/core/sounding.cpp
     src/core/srh.cpp
     src/core/tbss_detector.cpp
     src/core/zdr_column.cpp
@@ -219,6 +220,10 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/wpc_ero.hpp
             src/app/hms_smoke.cpp
             src/app/hms_smoke.hpp
+            src/app/sounding_source.cpp
+            src/app/sounding_source.hpp
+            src/app/hodograph_widget.cpp
+            src/app/hodograph_widget.hpp
             src/app/dat_paths.cpp
             src/app/dat_paths.hpp
             src/app/offline_pack.cpp

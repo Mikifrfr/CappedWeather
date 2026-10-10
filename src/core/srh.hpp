@@ -40,6 +40,22 @@ struct SrhConfig {
     int minPairs03 = 2;
 };
 
+// Sorted wind limb shared by every SRH input (VAD rows, soundings):
+// height above ground plus storm-relative-ready u/v components.
+struct SrhWindPoint {
+    double aglMeters = 0.0;
+    double uMps = 0.0;
+    double vMps = 0.0;
+};
+
+// Storm motion to (cx, cy) under the same right-mover/weak-shear choice
+// the scan dialog prints. False when the motion is unusable.
+bool resolveStormMotionUv(const BunkersMotion& stormMotion, double& cxMps, double& cyMps);
+// Trapezoidal pair-sum over caller-supplied points (shared by VAD and
+// sounding paths so ground truth and estimate integrate identically).
+SrhEstimate integrateSrhPoints(std::vector<SrhWindPoint> points, double cxMps, double cyMps,
+                              SrhConfig config = {});
+
 SrhEstimate estimateSrh(const std::vector<VadLevel>& levels, const BunkersMotion& stormMotion,
                         double radarElevationMeters, SrhConfig config = {});
 

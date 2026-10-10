@@ -14,6 +14,8 @@
 #include "app/wpc_ero.hpp"
 #include "app/hms_smoke.hpp"
 #include "app/dat_paths.hpp"
+#include "app/sounding_source.hpp"
+#include "app/hodograph_widget.hpp"
 #include "app/metar_source.hpp"
 #include "app/placefile_source.hpp"
 #include "app/archive_source.hpp"
@@ -1765,6 +1767,11 @@ void MainWindow::buildUi() {
     scanDetailsButton->setToolTip(QStringLiteral("Per-tilt table plus VAD wind profile for the active volume"));
     connect(scanDetailsButton, &QToolButton::clicked, this, [this] { showScanDiagnostics(); });
     scanRow->addWidget(scanDetailsButton);
+    auto* soundingButton = new QToolButton(controlBody);
+    soundingButton->setText(QStringLiteral("Sounding"));
+    soundingButton->setToolTip(QStringLiteral("RAOB hodograph plus sounding SRH ground truth and freezing level"));
+    connect(soundingButton, &QToolButton::clicked, this, [this] { showSoundingDialog(); });
+    scanRow->addWidget(soundingButton);
     displayGroup->addLayout(scanRow);
     displayPageLayout->addSpacing(2);
 
@@ -4919,6 +4926,169 @@ void MainWindow::refreshScanDialog() {
     populateScanDialog();
 }
 
+void MainWindow::showSoundingDialog() {
+    if (soundingDialog_) {
+        soundingDialog_->show();
+        soundingDialog_->raise();
+        soundingDialog_->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setModal(false);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("Sounding hodograph"));
+    dialog->resize(470, 660);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
+    auto* topRow = new QHBoxLayout();
+    auto* stationField = new QLineEdit(dialog);
+    stationField->setPlaceholderText(QStringLiteral("RAOB site, e.g. KOUN"));
+    stationField->setMaxLength(4);
+    stationField->setMaximumWidth(90);
+    stationField->setText(QSettings().value(QStringLiteral("sounding/station")).toString());
+    stationField->setToolTip(QStringLiteral("Radiosonde site ICAO. Stored in your settings."));
+    auto* timeLabel = new QLabel(QStringLiteral("—"), dialog);
+    timeLabel->setObjectName(QStringLiteral("groupCaption"));
+    auto* fetchButton = new QToolButton(dialog);
+    fetchButton->setText(QStringLiteral("Fetch"));
+    topRow->addWidget(new QLabel(QStringLiteral("Station:"), dialog));
+    topRow->addWidget(stationField);
+    topRow->addWidget(timeLabel, 1);
+    topRow->addWidget(fetchButton);
+    layout->addLayout(topRow);
+    auto* hodo = new HodographWidget(dialog);
+    layout->addWidget(hodo, 1);
+    auto* readout = new QLabel(QStringLiteral("No sounding loaded yet."), dialog);
+    readout->setWordWrap(true);
+    readout->setObjectName(QStringLiteral("groupCaption"));
+    readout->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(readout);
+    auto* status = new QLabel(dialog);
+    status->setWordWrap(true);
+    layout->addWidget(status);
+    auto* note = new QLabel(
+        QStringLiteral("Observed-wind ground truth for the VAD storm-relative helicity: the same "
+                       "pair-sum integrates both, so any gap between them is wind error, not math. "
+                       "Null winds never steer. Guidance only, never warnings."),
+        dialog);
+    note->setWordWrap(true);
+    note->setObjectName(QStringLiteral("groupCaption"));
+    layout->addWidget(note);
+    auto* buttons = new QHBoxLayout();
+    buttons->addStretch(1);
+    auto* closeButton = new QToolButton(dialog);
+    closeButton->setText(QStringLiteral("Close"));
+    connect(closeButton, &QToolButton::clicked, dialog, &QDialog::close);
+    buttons->addWidget(closeButton);
+    layout->addLayout(buttons);
+
+    // Shared refresh: hodograph + freezing level + sounding-vs-VAD SRH.
+    // Storm motion comes from the current volume (same choice the scan
+    // dialog prints); without a volume the SRH rows say so.
+    auto refreshReadout = [this, hodo, readout](const Sounding& sounding) {
+        hodo->setSounding(sounding);
+        if (sounding.levels.empty()) {
+            readout->setText(QStringLiteral("No sounding loaded yet."));
+            hodo->setStormMotion(0.0, 0.0, false);
+            return;
+        }
+        const auto valid =
+            sounding.validEpochSeconds > 0
+                ? QDateTime::fromSecsSinceEpoch(sounding.validEpochSeconds, QTimeZone::UTC)
+                      .toString(QStringLiteral("MMM d HH:mm 'UTC'"))
+                : QStringLiteral("time unknown");
+        QStringList rows;
+        rows.push_back(QStringLiteral("%1 valid %2 (%3 levels)")
+                           .arg(QString::fromStdString(sounding.stationId), valid)
+                           .arg(sounding.levels.size()));
+        const double freezing = soundingFreezingLevelMsl(sounding);
+        rows.push_back(std::isnan(freezing)
+                           ? QStringLiteral("Freezing level: none in column")
+                           : QStringLiteral("Freezing ~%1 km MSL").arg(freezing / 1000.0, 0, 'f', 1));
+        double cx = 0.0, cy = 0.0;
+        if (resolveStormMotionUv(lastBunkersMotion_, cx, cy)) {
+            hodo->setStormMotion(cx, cy, true);
+            const auto groundTruth =
+                integrateSrhPoints(soundingWindPoints(sounding), cx, cy, {});
+            const auto srhText = [](const SrhEstimate& estimate) {
+                if (!estimate.valid) return QStringLiteral("unavailable");
+                if (estimate.srh01Valid && estimate.srh03Valid)
+                    return QStringLiteral("0-1 %1 / 0-3 %2")
+                        .arg(estimate.srh01M2PerS2, 0, 'f', 0)
+                        .arg(estimate.srh03M2PerS2, 0, 'f', 0);
+                if (estimate.srh01Valid)
+                    return QStringLiteral("0-1 %1").arg(estimate.srh01M2PerS2, 0, 'f', 0);
+                return QStringLiteral("unavailable");
+            };
+            rows.push_back(QStringLiteral("Sounding SRH: %1").arg(srhText(groundTruth)));
+            rows.push_back(QStringLiteral("VAD SRH: %1%2")
+                               .arg(srhText(lastSrh_),
+                                    lastBunkersMotion_.weakShear ? QStringLiteral(" (weak shear)")
+                                                                : QString()));
+        } else {
+            hodo->setStormMotion(0.0, 0.0, false);
+            rows.push_back(QStringLiteral("Storm motion: load a volume first (sounding SRH needs it)"));
+        }
+        readout->setText(rows.join(QStringLiteral("\n")));
+    };
+    auto doFetch = [this, dialog, stationField, timeLabel, fetchButton, status,
+                    refreshReadout]() {
+        const auto station = stationField->text().trimmed().toUpper();
+        QSettings().setValue(QStringLiteral("sounding/station"), station);
+        if (station.isEmpty()) {
+            status->setText(QStringLiteral("Type a RAOB site first (e.g. KOUN)."));
+            return;
+        }
+        const auto soundingTime = latestSoundingTime(QDateTime::currentDateTimeUtc());
+        timeLabel->setText(soundingTime.isValid()
+                               ? soundingTime.toString(QStringLiteral("MMM d HH:mm 'UTC'"))
+                               : QStringLiteral("—"));
+        if (!soundingTime.isValid()) {
+            status->setText(QStringLiteral("Clock gives no sounding time."));
+            return;
+        }
+        fetchButton->setEnabled(false);
+        status->setText(QStringLiteral("Fetching %1 %2…").arg(
+            station, soundingTime.toString(QStringLiteral("HH:mm'Z'"))));
+        auto* nam = new QNetworkAccessManager(dialog);
+        auto* reply = nam->get(makeRequest(soundingUrl(station, soundingTime),
+                                           QStringLiteral("application/json"),
+                                           QStringLiteral(" (sounding)")));
+        QTimer::singleShot(20'000, reply, [reply]() {
+            if (reply->isRunning()) reply->abort();
+        });
+        connect(reply, &QNetworkReply::finished, dialog,
+                [reply, nam, fetchButton, status, refreshReadout]() {
+                    fetchButton->setEnabled(true);
+                    if (reply->error() != QNetworkReply::NoError) {
+                        status->setText(
+                            QStringLiteral("Sounding fetch failed: %1").arg(reply->errorString()));
+                        reply->deleteLater();
+                        nam->deleteLater();
+                        return;
+                    }
+                    QString error;
+                    const auto sounding = parseIemRaob(reply->readAll(), &error);
+                    reply->deleteLater();
+                    nam->deleteLater();
+                    if (!error.isEmpty()) {
+                        status->setText(QStringLiteral("Sounding parse failed: %1").arg(error));
+                        refreshReadout(Sounding{});
+                        return;
+                    }
+                    status->setText(QStringLiteral("Loaded %1 levels.")
+                                        .arg(sounding.levels.size()));
+                    refreshReadout(sounding);
+                });
+    };
+    connect(fetchButton, &QToolButton::clicked, dialog, doFetch);
+    connect(stationField, &QLineEdit::returnPressed, dialog, doFetch);
+    soundingDialog_ = dialog;
+    dialog->show();
+    doFetch();
+}
+
 void MainWindow::populateScanDialog() {
     if (!scanTable_ || !scanSummary_ || !map_) return;
     const auto chunk = map_->decodedChunk();
@@ -4951,6 +5121,8 @@ void MainWindow::populateScanDialog() {
     // sums, each gated on its own span so a shallow two-row profile reads
     // "0-1 only" instead of a deep-layer number.
     const auto srh = estimateSrh(levels, bunkers, radarElevationMeters);
+    lastBunkersMotion_ = bunkers;
+    lastSrh_ = srh;
     QString motionSuffix;
     if (bunkers.valid) {
         const QString motionQuality =

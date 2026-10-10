@@ -1,6 +1,8 @@
 #pragma once
 
 #include "core/level2_decoder.hpp"
+#include "core/bunkers.hpp"
+#include "core/srh.hpp"
 #include "core/hail_swath.hpp"
 #include "app/alert_center.hpp"
 #include "app/session_store.hpp"
@@ -125,6 +127,9 @@ private slots:
     // Scan diagnostics pop-out: a real slot (not just a method) so tests,
     // the command palette, and the Details button share one entry point.
     void showScanDiagnostics();
+    // RAOB sounding pop-out: hodograph plus sounding SRH ground truth and
+    // freezing level for the current Bunkers motion. Real slot like above.
+    void showSoundingDialog();
 
 private:
     void buildUi();
@@ -441,6 +446,14 @@ private:
     QPointer<QDialog> scanDialog_;
     QTableWidget* scanTable_ = nullptr;
     QLabel* scanSummary_ = nullptr;
+    // Modeless sounding pop-out (RAOB hodograph plus SRH ground truth).
+    // Rebuilt on each open like Settings: soundings are 12-hourly, so no
+    // live-update contract is needed.
+    QPointer<QDialog> soundingDialog_;
+    // Last volume's storm motion + SRH (populated with the scan dialog):
+    // the sounding pop-out reuses the same motion for ground-truth SRH.
+    BunkersMotion lastBunkersMotion_;
+    SrhEstimate lastSrh_;
     QPointF crossSectionStart_;
     QPointF crossSectionEnd_;
     QString crossSectionRadarId_;

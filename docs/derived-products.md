@@ -86,6 +86,19 @@ pop-out summary with their quality flags. Core tests use closed-form
 hodographs (uniform flow = zero SRH; linear shear with an off-line mover =
 18.75 / 84.38 m²/s²) plus single-row, no-motion, and shallow-profile cases.
 
+## Sounding ground truth (IEM raob.py, live 2026-10-10)
+
+The Sounding button beside scan Details fetches the latest 00Z/12Z RAOB
+for a typed site (station remembered; analyses publish ~2 h late, so the
+clock picks the newest published run). The hodograph plots the observed
+u/v trace colored by height with the current volume's Bunkers vector, and
+the readout prints sounding SRH next to VAD SRH: both integrate through
+the SAME pair-sum (`integrateSrhPoints`), so any gap between them is wind
+error, not math. Null winds never steer; without a loaded volume the SRH
+rows say so instead of borrowing motion. Freezing level interpolates the
+first upward 0 C crossing (NaN when absent). Verified live payload shape
+(KOUN 12Z); hermetic parser, clock, parity, and paint tests.
+
 ## VAD live-volume check (KTLX, 2026-10-09)
 First real-data read, via `rotation_replay --vad` on three consecutive
 Archive-II volumes (16:37, 16:44, 16:51Z, ~6 MB each, VCP212-style splits).

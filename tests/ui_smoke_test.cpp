@@ -7,6 +7,8 @@
 #include "app/wpc_ero.hpp"
 #include "app/hms_smoke.hpp"
 #include "app/dat_paths.hpp"
+#include "app/sounding_source.hpp"
+#include "app/hodograph_widget.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -518,6 +520,38 @@ static bool testAlertCenterCirculations(QString* error) {
                           .arg(severe.recent().size());
             return false;
         }
+    }
+    return true;
+}
+
+static bool testHodographPaint(QString* error) {
+    // Paint smoke: synthetic sounding through the widget grabber. Catches
+    // null/divide crashes in the hodograph painter without pixel asserts.
+    Sounding sounding;
+    sounding.stationId = "KOUN";
+    for (int i = 0; i < 8; ++i) {
+        SoundingLevel level;
+        level.heightMslMeters = 400.0 + i * 800.0;
+        level.tempCelsius = 20.0 - i * 3.0;
+        level.directionFromDegrees = 200.0 + i * 5.0;
+        level.speedKnots = 15.0 + i * 4.0;
+        sounding.levels.push_back(level);
+    }
+    HodographWidget hodo;
+    hodo.resize(400, 400);
+    hodo.setSounding(sounding);
+    hodo.setStormMotion(10.0, -5.0, true);
+    const QImage plotted = hodo.grab().toImage();
+    if (plotted.isNull() || plotted.width() <= 0) {
+        *error = QStringLiteral("hodograph should render a sounding without crashing");
+        return false;
+    }
+    // Empty sounding paints the quiet placeholder, also crash-free.
+    hodo.setSounding(Sounding{});
+    hodo.setStormMotion(0.0, 0.0, false);
+    if (hodo.grab().toImage().isNull()) {
+        *error = QStringLiteral("hodograph should render the empty state without crashing");
+        return false;
     }
     return true;
 }
@@ -2441,6 +2475,57 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // IEM sounding JSON: live-shaped KOUN excerpt (null winds stay NaN),
+    // day-stamped URL, latest-00Z/12Z clock with the 2 h publish lag.
+    {
+        const QByteArray raob = R"JSON({"profiles":[{"station":"KOUN","valid":"2026-10-10T12:00:00Z","profile":[
+          {"pres":975.0,"hght":357.0,"tmpc":14.0,"dwpc":12.6,"drct":0.0,"sknt":0.0},
+          {"pres":946.04,"hght":610.0,"tmpc":24.9,"dwpc":9.2,"drct":200.0,"sknt":20.0},
+          {"pres":895.0,"hght":1086.7,"tmpc":21.8,"dwpc":3.8,"drct":null,"sknt":null}
+        ]}],"generated_at":"2026-10-10T15:26:40Z"})JSON";
+        QString soundingError;
+        const auto sounding = parseIemRaob(raob, &soundingError);
+        if (!soundingError.isEmpty() || sounding.stationId != "KOUN" ||
+            sounding.levels.size() != 3 ||
+            std::abs(sounding.levels.at(1).heightMslMeters - 610.0) > 0.01 ||
+            std::abs(sounding.levels.at(1).tempCelsius - 24.9) > 0.01 ||
+            !std::isnan(sounding.levels.at(2).directionFromDegrees) ||
+            !std::isnan(sounding.levels.at(2).speedKnots) ||
+            sounding.validEpochSeconds !=
+                QDateTime(QDate(2026, 10, 10), QTime(12, 0), QTimeZone::UTC).toSecsSinceEpoch()) {
+            std::cerr << "Sounding parsing failed\n";
+            return 1;
+        }
+        if (!parseIemRaob(QByteArray(R"JSON({"profiles":[]})JSON"), &soundingError).levels.empty() ||
+            soundingError.isEmpty() ||
+            !parseIemRaob(QByteArray("not json"), &soundingError).levels.empty()) {
+            std::cerr << "Empty/malformed soundings should fail closed\n";
+            return 1;
+        }
+        if (soundingUrl(QStringLiteral("koun"),
+                        QDateTime(QDate(2026, 10, 10), QTime(12, 0), QTimeZone::UTC))
+                .toString() !=
+            QStringLiteral("https://mesonet.agron.iastate.edu/json/raob.py?station=KOUN&ts=202610101200")) {
+            std::cerr << "Sounding URL builder is wrong\n";
+            return 1;
+        }
+        if (soundingUrl(QString{}, QDateTime::currentDateTimeUtc()).isValid() ||
+            soundingUrl(QStringLiteral("KOUN"), QDateTime()).isValid()) {
+            std::cerr << "Sounding URL builder should reject bad input\n";
+            return 1;
+        }
+        const auto at = [](int hour, int minute) {
+            return QDateTime(QDate(2026, 10, 10), QTime(hour, minute), QTimeZone::UTC);
+        };
+        if (latestSoundingTime(at(15, 30)) != at(12, 0) || latestSoundingTime(at(13, 30)) != at(0, 0) ||
+            latestSoundingTime(at(1, 30)) !=
+                QDateTime(QDate(2026, 10, 9), QTime(12, 0), QTimeZone::UTC) ||
+            latestSoundingTime(at(3, 30)) != at(0, 0) ||
+            latestSoundingTime(QDateTime()).isValid()) {
+            std::cerr << "Sounding clock is wrong\n";
+            return 1;
+        }
+    }
     // KML GroundOverlay: exact box values in the XML, XML-escaped names,
     // and fail-closed on flipped, wrapped, or non-finite bounds.
     {
@@ -3268,6 +3353,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testAlertCenterCirculations(&failure)) {
             std::cerr << "AlertCenter circulations failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testHodographPaint(&failure)) {
+            std::cerr << "Hodograph paint failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testBasemapTileUrls(&failure)) {
