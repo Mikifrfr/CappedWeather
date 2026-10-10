@@ -1884,6 +1884,33 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "Non-MCD page should fail closed with an error\n";
         return 1;
     }
+    // SPC fire-weather GeoJSON: same schema, DryT/WindRH kinds tagged by the
+    // fetcher; live-shaped Elevated payload plus the "No Areas" quiet state
+    // (GeometryCollection with DN 0, which parses to zero features).
+    const QByteArray fireLive = R"JSON({"type":"FeatureCollection","features":[
+      {"type":"Feature","geometry":{"type":"MultiPolygon","coordinates":[[[[-119.43,38.25],[-120.02,38.75],[-120.27,39.28],[-119.43,38.25]]]]},
+       "properties":{"DN":5,"VALID":"202610101200","EXPIRE":"202610111200","ISSUE":"202610100600",
+         "VALID_ISO":"2026-10-10T12:00:00+00:00","EXPIRE_ISO":"2026-10-11T12:00:00+00:00","ISSUE_ISO":"2026-10-10T06:00:00+00:00",
+         "FORECASTER":"Chalmers","LABEL":"ELEV","LABEL2":"Elevated Fire Risk","stroke":"#FF7F00","fill":"#FFBF80"}}
+    ]})JSON";
+    const auto fire = parseSpcOutlookGeoJson(fireLive, 1, &parseError);
+    if (!parseError.isEmpty() || fire.size() != 1 || fire.front().dn != 5 ||
+        fire.front().label != QStringLiteral("ELEV") ||
+        fire.front().label2 != QStringLiteral("Elevated Fire Risk") ||
+        fire.front().stroke != QStringLiteral("#FF7F00") ||
+        fire.front().fill != QStringLiteral("#FFBF80") ||
+        fire.front().rings.front().exterior.size() != 4) {
+        std::cerr << "SPC fire outlook parsing failed\n";
+        return 1;
+    }
+    const QByteArray fireQuiet = R"JSON({"type":"FeatureCollection","features":[
+      {"type":"Feature","geometry":{"type":"GeometryCollection","geometries":[]},
+       "properties":{"DN":0,"LABEL":"No Areas","LABEL2":"","stroke":"","fill":""}}
+    ]})JSON";
+    if (!parseSpcOutlookGeoJson(fireQuiet, 1, &parseError).isEmpty() || !parseError.isEmpty()) {
+        std::cerr << "Quiet fire outlook should parse to zero features\n";
+        return 1;
+    }
     // ECCC alerts (MSC GeoMet OGC API): same warning rows as NWS, mapped
     // from alert_name_en/type with title-cased events, no status filtering.
     {

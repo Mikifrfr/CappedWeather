@@ -16,6 +16,7 @@ namespace cappedweather {
 namespace {
 
 constexpr char kOutlookBase[] = "https://www.spc.noaa.gov/products/outlook/";
+constexpr char kFireBase[] = "https://www.spc.noaa.gov/products/fire_wx/";
 constexpr char kSpcBase[] = "https://www.spc.noaa.gov";
 constexpr char kMcdRss[] = "https://www.spc.noaa.gov/products/spcmdrss.xml";
 constexpr int kMaxMcdPages = 12;  // active MCDs rarely exceed a handful
@@ -281,6 +282,7 @@ SpcConvectiveSource::SpcConvectiveSource(QObject* parent) : QObject(parent) {}
 void SpcConvectiveSource::refresh() {
     if (!enabled_) return;
     fetchOutlooks();
+    fetchFireOutlooks();
     fetchMcds();
 }
 
@@ -345,6 +347,71 @@ void SpcConvectiveSource::fetchOutlooks() {
         pending->push_back({day, reply});
         connect(reply, &QNetworkReply::finished, this,
                 [finishOne, day, reply] { finishOne(day, reply); });
+    }
+}
+
+void SpcConvectiveSource::fetchFireOutlooks() {
+    if (firePending_) return;
+    firePending_ = true;
+    fireOutlooks_.clear();
+    fireError_.clear();
+    struct FirePending {
+        int day = 0;
+        QString kind;
+        QNetworkReply* reply = nullptr;
+    };
+    auto pending = std::make_shared<QVector<FirePending>>();
+    auto finishOne = [this, pending](int day, const QString& kind, QNetworkReply* reply) {
+        const bool ok = reply->error() == QNetworkReply::NoError;
+        const int code =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (ok && (code == 0 || (code >= 200 && code < 300))) {
+            QString error;
+            const auto features = parseSpcOutlookGeoJson(reply->readAll(), day, &error);
+            if (error.isEmpty()) {
+                for (auto feature : features) {
+                    feature.fireKind = kind;
+                    fireOutlooks_.append(std::move(feature));
+                }
+            } else {
+                fireError_ = error;
+            }
+        } else if (ok && code == 404) {
+            // quiet, not an error
+        } else if (ok) {
+            fireError_ = QStringLiteral("Fire day %1 %2 HTTP %3").arg(day).arg(kind).arg(code);
+        } else {
+            fireError_ = reply->errorString();
+        }
+        reply->deleteLater();
+        pending->erase(std::remove_if(pending->begin(), pending->end(),
+                                      [reply](const FirePending& p) { return p.reply == reply; }),
+                       pending->end());
+        if (pending->isEmpty()) {
+            firePending_ = false;
+            emit fireOutlooksReady(fireOutlooks_);
+            if (fireError_.isEmpty())
+                emit statusChanged(
+                    QStringLiteral("SPC fire: %1 areas").arg(fireOutlooks_.size()));
+            else
+                emit statusChanged(QStringLiteral("SPC fire: %1 areas (%2)")
+                                       .arg(fireOutlooks_.size())
+                                       .arg(fireError_));
+        }
+    };
+    for (const int day : {1, 2}) {
+        for (const auto& kind : {QStringLiteral("dryt"), QStringLiteral("windrh")}) {
+            const QUrl url(QString::fromLatin1(kFireBase) +
+                           QStringLiteral("day%1fw_%2.nolyr.geojson").arg(day).arg(kind));
+            auto* reply = network_.get(makeRequest(url, QStringLiteral("application/geo+json"),
+                                                   QStringLiteral(" SPC fire client")));
+            pending->push_back({day, kind == QStringLiteral("dryt") ? QStringLiteral("DryT")
+                                                                     : QStringLiteral("WindRH"),
+                                reply});
+            const QString tag = pending->back().kind;
+            connect(reply, &QNetworkReply::finished, this,
+                    [finishOne, day, tag, reply] { finishOne(day, tag, reply); });
+        }
     }
 }
 

@@ -1149,6 +1149,21 @@ int RadarMapCanvas::spcOutlookCount() const {
     return static_cast<int>(spcOutlooks_.size());
 }
 
+void RadarMapCanvas::setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks) {
+    spcFireOutlooks_ = std::move(outlooks);
+    update();
+}
+
+void RadarMapCanvas::setSpcFireVisible(const bool visible) {
+    if (spcFireVisible_ == visible) return;
+    spcFireVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::spcFireCount() const {
+    return static_cast<int>(spcFireOutlooks_.size());
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -2612,6 +2627,54 @@ void RadarMapCanvas::paintSpcOutlook(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintSpcFireOutlook(QPainter& painter) {
+    if (!spcFireVisible_ || spcFireOutlooks_.isEmpty()) return;
+    // Same background slot as the categorical outlook: official SPC fire
+    // fills at low alpha. Day 2 first so Day 1 wins; Critical over Elevated.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QVector<const SpcOutlookFeature*> ordered;
+    for (const auto& feature : spcFireOutlooks_) ordered.push_back(&feature);
+    std::sort(ordered.begin(), ordered.end(), [](const SpcOutlookFeature* a, const SpcOutlookFeature* b) {
+        if (a->day != b->day) return a->day > b->day;
+        return a->dn < b->dn;
+    });
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto* feature : ordered) {
+        QColor fill(feature->fill.isEmpty() ? QStringLiteral("#fdba74") : feature->fill);
+        QColor stroke(feature->stroke.isEmpty() ? QStringLiteral("#c2410c") : feature->stroke);
+        fill.setAlpha(34);
+        painter.setBrush(fill);
+        painter.setPen(QPen(stroke, 1.5));
+        for (const auto& ring : feature->rings) {
+            QPolygonF polygon;
+            polygon.reserve(ring.exterior.size());
+            for (const auto& lonLat : ring.exterior)
+                polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (!viewport.intersects(polygon.boundingRect())) continue;
+            painter.drawPolygon(polygon, Qt::OddEvenFill);
+            if (zoom_ >= 6 && !feature->label2.isEmpty()) {
+                double cx = 0.0, cy = 0.0;
+                for (const auto& point : polygon) {
+                    cx += point.x();
+                    cy += point.y();
+                }
+                cx /= std::max(1.0, static_cast<double>(polygon.size()));
+                cy /= std::max(1.0, static_cast<double>(polygon.size()));
+                painter.setPen(stroke);
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                const auto kind =
+                    feature->fireKind.isEmpty() ? QString{} : QStringLiteral(" %1").arg(feature->fireKind);
+                painter.drawText(QRectF(cx - 90, cy - 10, 180, 20), Qt::AlignCenter,
+                                 QStringLiteral("Fire D%1%2 %3")
+                                     .arg(feature->day)
+                                     .arg(kind, feature->label2));
+            }
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {
     if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
@@ -3352,7 +3415,8 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
                              QStringLiteral("● TDS %1").arg(static_cast<int>(tdsDetections_.size())));
         }
     }
-    if ((spcOutlookVisible_ && !spcOutlooks_.isEmpty()) || (mcdVisible_ && !mcds_.isEmpty())) {
+    if ((spcOutlookVisible_ && !spcOutlooks_.isEmpty()) || (spcFireVisible_ && !spcFireOutlooks_.isEmpty()) ||
+        (mcdVisible_ && !mcds_.isEmpty())) {
         const QRectF spcPanel(12, 162, 258, 20);
         painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
         painter.setBrush(QColor(8, 15, 19, 205));
@@ -3368,17 +3432,23 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             }
             painter.setPen(QColor(134, 239, 172));
             painter.drawText(
-                QRectF(x, 164, 150, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                top ? QStringLiteral("SPC Day 1: %1").arg(top->label2.isEmpty() ? top->label : top->label2)
-                    : QStringLiteral("SPC Day 1+2"));
-            x += 140;
+                QRectF(x, 164, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                top ? QStringLiteral("SPC: %1").arg(top->label2.isEmpty() ? top->label : top->label2)
+                    : QStringLiteral("SPC D1+2"));
+            x += 105;
+        }
+        if (spcFireVisible_ && !spcFireOutlooks_.isEmpty()) {
+            painter.setPen(QColor(253, 186, 116));
+            painter.drawText(QRectF(x, 164, 80, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("FIRE %1").arg(static_cast<int>(spcFireOutlooks_.size())));
+            x += 60;
         }
         if (mcdVisible_ && !mcds_.isEmpty()) {
             painter.setPen(QColor(216, 180, 254));
-            painter.drawText(QRectF(x, 164, 110, 16), Qt::AlignLeft | Qt::AlignVCenter,
+            painter.drawText(QRectF(x, 164, 70, 16), Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("MCD %1").arg(static_cast<int>(mcds_.size())));
         }
-    } else if (spcOutlookVisible_ || mcdVisible_) {
+    } else if (spcOutlookVisible_ || spcFireVisible_ || mcdVisible_) {
         // Quiet-day confirmation: layers are on, feeds answered, nothing
         // issued. Without this the map gives zero feedback and reads as
         // a broken feed.
@@ -3390,6 +3460,7 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         painter.setPen(QColor(148, 163, 184));
         QStringList quiet;
         if (spcOutlookVisible_) quiet.push_back(QStringLiteral("SPC: quiet"));
+        if (spcFireVisible_) quiet.push_back(QStringLiteral("Fire: none"));
         if (mcdVisible_) quiet.push_back(QStringLiteral("MCD: none"));
         painter.drawText(QRectF(20, 164, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
                          quiet.join(QStringLiteral(" · ")));
@@ -4186,6 +4257,41 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
                     PinnedInfoKind::SpcOutlook, std::nullopt};
         }
     }
+    if (spcFireVisible_) {
+        // Same lowest priority as the categorical outlook, checked after it
+        // so fire wins an overlap (rarer, more urgent context).
+        const SpcOutlookFeature* best = nullptr;
+        for (const auto& feature : spcFireOutlooks_) {
+            for (const auto& ring : feature.rings) {
+                QPolygonF polygon;
+                for (const auto& lonLat : ring.exterior)
+                    polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+                if (!polygon.containsPoint(point, Qt::OddEvenFill)) continue;
+                if (!best || feature.dn > best->dn ||
+                    (feature.dn == best->dn && feature.day < best->day))
+                    best = &feature;
+                break;
+            }
+        }
+        if (best) {
+            const auto window = best->valid.isValid() && best->expire.isValid()
+                                    ? QStringLiteral("Valid (UTC): %1 - %2")
+                                          .arg(best->valid.toString(QStringLiteral("MMM d HH:mm")),
+                                               best->expire.toString(QStringLiteral("MMM d HH:mm")))
+                                    : QStringLiteral("Valid: see SPC");
+            const auto issuer = best->forecaster.isEmpty()
+                                    ? QStringLiteral("SPC")
+                                    : QStringLiteral("SPC (%1)").arg(best->forecaster);
+            const auto kind = best->fireKind.isEmpty()
+                                  ? QStringLiteral("Fire weather")
+                                  : QStringLiteral("Fire %1").arg(best->fireKind);
+            return {QStringLiteral("Day %1 %2: %3\n%4\n%5")
+                        .arg(best->day)
+                        .arg(kind, best->label2.isEmpty() ? best->label : best->label2, window,
+                             issuer),
+                    PinnedInfoKind::SpcOutlook, std::nullopt};
+        }
+    }
     return {};
 }
 
@@ -4741,10 +4847,12 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     requestVisibleTiles();
     if (warningsOnTop_) {
         paintSpcOutlook(painter);
+        paintSpcFireOutlook(painter);
         paintRadarOverlay(painter);
         paintWeatherOverlays(painter);
     } else {
         paintSpcOutlook(painter);
+        paintSpcFireOutlook(painter);
         paintWeatherOverlays(painter);
         paintRadarOverlay(painter);
     }

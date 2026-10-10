@@ -599,6 +599,10 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) panel->setSpcOutlookVisible(visible);
         refreshLayerBadges();
     });
+    connect(spcFireCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setSpcFireVisible(visible);
+        refreshLayerBadges();
+    });
     connect(mcdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setMcdVisible(visible);
         refreshLayerBadges();
@@ -674,6 +678,11 @@ MainWindow::MainWindow(QWidget* parent)
     connect(spcSource_, &SpcConvectiveSource::outlooksReady, this,
             [this](QVector<SpcOutlookFeature> outlooks) {
                 for (auto* panel : maps_) panel->setSpcOutlooks(outlooks);
+                refreshLayerBadges();
+            });
+    connect(spcSource_, &SpcConvectiveSource::fireOutlooksReady, this,
+            [this](QVector<SpcOutlookFeature> outlooks) {
+                for (auto* panel : maps_) panel->setSpcFireOutlooks(outlooks);
                 refreshLayerBadges();
             });
     connect(spcSource_, &SpcConvectiveSource::mcdsReady, this, [this](QVector<SpcMcd> mcds) {
@@ -1389,6 +1398,10 @@ void MainWindow::buildUi() {
                  QStringLiteral("Day 1 + 2 categorical risk"), spcOutlookBadge_,
                  QStringLiteral("spcOutlookBadge"), true,
                  QStringLiteral("Storm Prediction Center Day 1 and Day 2 categorical outlooks in official colors. Context, not a warning."));
+    makeLayerRow(spcFireCheck_, QStringLiteral("SPC fire weather"), QStringLiteral("spcFireCheck"),
+                 QStringLiteral("Day 1 + 2 Elevated/Critical risk"), spcFireBadge_,
+                 QStringLiteral("spcFireBadge"), true,
+                 QStringLiteral("Storm Prediction Center Day 1 and Day 2 fire-weather outlooks (DryT + WindRH) in official orange colors. Context, not a warning."));
     makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
@@ -3207,6 +3220,7 @@ void MainWindow::restoreSettings() {
         panel->setZdrVisible(zdrColumnCheck_->isChecked());
         panel->setTdsVisible(tdsCheck_->isChecked());
         panel->setSpcOutlookVisible(spcOutlookCheck_->isChecked());
+        panel->setSpcFireVisible(spcFireCheck_->isChecked());
         panel->setMcdVisible(mcdCheck_->isChecked());
         panel->setMetarVisible(metarCheck_->isChecked());
     }
@@ -3216,6 +3230,7 @@ void MainWindow::restoreSettings() {
         lightningFusionCheck_->setChecked(settings.value(QStringLiteral("overlays/lightningFusion"), true).toBool());
     placefilesCheck_->setChecked(settings.value(QStringLiteral("overlays/placefiles"), true).toBool());
     spcOutlookCheck_->setChecked(settings.value(QStringLiteral("overlays/spcOutlook"), true).toBool());
+    spcFireCheck_->setChecked(settings.value(QStringLiteral("overlays/spcFire"), true).toBool());
     mcdCheck_->setChecked(settings.value(QStringLiteral("overlays/mcd"), true).toBool());
     metarCheck_->setChecked(settings.value(QStringLiteral("overlays/metar"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
@@ -3273,6 +3288,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/lightningFusion"), lightningFusionCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/placefiles"), placefilesCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/spcOutlook"), spcOutlookCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/spcFire"), spcFireCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/metar"), metarCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
@@ -4216,6 +4232,15 @@ void MainWindow::refreshLayerBadges() {
         mcdBadge_->setToolTip(!on ? QStringLiteral("MCD layer is off")
                               : n > 0 ? QStringLiteral("Active mesoscale discussions on the map")
                                       : QStringLiteral("Layer is on; no MCDs in effect right now"));
+    }
+    if (spcFireBadge_) {
+        const auto n = map_->spcFireCount();
+        const bool on = spcFireCheck_ && spcFireCheck_->isChecked();
+        spcFireBadge_->setText(!on ? QStringLiteral("off") : n > 0 ? QString::number(n)
+                                                                   : QStringLiteral("quiet"));
+        spcFireBadge_->setToolTip(!on ? QStringLiteral("SPC fire layer is off")
+                                  : n > 0 ? QStringLiteral("Day 1 + 2 fire-weather areas on the map")
+                                          : QStringLiteral("Layer is on; no fire-weather areas issued right now"));
     }
     if (metarBadge_) {
         const auto n = map_->metarCount();

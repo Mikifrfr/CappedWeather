@@ -335,6 +335,8 @@ private:
     QLabel* tdsBadge_ = nullptr;
     QCheckBox* spcOutlookCheck_ = nullptr;
     QLabel* spcOutlookBadge_ = nullptr;
+    QCheckBox* spcFireCheck_ = nullptr;
+    QLabel* spcFireBadge_ = nullptr;
     QCheckBox* mcdCheck_ = nullptr;
     QLabel* mcdBadge_ = nullptr;
     QCheckBox* metarCheck_ = nullptr;

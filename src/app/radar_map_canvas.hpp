@@ -175,6 +175,10 @@ public:
     void setMcdVisible(bool visible);
     [[nodiscard]] bool mcdVisible() const { return mcdVisible_; }
     [[nodiscard]] int mcdCount() const;
+    void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
+    void setSpcFireVisible(bool visible);
+    [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
+    [[nodiscard]] int spcFireCount() const;
     // METAR surface observations: decluttered station dots with temp/dew in
     // the probe and full T/Td/wind/category on click.
     void setMetars(QVector<MetarObs> metars);
@@ -480,7 +484,12 @@ private:
     // frame like placefiles: a handful of polygons, no raster cache needed.
     QVector<SpcOutlookFeature> spcOutlooks_;
     QVector<SpcMcd> mcds_;
+    // SPC fire-weather outlooks Day 1/2 (DryT + WindRH files, same GeoJSON
+    // shape, official orange fills). Separate vector so the categorical
+    // toggle never hides fire risk and vice versa.
+    QVector<SpcOutlookFeature> spcFireOutlooks_;
     void paintSpcOutlook(QPainter& painter);
+    void paintSpcFireOutlook(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -590,6 +599,7 @@ private:
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;
     bool spcOutlookVisible_ = true;
+    bool spcFireVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

@@ -31,16 +31,17 @@ struct SpcOutlookRing {
 };
 
 struct SpcOutlookFeature {
-    int day = 1;  // 1 or 2 (categorical)
-    QString label;  // "MDT"
-    QString label2;  // "Moderate Risk"
-    int dn = 0;  // SPC severity code (2 TSTM .. 8 HIGH)
+    int day = 1;  // 1 or 2 (categorical or fire)
+    QString label;  // "MDT" / "ELEV"
+    QString label2;  // "Moderate Risk" / "Elevated Fire Risk"
+    int dn = 0;  // SPC severity code (2 TSTM .. 8 HIGH; fire 5/8/10)
     QDateTime valid;
     QDateTime expire;
     QDateTime issue;
     QString forecaster;
     QString stroke;  // "#..." official outline, may be empty
     QString fill;  // "#..." official fill, may be empty
+    QString fireKind;  // empty = categorical, else "DryT" or "WindRH"
     std::vector<SpcOutlookRing> rings;
 };
 
@@ -82,20 +83,25 @@ public:
 
 signals:
     void outlooksReady(QVector<SpcOutlookFeature> outlooks);
+    void fireOutlooksReady(QVector<SpcOutlookFeature> outlooks);
     void mcdsReady(QVector<SpcMcd> mcds);
     void statusChanged(const QString& status);
 
 private:
     void fetchOutlooks();
+    void fetchFireOutlooks();
     void fetchMcds();
     void requestMcdPages(QVector<SpcMcdCandidate> candidates);
 
     bool enabled_ = true;
     bool outlooksPending_ = false;
+    bool firePending_ = false;
     bool mcdsPending_ = false;
     QVector<SpcOutlookFeature> outlooks_;
+    QVector<SpcOutlookFeature> fireOutlooks_;
     QVector<SpcMcd> mcds_;
     QString outlooksError_;
+    QString fireError_;
     QNetworkAccessManager network_;
 };
 
