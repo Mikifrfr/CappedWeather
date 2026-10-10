@@ -26,12 +26,15 @@
 //   volume_time,volume_file,tilt,elev_deg,height_msl_m,from_deg,speed_mps,gates,rmse,quality
 
 #include "app/archive_level2.hpp"
+#include "core/bunkers.hpp"
 #include "core/circulation_detector.hpp"
 #include "core/debris_detector.hpp"
 #include "core/derived_products.hpp"
 #include "core/hail_detector.hpp"
 #include "core/radar_lightning_fusion.hpp"
 #include "core/shear_grid.hpp"
+#include "core/srh.hpp"
+#include "core/tbss_detector.hpp"
 #include "core/vad.hpp"
 #include "core/velocity_processing.hpp"
 
@@ -58,7 +61,8 @@ void usage() {
                  "       [--min-gate V] [--same-sign-boost B] [--single-tilt-tvs 0/1]\n"
                  "       [--min-depth-tvs M] [--min-depth-meso M] [--rot-span V]\n"
                  "       [--rot-shear S] [--rot-grid DEG] [--max-phys V] [--shear S]\n"
-                 "       [--vertical-align KM] [--diagnose] [--persist 0/1] [--vad]\n");
+                 "       [--vertical-align KM] [--diagnose] [--persist 0/1] [--vad]\n"
+                 "       [--bunkers] [--srh] [--tbss]\n");
 }
 
 std::string isoTimeUtc(const QDateTime& t) {
@@ -99,6 +103,10 @@ int main(int argc, char** argv) {
     bool csv = false;
     bool diagnose = false;
     bool vad = false;
+    bool bunkers = false;  // Bunkers storm motion from the VAD rows (needs --vad data path)
+    bool srh = false;  // SRH 0-1/0-3 km from VAD rows + Bunkers motion
+    bool tbss = false;  // TBSS hail-spike rows per volume (own csv shape)
+    bool tbssDiagnose = false;  // veto census per volume (human lines, needs --tbss)
     bool persist = false;  // track persistence across volumes (live behavior):
     // a marker must repeat within 8 km before it is emitted, so single-volume
     // dealias glints never score. Mirrors persistCirculations (2 hits to show,
@@ -112,6 +120,27 @@ int main(int argc, char** argv) {
         }
         if (flag == "--vad") {
             vad = true;
+            ++i;
+            continue;
+        }
+        if (flag == "--bunkers") {
+            bunkers = true;
+            ++i;
+            continue;
+        }
+        if (flag == "--srh") {
+            srh = true;
+            ++i;
+            continue;
+        }
+        if (flag == "--tbss") {
+            tbss = true;
+            ++i;
+            continue;
+        }
+        if (flag == "--tbss-diagnose") {
+            tbss = true;
+            tbssDiagnose = true;
             ++i;
             continue;
         }
@@ -187,6 +216,8 @@ int main(int argc, char** argv) {
     if (csv) {
         if (vad) {
             std::printf("volume_time,volume_file,tilt,elev_deg,height_msl_m,from_deg,speed_mps,gates,rmse,quality\n");
+        } else if (tbss) {
+            std::printf("volume_time,volume_file,kind,lat,lon,core_dbz,spike_km,rays\n");
         } else {
             std::printf("volume_time,volume_file,kind,lat,lon,delta_v_mps,diameter_km,depth_m,tilts,min_cc,max_ref_dbz\n");
         }
@@ -194,7 +225,7 @@ int main(int argc, char** argv) {
     int volumesOk = 0;
     int volumesFailed = 0;
     int tvsCount = 0, mesoCount = 0, rotCount = 0, shearCount = 0, watchCount = 0;
-    int hailCount = 0, tdsCount = 0;
+    int hailCount = 0, tdsCount = 0, tbssCount = 0;
     struct Track {
         CirculationDetection det;
         int hits = 0;
@@ -268,6 +299,39 @@ int main(int argc, char** argv) {
                             level.heightMslMeters, level.directionFromDegrees,
                             level.speedMetersPerSecond, level.gateCount, level.rmseMetersPerSecond,
                             quality);
+            }
+            // Bunkers + SRH read as human lines (never CSV: the header above
+            // is the fixed VAD shape, and mixing row types breaks parsers).
+            if (!csv && (bunkers || srh)) {
+                const auto motion = estimateBunkersMotion(levels, elev);
+                const char* motionQuality =
+                    motion.quality == VadQuality::Good ? "good" : "marginal";
+                if (bunkers) {
+                    if (!motion.valid) {
+                        std::printf("%s %s: BUNKERS invalid\n", volIso.c_str(),
+                                    volFile.c_str());
+                    } else if (motion.weakShear) {
+                        std::printf("%s %s: BUNKERS mean %.0f/%.1f m/s (weak shear, %s)\n",
+                                    volIso.c_str(), volFile.c_str(), motion.meanFromDegrees,
+                                    motion.meanSpeedMps, motionQuality);
+                    } else {
+                        std::printf("%s %s: BUNKERS RM %.0f/%.1f m/s shear %.1f (%s)\n",
+                                    volIso.c_str(), volFile.c_str(), motion.rightFromDegrees,
+                                    motion.rightSpeedMps, motion.shearMagnitudeMps, motionQuality);
+                    }
+                }
+                if (srh) {
+                    const auto helicity = estimateSrh(levels, motion, elev);
+                    if (!helicity.valid) {
+                        std::printf("%s %s: SRH invalid\n", volIso.c_str(), volFile.c_str());
+                    } else {
+                        std::printf("%s %s: SRH 01=%.0f 03=%.0f (%s%s%s)\n", volIso.c_str(),
+                                    volFile.c_str(), helicity.srh01M2PerS2, helicity.srh03M2PerS2,
+                                    helicity.quality == VadQuality::Good ? "good" : "marginal",
+                                    helicity.srh01Valid ? "" : " no01",
+                                    helicity.srh03Valid ? "" : " no03");
+                    }
+                }
             }
             continue;
         }
@@ -417,6 +481,38 @@ int main(int argc, char** argv) {
                         t.parentKind == CirculationKind::TornadoVortex ? 1 : 0,
                         t.minCorrelationCoefficient, t.maxReflectivityDbz);
         }
+        // TBSS runs on raw reflectivity (no derived products needed). CSV has
+        // its own header (see top of main); human mode prints one line each.
+        if (tbss) {
+            TbssDiagnostics diag{};
+            const auto spikes = detectTbss(decoded->decoded, lat, lon, elev, TbssConfig{}, &diag);
+            for (const auto& spike : spikes) {
+                ++tbssCount;
+                if (csv) {
+                    std::printf("%s,%s,TBSS,%.5f,%.5f,%.1f,%.1f,%d\n", volIso.c_str(),
+                                volFile.c_str(), spike.latitudeDeg, spike.longitudeDeg,
+                                spike.maxCoreDbz, spike.spikeLengthKm, spike.rayCount);
+                } else {
+                    std::printf("%s %s: TBSS core %.0f dBZ spike %.1f km rays %d at %.4f,%.4f\n",
+                                volIso.c_str(), volFile.c_str(), spike.maxCoreDbz,
+                                spike.spikeLengthKm, spike.rayCount, spike.latitudeDeg,
+                                spike.longitudeDeg);
+                }
+            }
+            if (!csv && spikes.empty()) {
+                std::printf("%s %s: TBSS none\n", volIso.c_str(), volFile.c_str());
+            }
+            if (tbssDiagnose && !csv) {
+                std::printf("%s %s: TBSSDIAG cores=%d noRun=%d short=%d long=%d dirty=%d isolated=%d wide=%d kept=%zu\n",
+                            volIso.c_str(), volFile.c_str(), diag.raysWithCore, diag.noRun,
+                            diag.runTooShort, diag.runTooLong, diag.dirtyEnd, diag.isolated,
+                            diag.wideCluster, spikes.size());
+                for (const auto& [ilat, ilon] : diag.isolatedPositions) {
+                    std::printf("%s %s: TBSS-ISO core %.4f,%.4f\n", volIso.c_str(),
+                                volFile.c_str(), ilat, ilon);
+                }
+            }
+        }
         if (shearCfg.minShearPerSecond > 0.0) {
             shearCfg.minReflectivityDbz = circ.minReflectivityDbz;
             const auto peaks = detectShearPeaks(decoded->decoded, dealised, lat, lon,
@@ -444,8 +540,8 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr,
                  "\n=== rotation replay summary ===\nvolumes: %d ok, %d failed\n"
-                 "detections: TVS=%d MESO=%d ROT=%d SHEAR=%d WATCH=%d HAIL=%d TDS=%d\n",
+                 "detections: TVS=%d MESO=%d ROT=%d SHEAR=%d WATCH=%d HAIL=%d TDS=%d TBSS=%d\n",
                  volumesOk, volumesFailed, tvsCount, mesoCount, rotCount, shearCount,
-                 watchCount, hailCount, tdsCount);
+                 watchCount, hailCount, tdsCount, tbssCount);
     return EXIT_SUCCESS;
 }

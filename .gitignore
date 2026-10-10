@@ -21,6 +21,8 @@ coverage/
 /data/rotation_cases/*
 !/data/rotation_cases/cases.json
 /data/vad_replay/
+/data/tbss_replay/
+/data/moore_replay/
 __pycache__/
 *.py[cod]
 /aqtinstall.log

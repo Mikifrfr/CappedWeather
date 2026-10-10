@@ -53,7 +53,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - TVS/meso markers into AlertCenter (opt-in sink off by default, TVS at Severe+ and meso at Moderate+, radar-scoped dedup with suppression and priming, always labeled guidance, Settings checkbox with persisted key, hermetic ingest tests).
 - Storm-relative helicity 0-1/0-3 km from VAD plus Bunkers motion (pair-sum integration with per-layer span gates, scan pop-out readout with quality flags, closed-form core tests, documented in derived-products).
 - Bunkers storm motion from VAD (0-6 km gateCount-weighted mean wind with 7.5 m/s shear-perpendicular split, weak-shear flag, VAD-style quality, right-mover line in the scan pop-out, closed-form core tests).
-- TBSS hail-spike detector (60+ dBZ core with 4-30 km down-radial weak-echo spike on 3+ adjacent rays, map layer with badge and persisted toggle, six-case core tests).
+- TBSS hail-spike detector (storm-edge-rooted weak-echo runs with fade-out ends, 20 km core link, cross-tilt proximity clustering, sheet rejection; map layer with badge and persisted toggle; ten-case core tests; replay first-light on Mayfield plus withhold census in severe-hail-tds-validation).
 - Basemap preset gallery (one-click IEM US + RainViewer global mosaic templates in Settings, keyless Custom no longer falls back to Esri, RainViewer frame resolver with hermetic tests, live 200-PNG verification, documented in europe-sources).
 - Warning inbox expiry countdowns (per-item time-to-expire from onset/expiry, soonest-first within severity, 30 s ticker, hermetic clock tests).
 - SPC fire-weather outlooks Day 1/2 (DryT + WindRH GeoJSON, same schema as categorical, official orange colors, layer with badge and persisted toggle, live-shaped parser tests).

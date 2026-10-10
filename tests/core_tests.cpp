@@ -722,13 +722,72 @@ void testTbss() {
         }
         assert(detectTbss(edge, 35.0, -97.0, 300.0, {}).empty());
     }
-    // Strong echo right behind the core is another cell, not an artifact.
+    // Strong echo right behind the core is storm zone, not a veto: the run
+    // behind it still roots at a storm edge with a 60+ core 2 gates uprange.
+    // What fails is a run with no 60+ core linked (core too far uprange).
     {
-        DecodedChunk secondCell = chunk;
-        for (auto& ray : secondCell.rays)
-            ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).at(25) =
-                static_cast<std::uint16_t>(std::lround(50.0 * 2.0 + 66.0));
-        assert(detectTbss(secondCell, 35.0, -97.0, 300.0, {}).empty());
+        DecodedChunk farCore;
+        farCore.radarId = "KTLX";
+        const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+        for (const float azimuth : {90.0F, 91.0F, 92.0F}) {
+            auto ray = syntheticTbssRay(azimuth, 1, 0.5F, 65.0, 10);
+            auto& field = ray.fields.at(refIndex);
+            for (std::size_t gate = 20; gate <= 24; ++gate)
+                field.at(gate) = static_cast<std::uint16_t>(1);  // clear the near core
+            for (std::size_t gate = 2; gate <= 4; ++gate)
+                field.at(gate) =
+                    static_cast<std::uint16_t>(std::lround(65.0 * 2.0 + 66.0));  // 21 km uprange
+            field.at(24) = static_cast<std::uint16_t>(std::lround(35.0 * 2.0 + 66.0));  // root
+            farCore.rays.push_back(ray);
+        }
+        assert(detectTbss(farCore, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // A weak run with no storm root (clear air before it) is not a spike.
+    {
+        DecodedChunk noRoot;
+        noRoot.radarId = "KTLX";
+        const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+        for (const float azimuth : {90.0F, 91.0F, 92.0F}) {
+            auto ray = syntheticTbssRay(azimuth, 1, 0.5F, 65.0, 10);
+            ray.fields.at(refIndex).at(24) = static_cast<std::uint16_t>(1);  // clear-air root
+            noRoot.rays.push_back(ray);
+        }
+        assert(detectTbss(noRoot, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // Fade-out end: weak echo dissolving into clear air still anchors.
+    {
+        DecodedChunk fade;
+        fade.radarId = "KTLX";
+        const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+        for (const float azimuth : {90.0F, 91.0F, 92.0F}) {
+            auto ray = syntheticTbssRay(azimuth, 1, 0.5F, 65.0, 12);
+            fade.rays.push_back(ray);
+        }
+        const auto faded = detectTbss(fade, 35.0, -97.0, 300.0, {});
+        assert(faded.size() == 1);
+        assert(std::abs(faded.front().spikeLengthKm - 11.0) < 0.6);
+    }
+    // A broad sheet (10 adjacent rays, 9 degrees wide) is stratiform edge,
+    // not a spike, however clean each ray reads.
+    {
+        DecodedChunk sheet;
+        sheet.radarId = "KTLX";
+        for (int step = 0; step < 10; ++step)
+            sheet.rays.push_back(syntheticTbssRay(90.0F + step, 1, 0.5F, 65.0, 10));
+        assert(detectTbss(sheet, 35.0, -97.0, 300.0, {}).empty());
+    }
+    // A run ending at strong echo hits another echo mass, not clear air.
+    {
+        DecodedChunk dirty;
+        dirty.radarId = "KTLX";
+        const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+        for (const float azimuth : {90.0F, 91.0F, 92.0F}) {
+            auto ray = syntheticTbssRay(azimuth, 1, 0.5F, 65.0, 6);
+            ray.fields.at(refIndex).at(31) =
+                static_cast<std::uint16_t>(std::lround(40.0 * 2.0 + 66.0));
+            dirty.rays.push_back(ray);
+        }
+        assert(detectTbss(dirty, 35.0, -97.0, 300.0, {}).empty());
     }
 }
 

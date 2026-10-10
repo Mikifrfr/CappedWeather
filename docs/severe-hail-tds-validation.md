@@ -128,3 +128,48 @@ as footprint extent instead of label soup, so 10 ships.
 - Full MESH/SHI with model freezing levels: needs a sounding ingest
   path that does not exist yet. VIL-density proxy stays until then,
   and the UI never prints an MEHS inch value.
+
+## TBSS replay: first light, not a score (2026-10-10)
+
+No TBSS truth labels exist for the archive cases, so no POD/FAR is
+claimed. What the replays show is mechanism plus restraint, via
+`rotation_replay --tbss --tbss-diagnose` (veto census per volume):
+
+| Volumes | 60+ core rays | TBSS kept | Dominant veto |
+|---|---|---|---|
+| Quiet KTLX Oct 9 (3 vols) | 0 | 0 | no cores at all |
+| Mayfield KPAH 02:23Z | 304 | 1 | downrange echo (112 dirty) |
+| Mayfield KPAH 02:41Z | 304 | 0 | downrange echo (168 dirty) |
+| Moore KTLX 20:12Z | 788 | 0 | downrange echo (507 dirty) |
+| Moore KTLX 20:20Z | 1103 | 0 | downrange echo (566 dirty) |
+
+The one positive is textbook context: core 69 dBZ, spike 8.2 km on
+5 rays at (36.3838, -89.4882), ~7 km from a tier-3 hail core and the
+tracked mesocyclone in the Mayfield supercell at 02:23Z. The zeros are
+withholds, not misses proven: downrange echo masses mask the far-edge
+fade the detector requires, so it stays silent rather than guessing
+inside precipitation. Quiet volumes are clean (0 cores, 0 kept).
+
+Calibration path, each step re-run on all 7 volumes with quiet pinned
+at zero: v1 (spike must abut the core) fired on nothing anywhere, which
+the veto census exposed as wrong geometry (cores sit embedded in
+30-50 dBZ storm, never adjacent to weak echo); v2 (storm-edge root plus
+20 km core link) found runs but stranded them as same-tilt singles;
+v3 (speckle-tolerant runs with fade-out ends, cross-tilt proximity
+clustering, broad-sheets-rejected cap) produced the Mayfield hit.
+Tune further only against new cases with labeled spikes, especially an
+isolated supercell with an unmasked far edge.
+
+## Bunkers/SRH withhold census (2026-10-10)
+
+`rotation_replay --vad --bunkers --srh` on the same 7 volumes: 7/7
+invalid, for two different honest reasons. The 3 quiet volumes carry
+Good/Marginal VAD rows only to ~1.3 km AGL, so the 4-6 km upper half
+never fills. The 4 tornadic volumes (Mayfield, Moore) span to 6 km but
+every row is Poor (RMSE 12-26: tornadic flow is not horizontally
+uniform, and the sine fit says so). The strict rule (Good/Marginal rows
+only) is kept deliberately: Poor-row storm motion on outbreak days
+would manufacture guidance exactly when it matters most. The scan
+dialog prints no motion/SRH line when invalid, so the feature is
+silent until a uniform-flow deep-echo day earns it. Revisit only with
+a pre-storm environment volume showing Good rows through 6 km.
