@@ -2539,8 +2539,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                 std::cerr << "Mosaic decode should fail closed on garbage\n";
                 return 1;
             }
-            QImage big(2000, 2000, QImage::Format_ARGB32);
-            big.fill(QColor(0, 128, 0));
+            QImage big(2000, 2000, QImage::Format_Indexed8);
+            big.setColorCount(256);
+            for (int i = 0; i < 256; ++i) big.setColor(i, qRgb(0, i, 0));
+            big.fill(128);
             QByteArray bigPng;
             QBuffer bigBuffer(&bigPng);
             bigBuffer.open(QIODevice::WriteOnly);
