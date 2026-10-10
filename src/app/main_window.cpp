@@ -1579,6 +1579,7 @@ void MainWindow::buildUi() {
         hrrrLeadCombo_->addItem(QStringLiteral("+2 h"), 2);
         hrrrLeadCombo_->addItem(QStringLiteral("+3 h"), 3);
         hrrrLeadCombo_->addItem(QStringLiteral("+6 h"), 6);
+        hrrrLeadCombo_->addItem(QStringLiteral("+12 h"), 12);
         hrrrLeadCombo_->setToolTip(QStringLiteral("HRRR valid time. Refetches on change."));
         hrrrLeadRow->addWidget(hrrrLeadLabel);
         hrrrLeadRow->addWidget(hrrrLeadCombo_, 1);
