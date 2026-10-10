@@ -1025,6 +1025,16 @@ MainWindow::MainWindow(QWidget* parent)
                                            30, 600) * 1000);
     glmSource_->configure(glmConfigFromSettings());
     glmSource_->start();
+    // Weekly update discovery, 15 s after startup so launch stays fast.
+    // Skipped in test mode (automated runs must not hit the network for
+    // this); silent unless a newer build exists.
+    if (!QStandardPaths::isTestModeEnabled()) {
+        const auto lastCheck = settings.value(QStringLiteral("network/lastUpdateCheck"), 0);
+        if (updateCheckDue(lastCheck.toLongLong(),
+                           QDateTime::currentDateTimeUtc().toSecsSinceEpoch())) {
+            QTimer::singleShot(15000, this, [this] { runUpdateCheck(true); });
+        }
+    }
     if (!restoreGeometry(settings.value(QStringLiteral("window/geometry")).toByteArray())) {
         if (const auto* screen = QGuiApplication::primaryScreen()) {
             const auto available = screen->availableGeometry();
@@ -4396,17 +4406,36 @@ void MainWindow::showAboutDialog() {
 }
 
 void MainWindow::checkForUpdates() {
+    runUpdateCheck(false);
+}
+
+void MainWindow::runUpdateCheck(const bool silent) {
     // Discovery only: one async metadata fetch, then a plain dialog. No
     // downloading, no installs. Concurrent triggers while pending are
-    // ignored so double-clicks never stack queries.
+    // ignored so double-clicks never stack queries. Silent mode (weekly
+    // auto-check) only surfaces newer builds on the status bar.
     if (updateCheckPending_ || !updateChecker_) return;
     updateCheckPending_ = true;
-    statusBar()->showMessage(QStringLiteral("Checking for updates…"), 10000);
+    if (!silent) statusBar()->showMessage(QStringLiteral("Checking for updates…"), 10000);
     auto connection = std::make_shared<QMetaObject::Connection>();
     *connection = connect(updateChecker_, &UpdateChecker::finished, this,
-                          [this, connection](const UpdateResult& result) {
+                          [this, connection, silent](const UpdateResult& result) {
                               QObject::disconnect(*connection);
                               updateCheckPending_ = false;
+                              QSettings settings;
+                              settings.setValue(
+                                  QStringLiteral("network/lastUpdateCheck"),
+                                  QDateTime::currentDateTimeUtc().toSecsSinceEpoch());
+                              if (silent) {
+                                  if (result.state == UpdateState::Newer) {
+                                      statusBar()->showMessage(
+                                          QStringLiteral("CappedWeather %1 is available — see Help "
+                                                         "→ Check for updates.")
+                                              .arg(result.latestText),
+                                          15000);
+                                  }
+                                  return;
+                              }
                               QMessageBox dialog(this);
                               dialog.setWindowTitle(QStringLiteral("Check for updates"));
                               const bool canOpen = result.pageUrl.isValid();

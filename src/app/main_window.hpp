@@ -139,6 +139,9 @@ private slots:
     void checkForUpdates();
 
 private:
+    // Silent variant for the weekly auto-check (surfaces newer builds on
+    // the status bar only). Shared fetch path with the dialog above.
+    void runUpdateCheck(bool silent);
     void buildUi();
     void rebuildStationPicker();
     void updateStationSummary();

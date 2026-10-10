@@ -2772,6 +2772,16 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             std::cerr << "Malformed release metadata should fail closed\n";
             return 1;
         }
+        // Weekly auto-check clock: never-checked is due, six days is not,
+        // seven days is, undated now never fires.
+        if (!updateCheckDue(0, 1791658800LL) || !updateCheckDue(-5, 1791658800LL) ||
+            updateCheckDue(1791658800LL - 6 * 86400LL, 1791658800LL) ||
+            !updateCheckDue(1791658800LL - 7 * 86400LL, 1791658800LL) ||
+            !updateCheckDue(1791658800LL - 30 * 86400LL, 1791658800LL) ||
+            updateCheckDue(1791658800LL, 0)) {
+            std::cerr << "Update check clock is wrong\n";
+            return 1;
+        }
     }
     // Update discovery action is wired into the menus (the result dialog
     // itself stays out of headless runs: modal exec would hang the suite).

@@ -56,6 +56,10 @@ std::optional<UpdateRelease> parseUpdateRelease(const QByteArray& json, QString*
 // no-release-info and error paths so the user can always look manually).
 QUrl projectReleasesUrl();
 
+// Weekly auto-check scheduling: due when never checked or the last check
+// predates now by seven days. Pure, clock-injected for hermetic tests.
+bool updateCheckDue(long long lastCheckEpochSeconds, long long nowEpochSeconds);
+
 enum class UpdateState {
     Current,
     Newer,

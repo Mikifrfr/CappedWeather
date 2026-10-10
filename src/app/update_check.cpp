@@ -38,6 +38,12 @@ QUrl projectReleasesUrl() {
     return QUrl(QString::fromLatin1(kProjectReleases));
 }
 
+bool updateCheckDue(const long long lastCheckEpochSeconds, const long long nowEpochSeconds) {
+    if (nowEpochSeconds <= 0) return false;
+    if (lastCheckEpochSeconds <= 0) return true;  // never checked
+    return nowEpochSeconds - lastCheckEpochSeconds >= 7 * 86400LL;
+}
+
 UpdateVersion parseAppVersion(const QString& text) {
     UpdateVersion version;
     QString stripped = text.trimmed();
