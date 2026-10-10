@@ -775,6 +775,7 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         tdsTracks_.clear();
         tdsDetections_.clear();
         hailCores_.clear();
+        hailSwaths_.clear();
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -900,6 +901,10 @@ void RadarMapCanvas::setHailVisible(const bool visible) {
 
 int RadarMapCanvas::hailCoreCount() const {
     return static_cast<int>(hailCores_.size());
+}
+
+std::vector<HailSwath> RadarMapCanvas::hailSwaths() const {
+    return hailSwaths_.swaths();
 }
 
 void RadarMapCanvas::setZdrVisible(const bool visible) {
@@ -1060,6 +1065,11 @@ void RadarMapCanvas::rebuildLightningFusion() {
                 if (guard->dataTime_.isValid()) {
                     guard->stormTracker_.update(
                         guard->radarFeatures_,
+                        static_cast<double>(guard->dataTime_.toSecsSinceEpoch()));
+                    // Hail swaths accumulate here: same tracks, same cores,
+                    // same epoch, so the footprint follows the storm.
+                    guard->hailSwaths_.update(
+                        guard->stormTracker_.tracks(), guard->hailCores_,
                         static_cast<double>(guard->dataTime_.toSecsSinceEpoch()));
                 }
             }
@@ -2893,6 +2903,7 @@ void RadarMapCanvas::paintLightningOverlay(QPainter& painter) {
     paintStormTrail(painter);
     paintShearOverlay(painter);
     paintCirculationMarkers(painter);
+    paintHailSwaths(painter);
     paintHailCores(painter);
     paintZdrColumns(painter);
     paintTbss(painter);
@@ -3083,6 +3094,40 @@ void RadarMapCanvas::paintCirculationMarkers(QPainter& painter) {
                     .arg(tvs ? QStringLiteral("TVS") : QStringLiteral("MESO"))
                     .arg(det.maxDeltaVelocityMetersPerSecond, 0, 'f', 0)
                     .arg(det.depthMeters / 1000.0, 0, 'f', 1));
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintHailSwaths(QPainter& painter) {
+    if (!hailVisible_) return;
+    // Per-storm footprints: convex hulls of persisted hail fixes, tinted by
+    // peak tier. Hulls with fewer than 3 distinct points never form (a line
+    // is a path, not a footprint), so this loop simply skips them.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto& swath : hailSwaths_.swaths()) {
+        const auto ring = hailSwathHull(swath);
+        if (ring.size() < 3) continue;
+        QPolygonF polygon;
+        for (const auto& [lat, lon] : ring) polygon.push_back(screenPoint(lat, lon));
+        if (!viewport.intersects(polygon.boundingRect())) continue;
+        const QColor base = swath.maxTier >= 3   ? QColor(255, 80, 200)
+                            : swath.maxTier == 2 ? QColor(64, 224, 255)
+                                                 : QColor(120, 180, 220);
+        QColor fill = base;
+        fill.setAlpha(28);
+        painter.setBrush(fill);
+        painter.setPen(QPen(base, 1.5, Qt::DashLine));
+        painter.drawPolygon(polygon, Qt::OddEvenFill);
+        if (zoom_ >= 6) {
+            const auto bounds = polygon.boundingRect();
+            painter.setPen(base);
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(QRectF(bounds.left(), bounds.top() - 18, 200, 16),
+                             Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("HAIL SWATH T%1").arg(swath.maxTier));
         }
     }
     painter.restore();

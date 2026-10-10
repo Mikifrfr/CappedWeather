@@ -8,6 +8,7 @@
 #include "core/vad.hpp"
 #include "core/bright_band.hpp"
 #include "core/bunkers.hpp"
+#include "core/hail_swath.hpp"
 #include "core/srh.hpp"
 #include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
@@ -865,6 +866,74 @@ void testSrh() {
         const auto srh = estimateSrh(levels, motion, 300.0, {});
         assert(srh.valid && srh.srh01Valid && !srh.srh03Valid);
         assert(srh.quality == VadQuality::Marginal);
+    }
+}
+
+void testHailSwaths() {
+    const auto trackAt = [](const int id, const double lat, const double lon) {
+        StormTrack track;
+        track.id = id;
+        track.fixes.push_back({lat, lon, 55.0, 0.0, false, 1000.0});
+        return track;
+    };
+    const auto coreAt = [](const double lat, const double lon, const int tier) {
+        HailCore core;
+        core.latitudeDeg = lat;
+        core.longitudeDeg = lon;
+        core.tier = tier;
+        core.maxReflectivityDbz = 60.0;
+        return core;
+    };
+    // Three volumes, one storm: fixes accumulate on the same swath.
+    HailSwathTracker tracker;
+    const std::vector<StormTrack> tracks = {trackAt(7, 35.0, -97.0)};
+    tracker.update(tracks, {coreAt(35.01, -97.0, 1)}, 1000.0);
+    tracker.update(tracks, {coreAt(35.02, -96.99, 2)}, 1300.0);
+    tracker.update(tracks, {coreAt(35.0, -96.98, 1)}, 1600.0);
+    assert(tracker.swaths().size() == 1);
+    assert(tracker.swaths().front().trackId == 7);
+    assert(tracker.swaths().front().fixes.size() == 3);
+    assert(tracker.swaths().front().maxTier == 2);
+    assert(hailSwathHull(tracker.swaths().front()).size() >= 3);
+    // A distant core belongs to no storm.
+    {
+        HailSwathTracker far;
+        far.update(tracks, {coreAt(36.0, -95.0, 3)}, 1000.0);
+        assert(far.swaths().empty());
+    }
+    // Tier-0 and non-finite cores never seed fixes.
+    {
+        HailSwathTracker junk;
+        junk.update(tracks, {coreAt(35.01, -97.0, 0)}, 1000.0);
+        HailCore nan = coreAt(35.01, -97.0, 2);
+        nan.latitudeDeg = std::numeric_limits<double>::quiet_NaN();
+        junk.update(tracks, {nan}, 1300.0);
+        assert(junk.swaths().empty());
+    }
+    // Collinear fixes are a path, not a footprint: no hull.
+    {
+        HailSwath line;
+        line.trackId = 9;
+        line.fixes = {{35.0, -97.0, 1, 1000.0}, {35.01, -97.0, 1, 1300.0}, {35.02, -97.0, 1, 1600.0}};
+        assert(hailSwathHull(line).empty());
+    }
+    // Fix cap keeps the newest.
+    {
+        HailSwathConfig small;
+        small.maxFixesPerSwath = 4;
+        HailSwathTracker capped(small);
+        for (int i = 0; i < 6; ++i)
+            capped.update(tracks, {coreAt(35.0 + i * 0.005, -97.0, 1)}, 1000.0 + i * 300.0);
+        assert(capped.swaths().front().fixes.size() == 4);
+        assert(capped.swaths().front().fixes.back().epochSeconds == 2500.0);
+    }
+    // Bad epochs fail closed.
+    {
+        HailSwathTracker bad;
+        bad.update(tracks, {coreAt(35.01, -97.0, 2)},
+                   std::numeric_limits<double>::quiet_NaN());
+        bad.update(tracks, {coreAt(35.01, -97.0, 2)}, -5.0);
+        assert(bad.swaths().empty());
     }
 }
 
@@ -2276,6 +2345,7 @@ int main() {
     testVadProfile();
     testBrightBand();
     testBunkers();
+    testHailSwaths();
     testSrh();
     testTbss();
     testZdrColumns();

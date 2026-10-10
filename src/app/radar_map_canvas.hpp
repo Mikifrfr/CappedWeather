@@ -4,6 +4,7 @@
 #include "core/circulation_detector.hpp"
 #include "core/debris_detector.hpp"
 #include "core/hail_detector.hpp"
+#include "core/hail_swath.hpp"
 #include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
 #include "app/spc_convective.hpp"
@@ -167,6 +168,7 @@ public:
     [[nodiscard]] bool tbssVisible() const { return tbssVisible_; }
     [[nodiscard]] int tbssCount() const;
     [[nodiscard]] int hailCoreCount() const;
+    [[nodiscard]] std::vector<HailSwath> hailSwaths() const;
     void setTdsVisible(bool visible);
     [[nodiscard]] bool tdsVisible() const { return tdsVisible_; }
     [[nodiscard]] int tdsCount() const;
@@ -544,6 +546,11 @@ private:
     // output: the VIL field is already volume-smoothed, so no time gate.
     std::vector<HailCore> hailCores_;
     void paintHailCores(QPainter& painter);
+    // Hail swaths: per-storm hulls of persisted hail fixes, folded from the
+    // same fusion completion as the cores. Drawn under the hail toggle: one
+    // layer family, one switch.
+    HailSwathTracker hailSwaths_;
+    void paintHailSwaths(QPainter& painter);
     std::vector<ZdrColumn> zdrColumns_;
     void paintZdrColumns(QPainter& painter);
     std::vector<TbssDetection> tbssDetections_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/level2_decoder.hpp"
+#include "core/hail_swath.hpp"
 #include "app/alert_center.hpp"
 #include "app/session_store.hpp"
 #include "app/theme.hpp"
@@ -88,6 +89,10 @@ public:
     // reprojection). Public and static so the KML builder is unit-testable.
     static QString frameGroundOverlayKml(const QString& name, const QString& pngHref, double north,
                                          double south, double east, double west, QString* error);
+    // Hail-swath Placemark polygons for the frame KML: one outer ring per
+    // swath hull, tier-tinted, with a guidance disclaimer in the description.
+    // Empty (not an error) when there is nothing drawable. Unit-testable.
+    static QString swathPlacemarksKml(const std::vector<HailSwath>& swaths, QString* error);
     // World file (.pgw) sidecar for PNG snapshots: six plain-text lines
     // mapping image pixels to lon/lat so GIS tools load the grab in place.
     static QString frameWorldFile(double north, double south, double east, double west,

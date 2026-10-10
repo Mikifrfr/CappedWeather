@@ -1397,7 +1397,7 @@ void MainWindow::buildUi() {
                  QStringLiteral("hailCoreCheck"),
                  QStringLiteral("VIL density guidance, size ranges not diameters"), hailCoreBadge_,
                  QStringLiteral("hailCoreBadge"), true,
-                 QStringLiteral("Hail guidance from VIL divided by echo-top height (3.5 severe possible, 4.0 likely, 4.5 significant). Correlates with hail size, never measures a diameter."));
+                 QStringLiteral("Hail guidance from VIL divided by echo-top height (3.5 severe possible, 4.0 likely, 4.5 significant). Correlates with hail size, never measures a diameter. Per-storm swath footprints accumulate along tracked storms and export in the frame KML."));
     makeLayerRow(zdrColumnCheck_, QStringLiteral("ZDR columns (updraft)"),
                  QStringLiteral("zdrColumnCheck"),
                  QStringLiteral("Dual-pol updraft proxy, guidance only"), zdrColumnBadge_,
@@ -5271,6 +5271,40 @@ QString MainWindow::frameGroundOverlayKml(const QString& name, const QString& pn
         .arg(west, 0, 'f', 6);
 }
 
+QString MainWindow::swathPlacemarksKml(const std::vector<HailSwath>& swaths, QString* error) {
+    if (error) error->clear();
+    QString placemarks;
+    for (const auto& swath : swaths) {
+        const auto ring = hailSwathHull(swath);
+        if (ring.size() < 3) continue;
+        // KML color is aabbggrr; tier tints match the map swath colors.
+        const QString color = swath.maxTier >= 3   ? QStringLiteral("c8c850ff")
+                              : swath.maxTier == 2 ? QStringLiteral("c8ffe040")
+                                                   : QStringLiteral("c8dcb478");
+        QString coords;
+        for (const auto& [lat, lon] : ring) {
+            if (!std::isfinite(lat) || !std::isfinite(lon)) continue;
+            coords += QStringLiteral("%1,%2,0 ").arg(lon, 0, 'f', 5).arg(lat, 0, 'f', 5);
+        }
+        // Close the ring for strict parsers.
+        if (!ring.empty())
+            coords += QStringLiteral("%1,%2,0 ").arg(ring.front().second, 0, 'f', 5)
+                          .arg(ring.front().first, 0, 'f', 5);
+        if (coords.isEmpty()) continue;
+        placemarks += QStringLiteral("<Placemark><name>HAIL SWATH T%1</name>"
+                                     "<description>Guidance footprint of persisted hail cores, "
+                                     "never a forecast or size.</description>"
+                                     "<Style><LineStyle><color>%2</color><width>2</width></LineStyle>"
+                                     "<PolyStyle><color>%2</color></PolyStyle></Style>"
+                                     "<Polygon><outerBoundaryIs><LinearRing><coordinates>%3"
+                                     "</coordinates></LinearRing></outerBoundaryIs></Polygon>"
+                                     "</Placemark>\n")
+                          .arg(swath.maxTier)
+                          .arg(color, coords);
+    }
+    return placemarks;
+}
+
 QString MainWindow::frameWorldFile(const double north, const double south, const double east,
                                   const double west, const int imageWidth, const int imageHeight,
                                   QString* error) {
@@ -5342,13 +5376,22 @@ void MainWindow::exportFrameKml() {
                                       QString::fromUtf8(productDescriptor(map_->product()).shortName.data()),
                                       QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
     QString kmlError;
-    const auto kml = frameGroundOverlayKml(overlayName, QFileInfo(pngPath).fileName(), bounds.north,
-                                           bounds.south, bounds.east, bounds.west, &kmlError);
+    auto kml = frameGroundOverlayKml(overlayName, QFileInfo(pngPath).fileName(), bounds.north,
+                                     bounds.south, bounds.east, bounds.west, &kmlError);
     if (kml.isEmpty()) {
         QFile::remove(pngPath);
         QMessageBox::warning(this, QStringLiteral("Export failed"), kmlError);
         return;
     }
+    // Hail-swath vectors ride the same KML so GIS gets footprints plus raster.
+    QString swathError;
+    const auto placemarks = swathPlacemarksKml(map_->hailSwaths(), &swathError);
+    if (!swathError.isEmpty()) {
+        QFile::remove(pngPath);
+        QMessageBox::warning(this, QStringLiteral("Export failed"), swathError);
+        return;
+    }
+    if (!placemarks.isEmpty()) kml.replace(QStringLiteral("</kml>"), placemarks + QStringLiteral("</kml>"));
     QFile file(kmlPath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text) || file.write(kml.toUtf8()) != kml.toUtf8().size()) {
         QFile::remove(pngPath);

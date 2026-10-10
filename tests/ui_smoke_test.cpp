@@ -2248,6 +2248,31 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // Hail-swath KML: one tier-tinted Placemark per drawable hull, empty when
+    // there is nothing to draw (never an error).
+    {
+        QString swathError;
+        HailSwath swath;
+        swath.trackId = 7;
+        swath.maxTier = 2;
+        swath.fixes = {{35.0, -97.0, 1, 1000.0}, {35.02, -96.99, 2, 1300.0}, {35.0, -96.98, 1, 1600.0}};
+        const auto placemarks = MainWindow::swathPlacemarksKml({swath}, &swathError);
+        if (!swathError.isEmpty() || !placemarks.contains(QStringLiteral("<Placemark>")) ||
+            !placemarks.contains(QStringLiteral("HAIL SWATH T2")) ||
+            !placemarks.contains(QStringLiteral("<coordinates>")) ||
+            !placemarks.contains(QStringLiteral("never a forecast"))) {
+            std::cerr << "Swath placemarks should carry one guidance polygon\n";
+            return 1;
+        }
+        HailSwath line;
+        line.trackId = 9;
+        line.fixes = {{35.0, -97.0, 1, 1000.0}, {35.01, -97.0, 1, 1300.0}};
+        if (!MainWindow::swathPlacemarksKml({line}, &swathError).isEmpty() ||
+            !MainWindow::swathPlacemarksKml({}, &swathError).isEmpty() || !swathError.isEmpty()) {
+            std::cerr << "Undrawable swaths should export as empty, not error\n";
+            return 1;
+        }
+    }
     // Case-pack zip: deflated round-trip with CRC verification, fail-closed
     // on truncation and non-zip input (half-extracted files are removed).
     {
