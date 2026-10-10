@@ -57,6 +57,22 @@ QVector<MetarObs> parseMetarObs(const QByteArray& data, QString* error);
 // unrecognized string never paints as VFR green.
 QColor metarCategoryColor(const QString& flightCategory);
 
+// Experimental precip-type readout: surface temp crossed with a measured
+// melting level (bright-band estimate). Strictly gated: without a valid
+// melting level everything is Unknown (fail closed), because surface temp
+// alone over-claims in inversions and all-snow soundings show no bright
+// band at all. Thresholds are conservative and documented: at/below
+// freezing with a melting layer overhead is snow; within 2 C above is a
+// mix; warmer is rain. Scores nothing until a winter-season validation.
+enum class PrecipType {
+    Unknown,
+    Rain,
+    Mix,
+    Snow,
+};
+PrecipType precipTypeForStation(double tempCelsius, bool meltingLevelValid);
+QString precipTypeLabel(PrecipType type);
+
 class MetarSource : public QObject {
     Q_OBJECT
 public:

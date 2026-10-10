@@ -2169,6 +2169,22 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             std::cerr << "METAR flight-category colors are wrong\n";
             return 1;
         }
+        // Experimental precip type: strict melting-level gate, conservative
+        // freezing thresholds, NaN-safe.
+        if (precipTypeForStation(-2.0, true) != PrecipType::Snow ||
+            precipTypeForStation(0.0, true) != PrecipType::Snow ||
+            precipTypeForStation(1.5, true) != PrecipType::Mix ||
+            precipTypeForStation(2.0, true) != PrecipType::Mix ||
+            precipTypeForStation(2.5, true) != PrecipType::Rain ||
+            precipTypeForStation(-5.0, false) != PrecipType::Unknown ||
+            precipTypeForStation(15.0, false) != PrecipType::Unknown ||
+            precipTypeForStation(std::numeric_limits<double>::quiet_NaN(), true) !=
+                PrecipType::Unknown ||
+            precipTypeLabel(PrecipType::Snow) != QStringLiteral("snow") ||
+            precipTypeLabel(PrecipType::Unknown) != QStringLiteral("unknown")) {
+            std::cerr << "Precip-type classification is wrong\n";
+            return 1;
+        }
     }
     // KML GroundOverlay: exact box values in the XML, XML-escaped names,
     // and fail-closed on flipped, wrapped, or non-finite bounds.

@@ -138,6 +138,23 @@ QColor metarCategoryColor(const QString& flightCategory) {
     return QColor(QStringLiteral("#9aa0a6"));
 }
 
+PrecipType precipTypeForStation(const double tempCelsius, const bool meltingLevelValid) {
+    if (!meltingLevelValid || std::isnan(tempCelsius)) return PrecipType::Unknown;
+    if (tempCelsius <= 0.0) return PrecipType::Snow;
+    if (tempCelsius <= 2.0) return PrecipType::Mix;
+    return PrecipType::Rain;
+}
+
+QString precipTypeLabel(const PrecipType type) {
+    switch (type) {
+    case PrecipType::Rain: return QStringLiteral("rain");
+    case PrecipType::Mix: return QStringLiteral("mix");
+    case PrecipType::Snow: return QStringLiteral("snow");
+    case PrecipType::Unknown:
+    default: return QStringLiteral("unknown");
+    }
+}
+
 MetarSource::MetarSource(QObject* parent) : QObject(parent) {}
 
 void MetarSource::setEnabled(const bool enabled) {

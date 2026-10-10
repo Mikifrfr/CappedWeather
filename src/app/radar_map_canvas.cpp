@@ -776,6 +776,7 @@ void RadarMapCanvas::setSelectedRadar(const QString& radarId) {
         tdsDetections_.clear();
         hailCores_.clear();
         hailSwaths_.clear();
+        brightBand_ = BrightBandEstimate{};
         dataTime_ = {};
         probeText_.clear();
         const auto* site = selectedSite();
@@ -983,6 +984,7 @@ void RadarMapCanvas::invalidateLightningFusion() {
     hailCores_.clear();
     zdrColumns_.clear();
     tbssDetections_.clear();
+    brightBand_ = BrightBandEstimate{};
     tdsDetections_.clear();
     lightningFusionComputedGeneration_ = 0;
 }
@@ -1033,6 +1035,8 @@ void RadarMapCanvas::rebuildLightningFusion() {
             // TBSS rides free too: same worker, reflectivity-only geometry
             // (works on single-pol OPERA volumes unlike ZDR columns).
             auto tbss = detectTbss(*chunk, latitude, longitude, antennaElevM);
+            // Melting level for the precip-type rings: same worker, same fix.
+            auto brightBand = estimateBrightBand(*chunk, antennaElevM);
             auto tds = dealiased ? detectDebrisSignatures(*chunk, circulations, latitude,
                                                            longitude, antennaElevM)
                                  : std::vector<TdsDetection>{};
@@ -1044,6 +1048,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                  circulations = std::move(circulations),
                  watch = std::move(watch), hailCores = std::move(hailCores),
                  zdrColumns = std::move(zdrColumns), tbss = std::move(tbss),
+                 brightBand = std::move(brightBand),
                  tds = std::move(tds)]() mutable {
                     if (!guard) return;
                     guard->lightningFusionBuildPending_ = false;
@@ -1055,6 +1060,7 @@ void RadarMapCanvas::rebuildLightningFusion() {
                         guard->hailCores_ = std::move(hailCores);
                         guard->zdrColumns_ = std::move(zdrColumns);
                         guard->tbssDetections_ = std::move(tbss);
+                        guard->brightBand_ = std::move(brightBand);
                         guard->persistTds(std::move(tds));
                         guard->lightningFusionComputedGeneration_ = generation;
                         guard->refreshPinnedLightningInfo();
@@ -2822,6 +2828,21 @@ void RadarMapCanvas::paintMetars(QPainter& painter) {
         painter.drawEllipse(point, 4.0, 4.0);
         painter.setPen(QPen(color, 1.0));
         painter.drawEllipse(point, 5.5, 5.5);
+        // Experimental precip-type ring: surface temp crossed with the
+        // measured melting level. No ring when the melting level is invalid
+        // (fail closed) or the station reports no temp.
+        if (brightBand_.valid) {
+            const auto precip = precipTypeForStation(metar.tempC, true);
+            const QColor ring = precip == PrecipType::Snow   ? QColor(125, 211, 252)
+                                : precip == PrecipType::Mix   ? QColor(192, 132, 252)
+                                : precip == PrecipType::Rain  ? QColor(74, 222, 128)
+                                                             : QColor(0, 0, 0, 0);
+            if (ring.alpha() != 0) {
+                painter.setPen(QPen(ring, 1.5, Qt::DotLine));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(point, 8.5, 8.5);
+            }
+        }
         if (showLabels) {
             const auto tempText = std::isnan(metar.tempC)
                                       ? QStringLiteral("--")
@@ -4312,9 +4333,14 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
         const auto obsTime = metar->obsTime.isValid()
                                  ? metar->obsTime.toString(QStringLiteral("MMM d HH:mm 'UTC'"))
                                  : QStringLiteral("time unknown");
-        return {QStringLiteral("%1 (%2)\n%3 | dewpoint %4\n%5 | %6%7\nObserved: %8")
+        const auto precip = precipTypeForStation(metar->tempC, brightBand_.valid);
+        const auto precipText =
+            precip == PrecipType::Unknown
+                ? QStringLiteral("Precip: unknown (needs a measured melting level)")
+                : QStringLiteral("Precip: %1 (experimental)").arg(precipTypeLabel(precip));
+        return {QStringLiteral("%1 (%2)\n%3 | dewpoint %4\n%5 | %6%7\n%8\nObserved: %9")
                     .arg(metar->icaoId, name, tempText, dewText, windText, category, age,
-                         obsTime),
+                         precipText, obsTime),
                 PinnedInfoKind::Metar, std::nullopt};
     }
     if (mcdVisible_) {

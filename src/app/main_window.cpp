@@ -1432,7 +1432,7 @@ void MainWindow::buildUi() {
     makeLayerRow(metarCheck_, QStringLiteral("METAR stations"), QStringLiteral("metarCheck"),
                  QStringLiteral("Surface temp/dew/wind near the radar"), metarBadge_,
                  QStringLiteral("metarBadge"), true,
-                 QStringLiteral("Nearby METAR surface observations: temp/dew markers colored by flight category, full wind and age on click."));
+                 QStringLiteral("Nearby METAR surface observations: temp/dew markers colored by flight category, full wind and age on click. Dotted outer rings show experimental precip type (snow/mix/rain) where a melting level is measured."));
     auto* placefileRow = new QHBoxLayout();
     placefileRow->setSpacing(4);
     // Share the row evenly and allow shrinking. These three default to their

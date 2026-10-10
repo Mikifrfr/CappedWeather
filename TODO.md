@@ -30,7 +30,6 @@ Short active list. Done work stays in git history and release notes, not in this
 
 Ready to build (data live now, testable hermetically plus replay):
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
-- [ ] Precip-type map. Bright-band height crossed with METAR surface temps: rain/snow/mix shading where the low levels are sampled. Winter-only value, experimental label until scored.
 
 Research-gated (confirm open shape first, METAR/ECCC style):
 - [ ] NWS damage-assessment (DAT) tornado paths. Post-event survey polygons as an overlay layer; confirm the open endpoint shape first.
@@ -49,6 +48,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Precip-type map (METAR surface temps crossed with the measured melting level, dotted station rings plus card line, strict fail-closed gating, hermetic classifier tests, experimental until a winter-season scoring).
 - Hail swaths from tracks plus cores (per-storm convex-hull footprints of persisted hail fixes, painted under the hail toggle, Placemark polygons in the frame KML export, six-case core tests plus KML builder tests).
 - TVS/meso markers into AlertCenter (opt-in sink off by default, TVS at Severe+ and meso at Moderate+, radar-scoped dedup with suppression and priming, always labeled guidance, Settings checkbox with persisted key, hermetic ingest tests).
 - Storm-relative helicity 0-1/0-3 km from VAD plus Bunkers motion (pair-sum integration with per-layer span gates, scan pop-out readout with quality flags, closed-form core tests, documented in derived-products).

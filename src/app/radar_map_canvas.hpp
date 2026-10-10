@@ -2,6 +2,7 @@
 
 #include "core/radar_catalog.hpp"
 #include "core/circulation_detector.hpp"
+#include "core/bright_band.hpp"
 #include "core/debris_detector.hpp"
 #include "core/hail_detector.hpp"
 #include "core/hail_swath.hpp"
@@ -518,6 +519,10 @@ private:
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
+    // Melting level for the experimental precip-type rings: measured per
+    // volume on the fusion worker (same site fix as hail/ZDR). Invalid until
+    // the first volume with dual-pol moments completes.
+    BrightBandEstimate brightBand_;
     // Nearest METAR within 14 px of a screen point, or nullopt. Shared by
     // the probe suffix and the click-hit branch so hover and pin agree.
     std::optional<MetarObs> metarNear(const QPointF& point) const;
