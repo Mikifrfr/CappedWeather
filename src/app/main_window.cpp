@@ -4381,6 +4381,8 @@ void MainWindow::showCommandPalette() {
              [this] { downloadOfflinePack(); });
     addEntry(QStringLiteral("Open: settings"), QStringLiteral("Network, chase, alerts, history"),
              [this] { showSettingsDialog(); });
+    addEntry(QStringLiteral("Help: check for updates"), QStringLiteral("Compare against the latest release"),
+             [this] { checkForUpdates(); });
     palette->setEntries(std::move(entries));
     connect(palette, &CommandPalette::entryChosen, this,
             [actions](int index) {
