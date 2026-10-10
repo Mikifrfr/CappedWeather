@@ -4,6 +4,7 @@
 #include "app/weather_overlay_source.hpp"
 #include "app/spc_convective.hpp"
 #include "app/nhc_cyclone.hpp"
+#include "app/wpc_ero.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2138,6 +2139,44 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // WPC ERO GeoJSON: live-shaped Day 1 Marginal + Slight, official
+    // renderer colors, holes reduced to the exterior ring, UTC windows.
+    const QByteArray wpcLive = R"JSON({"type":"FeatureCollection","features":[
+      {"type":"Feature","id":1,"geometry":{"type":"MultiPolygon","coordinates":[[[[-83.21,27.79],[-83.10,27.63],[-83.17,27.78],[-83.21,27.79]]]]},
+       "properties":{"objectid":1,"outlook":"Marginal (At Least 5%)","dn":1,"valid_time":"12Z 10/10/26 - 12Z 10/11/26",
+         "issue_time":"2026-10-10 07:45:00","start_time":"2026-10-10 12:00:00","end_time":"2026-10-11 12:00:00"}},
+      {"type":"Feature","id":3,"geometry":{"type":"Polygon","coordinates":[[[-83.17,27.78],[-82.92,27.26],[-82.81,27.3],[-83.17,27.78]],[[-83.41,33.37],[-84.01,33.27],[-84.22,33.42],[-83.41,33.37]]]},
+       "properties":{"objectid":3,"outlook":"Slight (At Least 15%)","dn":2,"valid_time":"12Z 10/10/26 - 12Z 10/11/26",
+         "issue_time":"2026-10-10 07:45:00","start_time":"2026-10-10 12:00:00","end_time":"2026-10-11 12:00:00"}}
+    ]})JSON";
+    const auto wpc = parseWpcEroGeoJson(wpcLive, 1, &parseError);
+    if (!parseError.isEmpty() || wpc.size() != 2 || wpc.front().day != 1 ||
+        wpc.front().fireKind != QStringLiteral("ERO") ||
+        wpc.front().label != QStringLiteral("MRGL") ||
+        wpc.front().label2 != QStringLiteral("Marginal (At Least 5%)") ||
+        wpc.front().fill != QStringLiteral("#38A800") ||
+        wpc.front().stroke != QStringLiteral("#00734C") ||
+        wpc.front().rings.size() != 1 ||
+        wpc.front().valid !=
+            QDateTime(QDate(2026, 10, 10), QTime(12, 0), QTimeZone::UTC) ||
+        wpc.front().expire !=
+            QDateTime(QDate(2026, 10, 11), QTime(12, 0), QTimeZone::UTC) ||
+        wpc.back().label != QStringLiteral("SLGT") ||
+        wpc.back().fill != QStringLiteral("#FFFE00") ||
+        wpc.back().rings.front().exterior.size() != 4) {
+        std::cerr << "WPC ERO parsing failed\n";
+        return 1;
+    }
+    const QByteArray wpcQuiet = R"JSON({"type":"FeatureCollection","features":[]})JSON";
+    if (!parseWpcEroGeoJson(wpcQuiet, 2, &parseError).isEmpty() || !parseError.isEmpty()) {
+        std::cerr << "Empty WPC outlook should parse to zero features\n";
+        return 1;
+    }
+    if (!parseWpcEroGeoJson(QByteArray("not json"), 1, &parseError).isEmpty() ||
+        parseError.isEmpty()) {
+        std::cerr << "Malformed WPC payload should fail closed with an error\n";
+        return 1;
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {
@@ -3046,6 +3085,15 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setPalette(RadarMapCanvas::PaletteKind::Operational);
     map->setRadarOpacity(65);
     map->setBelowThresholdVisible(true);
+    // Background-context layers fetch live data on the overlay timer, and
+    // processEvents pumps those replies into this panel. Hide them so the
+    // echo probe below samples radar gates deterministically instead of
+    // pinning whatever outlook/MCD/cyclone polygon covers Atlanta today.
+    map->setSpcOutlookVisible(false);
+    map->setSpcFireVisible(false);
+    map->setWpcVisible(false);
+    map->setMcdVisible(false);
+    map->setNhcVisible(false);
     const auto probePoint = map->radarScreenPoint(QStringLiteral("TATL")) + QPoint(20, 0);
     map->inspectAt(QPointF(probePoint));
     if (map->probeText().isEmpty() || !map->probeText().contains(QStringLiteral("dBZ"))) {

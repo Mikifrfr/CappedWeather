@@ -10,6 +10,7 @@
 #include "core/zdr_column.hpp"
 #include "app/spc_convective.hpp"
 #include "app/nhc_cyclone.hpp"
+#include "app/wpc_ero.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -201,6 +202,10 @@ public:
     void setNhcVisible(bool visible);
     [[nodiscard]] bool nhcVisible() const { return nhcVisible_; }
     [[nodiscard]] int nhcStormCount() const;
+    void setWpcOutlooks(QVector<SpcOutlookFeature> outlooks);
+    void setWpcVisible(bool visible);
+    [[nodiscard]] bool wpcVisible() const { return wpcVisible_; }
+    [[nodiscard]] int wpcOutlookCount() const;
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -526,6 +531,10 @@ private:
     // like MCDs (a handful of rings, no raster cache).
     QVector<NhcStorm> nhcStorms_;
     void paintNhcOverlays(QPainter& painter);
+    // WPC excessive-rainfall outlooks Day 1-3 (own vector, same paint idiom
+    // as the SPC outlooks: official fills at low alpha, Day 1 on top).
+    QVector<SpcOutlookFeature> wpcOutlooks_;
+    void paintWpcOutlook(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -648,6 +657,7 @@ private:
     bool spcOutlookVisible_ = true;
     bool spcFireVisible_ = true;
     bool nhcVisible_ = true;
+    bool wpcVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

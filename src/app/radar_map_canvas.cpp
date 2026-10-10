@@ -1256,6 +1256,21 @@ int RadarMapCanvas::nhcStormCount() const {
     return static_cast<int>(nhcStorms_.size());
 }
 
+void RadarMapCanvas::setWpcOutlooks(QVector<SpcOutlookFeature> outlooks) {
+    wpcOutlooks_ = std::move(outlooks);
+    update();
+}
+
+void RadarMapCanvas::setWpcVisible(const bool visible) {
+    if (wpcVisible_ == visible) return;
+    wpcVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::wpcOutlookCount() const {
+    return static_cast<int>(wpcOutlooks_.size());
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -2807,8 +2822,51 @@ void RadarMapCanvas::paintNhcOverlays(QPainter& painter) {
     painter.restore();
 }
 
-void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {
-    if (!mcdVisible_ || mcds_.isEmpty()) return;
+void RadarMapCanvas::paintWpcOutlook(QPainter& painter) {
+    if (!wpcVisible_ || wpcOutlooks_.isEmpty()) return;
+    // Same background slot as the SPC outlooks: official WPC fills at low
+    // alpha. Day 1 paints last so it wins overlaps; MDT over SLGT over MRGL.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QVector<const SpcOutlookFeature*> ordered;
+    for (const auto& feature : wpcOutlooks_) ordered.push_back(&feature);
+    std::sort(ordered.begin(), ordered.end(), [](const SpcOutlookFeature* a, const SpcOutlookFeature* b) {
+        if (a->day != b->day) return a->day > b->day;
+        return a->dn < b->dn;
+    });
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto* feature : ordered) {
+        QColor fill(feature->fill.isEmpty() ? QStringLiteral("#38A800") : feature->fill);
+        QColor stroke(feature->stroke.isEmpty() ? QStringLiteral("#00734C") : feature->stroke);
+        fill.setAlpha(34);
+        painter.setBrush(fill);
+        painter.setPen(QPen(stroke, 1.5));
+        for (const auto& ring : feature->rings) {
+            QPolygonF polygon;
+            polygon.reserve(ring.exterior.size());
+            for (const auto& lonLat : ring.exterior)
+                polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (!viewport.intersects(polygon.boundingRect())) continue;
+            painter.drawPolygon(polygon, Qt::OddEvenFill);
+            if (zoom_ >= 6 && !feature->label2.isEmpty()) {
+                double cx = 0.0, cy = 0.0;
+                for (const auto& point : polygon) {
+                    cx += point.x();
+                    cy += point.y();
+                }
+                cx /= std::max(1.0, static_cast<double>(polygon.size()));
+                cy /= std::max(1.0, static_cast<double>(polygon.size()));
+                painter.setPen(stroke);
+                painter.setFont(hudFont(7, QFont::DemiBold));
+                painter.drawText(QRectF(cx - 90, cy - 10, 180, 20), Qt::AlignCenter,
+                                 QStringLiteral("ERO D%1 %2").arg(feature->day).arg(feature->label2));
+            }
+        }
+    }
+    painter.restore();
+}
+
+void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
     painter.save();
@@ -3678,30 +3736,48 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         painter.drawText(QRectF(20, 164, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
                          quiet.join(QStringLiteral(" · ")));
     }
-    if (nhcVisible_ && !nhcStorms_.isEmpty()) {
-        // Cyclone chip below the SPC row: first storm name plus overflow.
-        const QRectF nhcPanel(12, 184, 258, 20);
-        painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
-        painter.setBrush(QColor(8, 15, 19, 205));
-        painter.drawRoundedRect(nhcPanel, 4, 4);
-        painter.setFont(hudFont(7, QFont::DemiBold));
-        painter.setPen(QColor(253, 186, 116));
-        const auto label = nhcStorms_.size() == 1
-                               ? nhcStorms_.front().name
-                               : QStringLiteral("%1 + %2 more")
-                                     .arg(nhcStorms_.front().name)
-                                     .arg(nhcStorms_.size() - 1);
-        painter.drawText(QRectF(20, 186, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                         QStringLiteral("🌀 %1").arg(label));
-    } else if (nhcVisible_) {
-        const QRectF nhcPanel(12, 184, 258, 20);
-        painter.setPen(QPen(QColor(205, 216, 222, 60), 1));
-        painter.setBrush(QColor(8, 15, 19, 150));
-        painter.drawRoundedRect(nhcPanel, 4, 4);
-        painter.setFont(hudFont(7, QFont::DemiBold));
-        painter.setPen(QColor(148, 163, 184));
-        painter.drawText(QRectF(20, 186, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                         QStringLiteral("NHC: none active"));
+    // Second context row: Day 1 ERO risk plus active cyclones. Either side
+    // may be quiet; the row draws whenever at least one layer is on so the
+    // map confirms what the feeds said.
+    if (wpcVisible_ || nhcVisible_) {
+        const SpcOutlookFeature* eroTop = nullptr;
+        if (wpcVisible_) {
+            for (const auto& feature : wpcOutlooks_) {
+                if (feature.day != 1) continue;
+                if (!eroTop || feature.dn > eroTop->dn) eroTop = &feature;
+            }
+        }
+        const bool active = eroTop || (nhcVisible_ && !nhcStorms_.isEmpty());
+        {
+            const QRectF eroPanel(12, 184, 258, 20);
+            painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
+            painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
+            painter.drawRoundedRect(eroPanel, 4, 4);
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            int ex = 20;
+            if (wpcVisible_) {
+                painter.setPen(eroTop ? QColor(125, 211, 252) : QColor(148, 163, 184));
+                painter.drawText(
+                    QRectF(ex, 186, 80, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                    eroTop ? QStringLiteral("ERO: %1").arg(
+                                 eroTop->label.isEmpty() ? eroTop->label2 : eroTop->label)
+                           : QStringLiteral("ERO: quiet"));
+                ex += 75;
+            }
+            if (nhcVisible_) {
+                painter.setPen(!nhcStorms_.isEmpty() ? QColor(253, 186, 116)
+                                                     : QColor(148, 163, 184));
+                const auto label =
+                    nhcStorms_.isEmpty()
+                        ? QStringLiteral("NHC: none")
+                        : nhcStorms_.size() == 1
+                              ? QStringLiteral("🌀 %1").arg(nhcStorms_.front().name)
+                              : QStringLiteral("🌀 %1 + %2").arg(nhcStorms_.front().name).arg(
+                                    nhcStorms_.size() - 1);
+                painter.drawText(QRectF(ex, 186, 258 - (ex - 12), 16), Qt::AlignLeft | Qt::AlignVCenter,
+                                 label);
+            }
+        }
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -4549,6 +4625,34 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
                     PinnedInfoKind::SpcOutlook, std::nullopt};
         }
     }
+    if (wpcVisible_) {
+        // Same background priority as the other outlooks, checked last so
+        // rainfall context never steals a severe-weather click.
+        const SpcOutlookFeature* best = nullptr;
+        for (const auto& feature : wpcOutlooks_) {
+            for (const auto& ring : feature.rings) {
+                QPolygonF polygon;
+                for (const auto& lonLat : ring.exterior)
+                    polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+                if (!polygon.containsPoint(point, Qt::OddEvenFill)) continue;
+                if (!best || feature.dn > best->dn ||
+                    (feature.dn == best->dn && feature.day < best->day))
+                    best = &feature;
+                break;
+            }
+        }
+        if (best) {
+            const auto window = best->valid.isValid() && best->expire.isValid()
+                                    ? QStringLiteral("Valid (UTC): %1 - %2")
+                                          .arg(best->valid.toString(QStringLiteral("MMM d HH:mm")),
+                                               best->expire.toString(QStringLiteral("MMM d HH:mm")))
+                                    : QStringLiteral("Valid: see WPC");
+            return {QStringLiteral("Day %1 ERO: %2\n%3\nWPC")
+                        .arg(best->day)
+                        .arg(best->label2.isEmpty() ? best->label : best->label2, window),
+                    PinnedInfoKind::SpcOutlook, std::nullopt};
+        }
+    }
     return {};
 }
 
@@ -5105,11 +5209,13 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     if (warningsOnTop_) {
         paintSpcOutlook(painter);
         paintSpcFireOutlook(painter);
+        paintWpcOutlook(painter);
         paintRadarOverlay(painter);
         paintWeatherOverlays(painter);
     } else {
         paintSpcOutlook(painter);
         paintSpcFireOutlook(painter);
+        paintWpcOutlook(painter);
         paintWeatherOverlays(painter);
         paintRadarOverlay(painter);
     }

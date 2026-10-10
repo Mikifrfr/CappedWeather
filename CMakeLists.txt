@@ -215,6 +215,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/spc_convective.hpp
             src/app/nhc_cyclone.cpp
             src/app/nhc_cyclone.hpp
+            src/app/wpc_ero.cpp
+            src/app/wpc_ero.hpp
             src/app/offline_pack.cpp
             src/app/offline_pack.hpp
             src/app/case_pack.cpp
