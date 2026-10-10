@@ -292,6 +292,84 @@ bool looksLikeShapefile(const QByteArray& bytes) {
 }
 
 std::optional<PlacefileDocument> parseShapefile(const QByteArray& bytes, QString* error) {
+    return parseShapefileData(bytes, {}, error);
+}
+
+QStringList parseDbfNames(const QByteArray& bytes) {
+    // dBase III/IV: 32-byte header, 32-byte field descriptors to 0x0D,
+    // fixed-length records with a deletion flag up front.
+    if (bytes.size() < 33) return {};
+    const auto* data = reinterpret_cast<const uchar*>(bytes.constData());
+    const auto le32 = [&](qsizetype pos) {
+        return static_cast<quint32>(data[pos]) | (static_cast<quint32>(data[pos + 1]) << 8) |
+               (static_cast<quint32>(data[pos + 2]) << 16) | (static_cast<quint32>(data[pos + 3]) << 24);
+    };
+    const quint32 recordCount = le32(4);
+    const quint32 headerLength = static_cast<quint32>(data[8]) | (static_cast<quint32>(data[9]) << 8);
+    const quint32 recordLength =
+        static_cast<quint32>(data[10]) | (static_cast<quint32>(data[11]) << 8);
+    if (recordCount == 0 || recordCount > 1'000'000 || headerLength < 33 || recordLength < 1 ||
+        headerLength > static_cast<quint64>(bytes.size())) {
+        return {};
+    }
+    // Attribute name column: a field literally named NAME wins (county
+    // NAME-style columns); otherwise the first character ('C') field.
+    // Census-style tables put STATEFP/COUNTYFP first, so first-C alone
+    // would label every county with its state FIPS.
+    qsizetype nameOffset = -1;
+    int nameLength = 0;
+    qsizetype firstCOffset = -1;
+    int firstCLength = 0;
+    {
+        qsizetype running = 1;
+        for (qsizetype field = 32; field + 32 <= headerLength &&
+                                  field + 32 <= static_cast<qsizetype>(bytes.size());
+             field += 32) {
+            if (data[field] == 0x0D) break;
+            const char fieldType = static_cast<char>(data[field + 11]);
+            const int fieldLength = static_cast<int>(data[field + 16]);
+            if (fieldLength <= 0 || fieldLength > 254) return {};
+            // Field name is NUL-padded ASCII; compare case-insensitively.
+            char rawName[12] = {};
+            for (int i = 0; i < 11; ++i) rawName[i] = static_cast<char>(data[field + i]);
+            const QString fieldName = QString::fromLatin1(rawName).trimmed();
+            if (firstCOffset < 0 && fieldType == 'C') {
+                firstCOffset = running;
+                firstCLength = fieldLength;
+            }
+            if (nameOffset < 0 && fieldType == 'C' &&
+                fieldName.compare(QStringLiteral("name"), Qt::CaseInsensitive) == 0) {
+                nameOffset = running;
+                nameLength = fieldLength;
+            }
+            running += fieldLength;
+            if (running > static_cast<qsizetype>(recordLength)) return {};
+        }
+    }
+    if (nameOffset < 0) {
+        nameOffset = firstCOffset;
+        nameLength = firstCLength;
+    }
+    if (nameOffset < 0) return {};
+    if (headerLength + static_cast<quint64>(recordCount) * recordLength >
+        static_cast<quint64>(bytes.size()) + 1) {
+        return {};
+    }
+    QStringList names;
+    for (quint32 record = 0; record < recordCount; ++record) {
+        const qsizetype base = static_cast<qsizetype>(headerLength) + record * recordLength;
+        if (data[base] == 0x2A) {  // Deleted: keep index alignment, no name.
+            names.push_back({});
+            continue;
+        }
+        QString name = QString::fromLatin1(bytes.constData() + base + nameOffset, nameLength);
+        names.push_back(name.trimmed());
+    }
+    return names;
+}
+
+std::optional<PlacefileDocument> parseShapefileData(const QByteArray& bytes,
+                                                    const QStringList& recordNames, QString* error) {
     if (error) error->clear();
     if (!looksLikeShapefile(bytes)) {
         if (error) *error = QStringLiteral("not an ESRI shapefile (file code 9994 missing)");
@@ -326,6 +404,7 @@ std::optional<PlacefileDocument> parseShapefile(const QByteArray& bytes, QString
     PlacefileDocument document;
     qsizetype pos = 100;
     qsizetype outOfRangeRings = 0;
+    qsizetype shapeRecordIndex = 0;  // file-order records: aligns recordNames
     while (pos + 8 <= declaredEnd) {
         qint32 contentWords = 0;
         qint32 recordType = 0;
@@ -342,6 +421,7 @@ std::optional<PlacefileDocument> parseShapefile(const QByteArray& bytes, QString
             if (error) *error = QStringLiteral("shapefile record is truncated");
             return std::nullopt;
         }
+        const qsizetype thisRecord = shapeRecordIndex++;
         pos += 8;
         if (recordType == 0) {
             pos = recordEnd;  // Null shape: filler, skip silently.
@@ -395,6 +475,9 @@ std::optional<PlacefileDocument> parseShapefile(const QByteArray& bytes, QString
             PlacefileElement element;
             element.kind = recordType == 5 ? PlacefileElementKind::Polygon
                                            : PlacefileElementKind::Line;
+            if (thisRecord < recordNames.size() && !recordNames.at(thisRecord).isEmpty()) {
+                element.hoverText = recordNames.at(thisRecord);
+            }
             bool ringOk = true;
             for (qint32 point = first; point < last; ++point) {
                 double x = 0.0;

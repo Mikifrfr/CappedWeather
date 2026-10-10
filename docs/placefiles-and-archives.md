@@ -35,7 +35,7 @@ This is a useful read subset, not a claim of byte-for-byte compatibility with ev
 
 ### Shapefiles
 
-Binary ESRI `.shp` files load through the same File/URL entries (sniffed by magic, not extension): 2D polygon/polyline rings become `Polygon`/`Line` elements, one per ring. Unprojected longitude/latitude only; Z/M flavors, projected coordinates, and `.dbf` labels stay out. Out-of-range rings warn and skip, and a file with nothing drawable fails closed with an explanation (projected files say so explicitly). Same 2 MiB / 50k-element / 10k-point envelope as text placefiles.
+Binary ESRI `.shp` files load through the same File/URL entries (sniffed by magic, not extension): 2D polygon/polyline rings become `Polygon`/`Line` elements, one per ring. Unprojected longitude/latitude only; Z/M flavors and projected coordinates stay out. A sibling `.dbf` next to a local `.shp` names the shapes (record-aligned hover text, `NAME` column preferred; malformed companions degrade to unnamed geometry, remote files stay geometry-only). Out-of-range rings warn and skip, and a file with nothing drawable fails closed with an explanation (projected files say so explicitly). Same 2 MiB / 50k-element / 10k-point envelope as text placefiles.
 
 ## Scoped Archive-II loading
 

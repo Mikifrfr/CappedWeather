@@ -2488,19 +2488,29 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
-    // ESRI shapefiles: committed Oklahoma-county fixture plus hand-built
+    // ESRI shapefiles: committed US-county fixture plus hand-built
     // binary (polyline with two parts, null filler, unsupported point
     // record) and every malformed shape.
     {
-        const auto fixtureBytes = [&] {
+        const auto findFixture = [](const char* name) {
             for (const auto& root : {std::string("tests/fixtures/"),
                                      std::string("../tests/fixtures/"),
                                      std::string("../../tests/fixtures/")}) {
-                QFile file(QString::fromStdString(root + "ok_counties_5.shp"));
+                QFile file(QString::fromStdString(root + name));
                 if (file.open(QIODevice::ReadOnly)) return file.readAll();
             }
             return QByteArray{};
-        }();
+        };
+        const auto fixturePath = [&](const char* name) {
+            for (const auto& root : {std::string("tests/fixtures/"),
+                                     std::string("../tests/fixtures/"),
+                                     std::string("../../tests/fixtures/")}) {
+                if (QFile::exists(QString::fromStdString(root + name)))
+                    return QString::fromStdString(root + name);
+            }
+            return QString{};
+        };
+        const auto fixtureBytes = findFixture("us_counties_5.shp");
         if (fixtureBytes.isEmpty()) {
             std::cerr << "Shapefile fixture missing\n";
             return 1;
@@ -2530,40 +2540,99 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             }
         }
         const auto& first = doc->elements.front().points.front();
-        if (std::abs(first.x() + 94.4818) > 1e-4 || std::abs(first.y() - 33.789) > 1e-4) {
+        if (std::abs(first.x() + 85.6598) > 1e-4 || std::abs(first.y() - 41.7592) > 1e-4) {
             std::cerr << "Shapefile fixture first point moved: " << first.x() << ',' << first.y()
                       << '\n';
             return 1;
         }
+        // dBase names align to shape records: LaGrange, Linn, Kent, Furnas,
+        // Putnam ride the five polygons as hover text.
+        {
+            const QByteArray dbfBytes = findFixture("us_counties_5.dbf");
+            if (dbfBytes.isEmpty()) {
+                std::cerr << "Shapefile dbf fixture missing\n";
+                return 1;
+            }
+            const QStringList names = parseDbfNames(dbfBytes);
+            const QStringList want{QStringLiteral("LaGrange"), QStringLiteral("Linn"),
+                                   QStringLiteral("Kent"), QStringLiteral("Furnas"),
+                                   QStringLiteral("Putnam")};
+            if (names != want) {
+                std::cerr << "Shapefile dbf names are wrong\n";
+                return 1;
+            }
+            QString namedError;
+            const auto named = parseShapefileData(fixtureBytes, names, &namedError);
+            if (!named.has_value()) {
+                std::cerr << "Named shapefile failed: " << namedError.toStdString() << '\n';
+                return 1;
+            }
+            for (int i = 0; i < 5; ++i) {
+                if (named->elements.at(i).hoverText != want.at(i)) {
+                    std::cerr << "Shapefile hover name wrong at index " << i << '\n';
+                    return 1;
+                }
+            }
+            // Malformed companions degrade to unnamed, never fatal.
+            const auto unnamed = parseShapefileData(fixtureBytes, parseDbfNames(QByteArray("junk")),
+                                                    &namedError);
+            if (!unnamed.has_value() || !unnamed->elements.front().hoverText.isEmpty()) {
+                std::cerr << "Bad dbf should degrade to unnamed geometry\n";
+                return 1;
+            }
+            // Deleted dBase rows keep index alignment with an empty name.
+            {
+                QByteArray dbf;
+                QDataStream head(&dbf, QIODevice::WriteOnly);
+                head.setByteOrder(QDataStream::LittleEndian);
+                dbf.append(QByteArray(32, 0));
+                head.device()->seek(0);
+                head << static_cast<quint8>(0x03);
+                head.device()->seek(4);
+                head << static_cast<quint32>(2) << static_cast<quint16>(65)
+                     << static_cast<quint16>(5);
+                QByteArray field(32, 0);
+                field[0] = 'N';
+                field[1] = 'A';
+                field[2] = 'M';
+                field[3] = 'E';
+                field[11] = 'C';
+                field[16] = 4;
+                dbf.append(field);
+                dbf.append(static_cast<char>(0x0D));
+                dbf.append(" A001");
+                dbf.append("*B002");
+                const QStringList deleted = parseDbfNames(dbf);
+                if (deleted.size() != 2 || deleted.at(0) != QStringLiteral("A001") ||
+                    !deleted.at(1).isEmpty()) {
+                    std::cerr << "Deleted dbf rows should stay aligned but empty\n";
+                    return 1;
+                }
+            }
+        }
         // Source wiring: the placefile loader sniffs shapefile magic and
         // publishes polygons with no dialog involved.
         {
-            QStringList roots;
-            for (const auto& root : {std::string("tests/fixtures/"),
-                                     std::string("../tests/fixtures/"),
-                                     std::string("../../tests/fixtures/")}) {
-                roots.push_back(QString::fromStdString(root + "ok_counties_5.shp"));
+            const QString path = fixturePath("us_counties_5.shp");
+            if (path.isEmpty()) {
+                std::cerr << "Shapefile fixture missing for source test\n";
+                return 1;
             }
             PlacefileSource source;
-            bool loaded = false;
-            for (const auto& path : roots) {
-                if (!QFile::exists(path)) continue;
-                QString loadError;
-                if (!source.addLocalFile(path, &loadError)) {
-                    std::cerr << "Shapefile addLocalFile failed: " << loadError.toStdString()
-                              << '\n';
-                    return 1;
-                }
-                loaded = true;
-                break;
-            }
-            if (!loaded) {
-                std::cerr << "Shapefile fixture missing for source test\n";
+            QString loadError;
+            if (!source.addLocalFile(path, &loadError)) {
+                std::cerr << "Shapefile addLocalFile failed: " << loadError.toStdString() << '\n';
                 return 1;
             }
             const auto documents = source.documents();
             if (documents.size() != 1 || documents.front().elements.size() != 5) {
                 std::cerr << "Shapefile source published the wrong document\n";
+                return 1;
+            }
+            // Sibling .dbf travels with the fixture, so the end-to-end load
+            // names the first county.
+            if (documents.front().elements.front().hoverText != QStringLiteral("LaGrange")) {
+                std::cerr << "Shapefile source did not attach the county name\n";
                 return 1;
             }
         }

@@ -60,8 +60,31 @@ bool PlacefileSource::addLocalFile(const QString& path, QString* error) {
     }
     QString parseError;
     const QByteArray payload = file.readAll();
-    auto document = looksLikeShapefile(payload) ? parseShapefile(payload, &parseError)
-                                                : parsePlacefile(payload, &parseError);
+    std::optional<PlacefileDocument> document;
+    bool dbfCompanionBad = false;
+    if (looksLikeShapefile(payload)) {
+        // Sibling .dbf names the shapes (record-aligned hover text); a
+        // missing or malformed companion only costs the names, never the
+        // geometry. Remote shapefiles skip this (one fetch, geometry only).
+        QStringList recordNames;
+        if (path.endsWith(QStringLiteral(".shp"), Qt::CaseInsensitive)) {
+            QFile dbfFile(path.left(path.size() - 4) + QStringLiteral(".dbf"));
+            if (dbfFile.exists()) {
+                if (dbfFile.size() <= kMaximumResponseBytes && dbfFile.open(QIODevice::ReadOnly)) {
+                    recordNames = parseDbfNames(dbfFile.readAll());
+                    dbfCompanionBad = recordNames.isEmpty();
+                } else {
+                    dbfCompanionBad = true;
+                }
+            }
+        }
+        document = parseShapefileData(payload, recordNames, &parseError);
+        if (document && dbfCompanionBad) {
+            document->warnings.push_back(QStringLiteral("dbf companion unreadable; shapes unnamed"));
+        }
+    } else {
+        document = parsePlacefile(payload, &parseError);
+    }
     if (!document) {
         if (error) *error = parseError;
         return false;
