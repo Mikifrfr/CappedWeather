@@ -13,6 +13,7 @@
 #include "app/wpc_ero.hpp"
 #include "app/hms_smoke.hpp"
 #include "app/dat_paths.hpp"
+#include "app/hrrr_source.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -218,6 +219,10 @@ public:
     void setDatVisible(bool visible);
     [[nodiscard]] bool datVisible() const { return datVisible_; }
     [[nodiscard]] int datPathCount() const;
+    void setHrrrFrame(std::optional<HrrrFrame> frame);
+    void setHrrrVisible(bool visible);
+    [[nodiscard]] bool hrrrVisible() const { return hrrrVisible_; }
+    [[nodiscard]] bool hrrrHasFrame() const { return hrrrFrame_.has_value(); }
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -560,6 +565,11 @@ private:
     // DAT survey centerlines: EF-colored polylines, vector-painted.
     QVector<DatPath> datPaths_;
     void paintDatPaths(QPainter& painter);
+    // HRRR simulated reflectivity: model-context raster under live echo,
+    // viewport-culled per-cell paint. Valid time labels every readout so
+    // model output never reads as observed echo.
+    std::optional<HrrrFrame> hrrrFrame_;
+    void paintHrrr(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -685,6 +695,7 @@ private:
     bool wpcVisible_ = true;
     bool hmsVisible_ = true;
     bool datVisible_ = true;
+    bool hrrrVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

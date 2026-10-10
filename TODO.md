@@ -33,7 +33,6 @@ Ready to build (data live now, testable hermetically plus replay):
 
 Research-gated (confirm open shape first, METAR/ECCC style):
 - [ ] GOES satellite overlay. CONFIRMED live 2026-10-10: anonymous `noaa-goes18` bucket, `ABI-L1b-RadC/YYYY/DDD/HH/OR_ABI-L1b-RadC-M6Cnn_G18_s.._e.._c...nc` at 5-min cadence minutes fresh. Sizes per file: C01_Stokes visible ~6 MB, C13 clean-IR similar, C02 red visible ~52 MB (too heavy at full res, skip or downsample). Remap via fixed-grid projection attrs plus kappa0/Planck through the optional netCDF reader, CONUS RadC first. Needs: channel picker plus remap plus layer with tests.
-- [ ] HRRR simulated reflectivity. CONFIRMED live 2026-10-10: NOMADS full CONUS files are 370-780 MB (direct download OUT); use TDS NCSS `Best HRRR CONUS 2.5km Forecasts Time Series` (`thredds.ucar.edu/thredds/catalog/grib/NCEP/HRRR/CONUS_2p5km/`) with lat/lon bbox plus REFC var plus accept=netCDF (server subsets to KBs), or NOMADS .idx byte-ranges (68 KB index) into wrfsfcf REFC messages. Valid-time labels required, never mixed with observed echo. Needs: NCSS URL builder plus Lambert remap through the netCDF reader plus layer with tests.
 - [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
 
 ## Non-goals (for now)
@@ -43,6 +42,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- HRRR simulated reflectivity (TDS NCSS REFC subset, Lambert math validated against the live grid, model-context raster under echo with valid hour, layer with badge and persisted toggle, hermetic tests on a committed fixture).
 - RAOB sounding hodograph (IEM 00Z/12Z fetch with station memory, height-colored trace plus storm-motion vector, sounding-vs-VAD SRH ground truth sharing one integrator, freezing-level readout, hermetic parser/clock/paint tests, live-verified payload shape).
 - NWS DAT survey paths (90-day recency-bounded GeoJSON with EF colors, line layer with badge and persisted toggle, live-verified query shape, hermetic parser and color tests).
 - HMS fire plus smoke overlay (daily detection text with satellite/FRP plus KML plumes with density/times, official colors, today-then-yesterday fallback, clean-air quiet state, layer with badge and persisted toggle, live-verified, hermetic parser and URL tests).
@@ -82,4 +82,5 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Linux AppDir release from tags, WSL-verified build plus tests plus smoke run.
 - AGPL-3.0-or-later, CPack wiring, About dialog credit.
 - Velocity controls hide unless the active panel is VEL.
+- Core derived products (Echo Tops, VIL), archive load, placefiles, spill-to-disk, lightning-jump engine, OPERA sessions, installer, a11y passes.
 - Core derived products (Echo Tops, VIL), archive load, placefiles, spill-to-disk, lightning-jump engine, OPERA sessions, installer, a11y passes.

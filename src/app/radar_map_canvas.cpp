@@ -35,6 +35,7 @@
 #include <QToolTip>
 #include <QStandardPaths>
 #include <QSettings>
+#include <QTimeZone>
 #include <QSet>
 #include <QShowEvent>
 #include <QResizeEvent>
@@ -1308,6 +1309,17 @@ void RadarMapCanvas::setDatVisible(const bool visible) {
 
 int RadarMapCanvas::datPathCount() const {
     return static_cast<int>(datPaths_.size());
+}
+
+void RadarMapCanvas::setHrrrFrame(std::optional<HrrrFrame> frame) {
+    hrrrFrame_ = std::move(frame);
+    update();
+}
+
+void RadarMapCanvas::setHrrrVisible(const bool visible) {
+    if (hrrrVisible_ == visible) return;
+    hrrrVisible_ = visible;
+    update();
 }
 
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
@@ -3013,6 +3025,43 @@ void RadarMapCanvas::paintDatPaths(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintHrrr(QPainter& painter) {
+    // NOTE: no overlayAt branch for HRRR on purpose. The model field covers
+    // the whole view wherever it holds echo, so a click card would steal
+    // every echo probe underneath it. Valid time reads on the legend chip
+    // and the layer badge instead; probing stays on live gates.
+    if (!hrrrVisible_ || !hrrrFrame_.has_value()) return;
+    // Model context under live echo: operational reflectivity colors at
+    // reduced alpha, viewport-culled per cell. Row orientation is never
+    // assumed: every cell inverts through the frame projection.
+    const HrrrFrame& frame = *hrrrFrame_;
+    if (frame.nx == 0 || frame.ny == 0 ||
+        frame.reflectivityDbz.size() != frame.nx * frame.ny)
+        return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
+    const double cell = zoom_ >= 6 ? 4.0 : 2.5;
+    for (std::size_t iy = 0; iy < frame.ny; ++iy) {
+        for (std::size_t ix = 0; ix < frame.nx; ++ix) {
+            const float dbz = frame.reflectivityDbz[iy * frame.nx + ix];
+            if (!std::isfinite(dbz) || dbz < 5.0F) continue;
+            const double xMeters = (frame.x0Km + ix * frame.dxKm) * 1000.0;
+            const double yMeters = (frame.y0Km + iy * frame.dyKm) * 1000.0;
+            const auto lonLat = lambertInverse(frame.projection, xMeters, yMeters);
+            if (!std::isfinite(lonLat.longitudeDeg) || !std::isfinite(lonLat.latitudeDeg))
+                continue;
+            const auto point =
+                screenPoint(lonLat.latitudeDeg, lonLat.longitudeDeg);
+            if (!viewport.contains(point)) continue;
+            painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
+                             colorForValue(ProductKind::Reflectivity, dbz, palette_, 45,
+                                           customPalette_));
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
@@ -3956,6 +4005,26 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
                                  ? QStringLiteral("DAT %1").arg(static_cast<int>(datPaths_.size()))
                                  : QStringLiteral("DAT: none"));
         }
+    }
+    // Fourth context row: HRRR valid time. Own row: model context reads
+    // apart from every observation layer, with its valid hour on display.
+    if (hrrrVisible_) {
+        const QRectF hrrrPanel(12, 228, 258, 20);
+        const bool active = hrrrFrame_.has_value();
+        painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
+        painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
+        painter.drawRoundedRect(hrrrPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(active ? QColor(125, 211, 252) : QColor(148, 163, 184));
+        QString label = QStringLiteral("HRRR: none");
+        if (active) {
+            const auto valid =
+                QDateTime::fromSecsSinceEpoch(hrrrFrame_->validEpochSeconds, QTimeZone::UTC);
+            label = QStringLiteral("HRRR %1 (model)")
+                        .arg(valid.isValid() ? valid.toString(QStringLiteral("HH:mm'Z'"))
+                                             : QStringLiteral("?"));
+        }
+        painter.drawText(QRectF(20, 230, 242, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -5468,12 +5537,14 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintSpcOutlook(painter);
         paintSpcFireOutlook(painter);
         paintWpcOutlook(painter);
+        paintHrrr(painter);
         paintRadarOverlay(painter);
         paintWeatherOverlays(painter);
     } else {
         paintSpcOutlook(painter);
         paintSpcFireOutlook(painter);
         paintWpcOutlook(painter);
+        paintHrrr(painter);
         paintWeatherOverlays(painter);
         paintRadarOverlay(painter);
     }

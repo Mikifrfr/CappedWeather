@@ -14,6 +14,7 @@
 #include "app/wpc_ero.hpp"
 #include "app/hms_smoke.hpp"
 #include "app/dat_paths.hpp"
+#include "app/hrrr_source.hpp"
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
 #include "app/metar_source.hpp"
@@ -392,6 +393,7 @@ MainWindow::MainWindow(QWidget* parent)
       wpcSource_(new WpcEroSource(this)),
       hmsSource_(new HmsSmokeSource(this)),
       datSource_(new DatPathSource(this)),
+      hrrrSource_(new HrrrSource(this)),
       metarSource_(new MetarSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
@@ -647,6 +649,11 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) panel->setHmsVisible(visible);
         refreshLayerBadges();
     });
+    connect(hrrrCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setHrrrVisible(visible);
+        if (visible && hrrrSource_) hrrrSource_->refresh();
+        refreshLayerBadges();
+    });
     connect(datCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setDatVisible(visible);
         refreshLayerBadges();
@@ -776,6 +783,14 @@ MainWindow::MainWindow(QWidget* parent)
                 refreshLayerBadges();
             });
     connect(datSource_, &DatPathSource::statusChanged, this, [this](const QString& status) {
+        statusBar()->showMessage(status, 8000);
+    });
+    connect(hrrrSource_, &HrrrSource::frameReady, this,
+            [this](std::optional<HrrrFrame> frame) {
+                for (auto* panel : maps_) panel->setHrrrFrame(frame);
+                refreshLayerBadges();
+            });
+    connect(hrrrSource_, &HrrrSource::statusChanged, this, [this](const QString& status) {
         statusBar()->showMessage(status, 8000);
     });
     connect(metarSource_, &MetarSource::metarsReady, this, [this](QVector<MetarObs> metars) {
@@ -968,6 +983,7 @@ MainWindow::MainWindow(QWidget* parent)
     wpcSource_->refresh();
     hmsSource_->refresh();
     datSource_->refresh();
+    hrrrSource_->refresh();
     metarSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
@@ -1512,6 +1528,10 @@ void MainWindow::buildUi() {
                  QStringLiteral("Tornado paths, last 90 days"), datBadge_,
                  QStringLiteral("datBadge"), true,
                  QStringLiteral("NWS Damage Assessment Toolkit survey centerlines colored by EF rating (app severity ramp). Post-event ground truth, never a forecast."));
+    makeLayerRow(hrrrCheck_, QStringLiteral("HRRR simulated"), QStringLiteral("hrrrCheck"),
+                 QStringLiteral("Model reflectivity under echo"), hrrrBadge_,
+                 QStringLiteral("hrrrBadge"), true,
+                 QStringLiteral("HRRR composite reflectivity for the latest analysis, painted under live echo in echo colors at reduced alpha. Model guidance with its valid hour on display, never observed echo."));
     makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
@@ -2402,6 +2422,9 @@ void MainWindow::radarSelected(const QModelIndex& index) {
             // the markers stay local instead of stuck on the last site.
             metarSource_->setRegion(*site.latitude, *site.longitude, 3.0);
             metarSource_->refresh();
+            // Model context follows the radar too: same box, latest run.
+            hrrrSource_->setRegion(*site.latitude, *site.longitude, 3.0);
+            hrrrSource_->refresh();
         }
     }
     pushProximityFilterToCanvases();
@@ -3345,6 +3368,7 @@ void MainWindow::restoreSettings() {
         panel->setWpcVisible(wpcCheck_->isChecked());
         panel->setHmsVisible(hmsCheck_->isChecked());
         panel->setDatVisible(datCheck_->isChecked());
+        panel->setHrrrVisible(hrrrCheck_->isChecked());
         panel->setMcdVisible(mcdCheck_->isChecked());
         panel->setMetarVisible(metarCheck_->isChecked());
     }
@@ -3359,6 +3383,7 @@ void MainWindow::restoreSettings() {
     wpcCheck_->setChecked(settings.value(QStringLiteral("overlays/wpcEro"), true).toBool());
     hmsCheck_->setChecked(settings.value(QStringLiteral("overlays/hmsSmoke"), true).toBool());
     datCheck_->setChecked(settings.value(QStringLiteral("overlays/datPaths"), true).toBool());
+    hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), true).toBool());
     mcdCheck_->setChecked(settings.value(QStringLiteral("overlays/mcd"), true).toBool());
     metarCheck_->setChecked(settings.value(QStringLiteral("overlays/metar"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
@@ -3422,6 +3447,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/wpcEro"), wpcCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/hmsSmoke"), hmsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/datPaths"), datCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/hrrr"), hrrrCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/metar"), metarCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
@@ -4491,6 +4517,15 @@ void MainWindow::refreshLayerBadges() {
         datBadge_->setToolTip(!on ? QStringLiteral("DAT layer is off")
                               : n > 0 ? QStringLiteral("Surveyed tornado paths on the map")
                                       : QStringLiteral("Layer is on; no surveys in the last 90 days"));
+    }
+    if (hrrrBadge_) {
+        const bool has = map_->hrrrHasFrame();
+        const bool on = hrrrCheck_ && hrrrCheck_->isChecked();
+        hrrrBadge_->setText(!on ? QStringLiteral("off") : has ? QStringLiteral("1")
+                                                              : QStringLiteral("quiet"));
+        hrrrBadge_->setToolTip(!on ? QStringLiteral("HRRR layer is off")
+                               : has ? QStringLiteral("Model reflectivity frame on the map")
+                                     : QStringLiteral("Layer is on; no model frame loaded yet"));
     }
     if (metarBadge_) {
         const auto n = map_->metarCount();

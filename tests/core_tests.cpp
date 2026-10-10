@@ -9,6 +9,8 @@
 #include "core/bright_band.hpp"
 #include "core/bunkers.hpp"
 #include "core/hail_swath.hpp"
+#include "core/hrrr_frame.hpp"
+#include "core/lambert.hpp"
 #include "core/sounding.hpp"
 #include "core/srh.hpp"
 #include "core/tbss_detector.hpp"
@@ -1091,6 +1093,114 @@ void testSounding() {
         assert(std::isnan(soundingFreezingLevelMsl(empty)));
         assert(soundingWindPoints(empty).empty());
     }
+}
+
+namespace {
+std::string fixturePath(const char* name) {
+    const std::string roots[] = {
+        "tests/fixtures/",
+        "../tests/fixtures/",
+        "../../tests/fixtures/",
+    };
+    for (const auto& root : roots) {
+        std::ifstream file(root + name, std::ios::binary);
+        if (file) return root + name;
+    }
+    return {};
+}
+}  // namespace
+
+void testLambert() {
+    // HRRR conic: tangent at 25 N, meridian 265 E, GRS-ish sphere 6371229 m.
+    LambertConformal hrrr{25.0, 265.0, 25.0, 25.0, 6371229.0};
+    // Origin maps to the apex offset (0, 0) and back.
+    const auto origin = lambertForward(hrrr, -95.0, 25.0);
+    assert(std::abs(origin.xMeters) < 1e-6 && std::abs(origin.yMeters) < 1e-6);
+    const auto back = lambertInverse(hrrr, 0.0, 0.0);
+    assert(std::abs(back.longitudeDeg + 95.0) < 1e-9);
+    assert(std::abs(back.latitudeDeg - 25.0) < 1e-9);
+    // Mirror symmetry about the central meridian.
+    const auto east = lambertForward(hrrr, -90.0, 35.0);
+    const auto west = lambertForward(hrrr, -100.0, 35.0);
+    assert(std::abs(east.xMeters + west.xMeters) < 1e-6);
+    assert(std::abs(east.yMeters - west.yMeters) < 1e-6);
+    // Round trip over the CONUS domain to sub-micron degrees.
+    for (double lat = 25.0; lat <= 50.0; lat += 2.5) {
+        for (double lon = -125.0; lon <= -65.0; lon += 2.5) {
+            const auto projected = lambertForward(hrrr, lon, lat);
+            const auto unprojected = lambertInverse(hrrr, projected.xMeters, projected.yMeters);
+            assert(std::abs(unprojected.longitudeDeg - lon) < 1e-9);
+            assert(std::abs(unprojected.latitudeDeg - lat) < 1e-9);
+        }
+    }
+    // NaN in, NaN out; degenerate sphere fails closed.
+    const auto bad = lambertForward(hrrr, std::numeric_limits<double>::quiet_NaN(), 35.0);
+    assert(std::isnan(bad.xMeters) && std::isnan(bad.yMeters));
+    LambertConformal flat = hrrr;
+    flat.earthRadiusMeters = 0.0;
+    const auto flatOut = lambertForward(flat, -95.0, 35.0);
+    assert(std::isnan(flatOut.xMeters));
+    const auto flatBack = lambertInverse(flat, 1000.0, 1000.0);
+    assert(std::isnan(flatBack.longitudeDeg));
+}
+
+void testHrrrFixture() {
+    if (!hrrrReaderAvailable()) return;
+#ifdef CAPPEDWEATHER_EXPECT_NETCDF
+    assert(hrrrReaderAvailable());
+#endif
+    const auto path = fixturePath("hrrr_refc_ok.nc");
+    assert(!path.empty());
+    const auto frame = readHrrrRefc(path);
+    assert(frame.has_value());
+    assert(frame->nx == 223 && frame->ny == 183);
+    assert(frame->reflectivityDbz.size() == 223 * 183);
+    assert(std::abs(frame->dxKm - 2.54) < 0.01 && std::abs(frame->dyKm - 2.54) < 0.01);
+    assert(std::abs(frame->projection.latitudeOriginDeg - 25.0) < 1e-9);
+    assert(std::abs(frame->projection.longitudeMeridianEastDeg - 265.0) < 1e-9);
+    assert(std::abs(frame->projection.firstParallelDeg - 25.0) < 1e-9);
+    assert(std::abs(frame->projection.earthRadiusMeters - 6371229.0) < 1.0);
+    // Requested bbox was 33-37 N, 100-94 W: the grid must cover it (NCSS
+    // snaps outward by an unspecified margin, so assert coverage with a
+    // 0.2-degree skirt, not corner coincidence). Orientation-free: every
+    // grid corner inverse-projects inside the skirted box.
+    const double gridX[2] = {frame->x0Km, frame->x0Km + (frame->nx - 1) * frame->dxKm};
+    const double gridY[2] = {frame->y0Km, frame->y0Km + (frame->ny - 1) * frame->dyKm};
+    for (const double gx : gridX) {
+        for (const double gy : gridY) {
+            const auto corner =
+                lambertInverse(frame->projection, gx * 1000.0, gy * 1000.0);
+            assert(std::isfinite(corner.latitudeDeg) && std::isfinite(corner.longitudeDeg));
+            assert(corner.latitudeDeg > 33.0 - 0.2 && corner.latitudeDeg < 37.0 + 0.2);
+            assert(corner.longitudeDeg > -100.0 - 0.2 && corner.longitudeDeg < -94.0 + 0.2);
+        }
+    }
+    // And the requested corners land on the grid plane within one skirt of
+    // some grid edge: forward maps the bbox into the grid extent.
+    const double requestCorners[4][2] = {{33.0, -100.0}, {33.0, -94.0},
+                                         {37.0, -100.0}, {37.0, -94.0}};
+    const double minGx = std::min(gridX[0], gridX[1]);
+    const double maxGx = std::max(gridX[0], gridX[1]);
+    const double minGy = std::min(gridY[0], gridY[1]);
+    const double maxGy = std::max(gridY[0], gridY[1]);
+    for (const auto& [cornerLat, cornerLon] : requestCorners) {
+        const auto projected = lambertForward(frame->projection, cornerLon, cornerLat);
+        const double px = projected.xMeters / 1000.0;
+        const double py = projected.yMeters / 1000.0;
+        assert(px > minGx - 15.0 && px < maxGx + 15.0);
+        assert(py > minGy - 15.0 && py < maxGy + 15.0);
+    }
+    // Valid time decodes: 13Z on 2026-10-10 (1791637200 UTC, base
+    // 2026-10-07T00:00Z plus the file's 85 h time step).
+    assert(frame->validEpochSeconds == 1791637200LL);
+    // Quiet morning box: every gate reads the -10 dB floor, all finite
+    // after fill handling (no NaN leaks, no phantom echo).
+    for (const float value : frame->reflectivityDbz) {
+        assert(std::isfinite(value));
+        assert(value < -9.0F);
+    }
+    // Garbage fails closed.
+    assert(!readHrrrRefc("tests/fixtures/does-not-exist.nc").has_value());
 }
 
 void testVadProfile() {
@@ -2502,6 +2612,8 @@ int main() {
     testBrightBand();
     testBunkers();
     testHailSwaths();
+    testLambert();
+    testHrrrFixture();
     testSounding();
     testSrh();
     testTbss();

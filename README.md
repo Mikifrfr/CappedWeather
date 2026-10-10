@@ -44,6 +44,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 - WPC Day 1-3 excessive rainfall outlooks in official colors (Marginal green, Slight yellow, Moderate red, High pink).
 - NOAA HMS daily fire detections plus smoke plumes in official density colors, with today-then-yesterday fallback.
 - NWS DAT tornado survey paths (last 90 days) in EF severity colors.
+- HRRR simulated reflectivity (TDS NetCDF subset, model context under echo with valid hour).
 - RAOB sounding hodograph (IEM 00Z/12Z) with sounding-vs-VAD SRH ground truth and freezing level.
 - GOES GLM lightning-jump cells (2σ LJA) fused with reflectivity objects ([engine](docs/lightning-jump-engine.md)); honestly disabled without netCDF, live out of the box in releases.
 - Meteoalarm warnings for European sites; 130+ bucket-active OPERA radars as first-class sessions (CC BY 4.0 EUMETNET, [sources](docs/europe-sources.md)).

@@ -9,6 +9,7 @@
 #include "app/dat_paths.hpp"
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
+#include "app/hrrr_source.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2338,6 +2339,34 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "Malformed DAT payload should fail closed with an error\n";
         return 1;
     }
+    // HRRR subset URL: radar-centered box clamped to CONUS, one valid time.
+    {
+        const auto url = hrrrSubsetUrl(
+            35.3331, -97.2778, 3.0, QDateTime(QDate(2026, 10, 10), QTime(13, 0), QTimeZone::UTC));
+        const auto text = url.toString();
+        if (!url.isValid() || !text.contains(QStringLiteral("Composite_reflectivity_entire_atmosphere")) ||
+            !text.contains(QStringLiteral("north=38.333")) ||
+            !text.contains(QStringLiteral("south=32.333")) ||
+            !text.contains(QStringLiteral("2026-10-10T13")) || !text.contains(QStringLiteral("accept=netCDF"))) {
+            std::cerr << "HRRR subset URL is wrong: " << text.toStdString() << '\n';
+            return 1;
+        }
+        if (hrrrSubsetUrl(35.0, -97.0, 3.0, QDateTime()).isValid() ||
+            hrrrSubsetUrl(std::numeric_limits<double>::quiet_NaN(), -97.0, 3.0,
+                          QDateTime(QDate(2026, 10, 10), QTime(13, 0), QTimeZone::UTC))
+                .isValid()) {
+            std::cerr << "HRRR URL builder should reject bad input\n";
+            return 1;
+        }
+        const auto at = [](int hour, int minute) {
+            return QDateTime(QDate(2026, 10, 10), QTime(hour, minute), QTimeZone::UTC);
+        };
+        if (latestHrrrTime(at(15, 30)) != at(13, 0) || latestHrrrTime(at(14, 5)) != at(12, 0) ||
+            latestHrrrTime(QDateTime()).isValid()) {
+            std::cerr << "HRRR clock is wrong\n";
+            return 1;
+        }
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {
@@ -3183,6 +3212,16 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     }
     map->setSites({{"OUTSIDE", "Outside", "WSR-88D", 0.0, 0.0, 0.0}});
     map->setView({-97.2, 35.2}, 6);
+    // Background layers fetch live data on the overlay timer: hide them so
+    // the card pin/drag/dismiss choreography below cannot snag a live
+    // outlook, survey path, or smoke polygon instead of the test warning.
+    map->setSpcOutlookVisible(false);
+    map->setSpcFireVisible(false);
+    map->setWpcVisible(false);
+    map->setMcdVisible(false);
+    map->setNhcVisible(false);
+    map->setHmsVisible(false);
+    map->setDatVisible(false);
     application.processEvents();
     QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, map->rect().center());
     application.processEvents();
