@@ -14,6 +14,7 @@
 #include "app/hms_smoke.hpp"
 #include "app/dat_paths.hpp"
 #include "app/hrrr_source.hpp"
+#include "app/goes_source.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -223,6 +224,10 @@ public:
     void setHrrrVisible(bool visible);
     [[nodiscard]] bool hrrrVisible() const { return hrrrVisible_; }
     [[nodiscard]] bool hrrrHasFrame() const { return hrrrFrame_.has_value(); }
+    void setGoesFrame(std::optional<GoesFrame> frame);
+    void setGoesVisible(bool visible);
+    [[nodiscard]] bool goesVisible() const { return goesVisible_; }
+    [[nodiscard]] bool goesHasFrame() const { return goesFrame_.has_value(); }
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -570,6 +575,11 @@ private:
     // model output never reads as observed echo.
     std::optional<HrrrFrame> hrrrFrame_;
     void paintHrrr(QPainter& painter);
+    // GOES infrared: observed context under live echo, same raster idiom.
+    // No click branch for either raster: full-view fields would steal every
+    // echo probe, so valid times read on the legend chips and badges.
+    std::optional<GoesFrame> goesFrame_;
+    void paintGoes(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -696,6 +706,7 @@ private:
     bool hmsVisible_ = true;
     bool datVisible_ = true;
     bool hrrrVisible_ = true;
+    bool goesVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

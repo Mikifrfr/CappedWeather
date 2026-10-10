@@ -11,6 +11,8 @@
 #include "core/hail_swath.hpp"
 #include "core/hrrr_frame.hpp"
 #include "core/lambert.hpp"
+#include "core/goes_frame.hpp"
+#include "core/fixedgrid.hpp"
 #include "core/sounding.hpp"
 #include "core/srh.hpp"
 #include "core/tbss_detector.hpp"
@@ -1201,6 +1203,125 @@ void testHrrrFixture() {
     }
     // Garbage fails closed.
     assert(!readHrrrRefc("tests/fixtures/does-not-exist.nc").has_value());
+}
+
+void testFixedGrid() {
+    // GOES-18/West geometry straight from the fixture's projection record.
+    GoesFixedGrid west{35786023.0, 6378137.0, 6356752.31414, -137.0};
+    // Subpoint maps to the grid origin and back.
+    const auto origin = goesFixedForward(west, -137.0, 0.0);
+    assert(std::abs(origin.xRadians) < 1e-9 && std::abs(origin.yRadians) < 1e-9);
+    const auto back = goesFixedInverse(west, 0.0, 0.0);
+    assert(std::abs(back.longitudeDeg + 137.0) < 1e-6);
+    assert(std::abs(back.latitudeDeg) < 1e-6);
+    // Mirror symmetry about the subpoint meridian.
+    const auto east = goesFixedForward(west, -130.0, 35.0);
+    const auto wside = goesFixedForward(west, -144.0, 35.0);
+    assert(std::abs(east.xRadians + wside.xRadians) < 1e-9);
+    assert(std::abs(east.yRadians - wside.yRadians) < 1e-6);
+    // Round trip over the West scene and over CONUS under East. Tolerance
+    // is 0.01 deg (10x the measured 1-3e-3 worst case at high-latitude
+    // limb corners; interior round-trips to 1e-9). Longitudes compare
+    // wrap-aware so the Aleutian dateline stays quiet.
+    const auto wrapDiff = [](double a, double b) {
+        double delta = std::fmod(a - b + 540.0, 360.0) - 180.0;
+        return std::abs(delta);
+    };
+    for (double lat = 15.0; lat <= 50.0; lat += 2.5) {
+        for (double lon = -170.0; lon <= -100.0; lon += 2.5) {
+            const auto projected = goesFixedForward(west, lon, lat);
+            const auto unprojected = goesFixedInverse(west, projected.xRadians, projected.yRadians);
+            assert(wrapDiff(unprojected.longitudeDeg, lon) < 1e-2);
+            assert(std::abs(unprojected.latitudeDeg - lat) < 1e-2);
+        }
+    }
+    // Same code path under GOES-19/East (the app default bucket).
+    GoesFixedGrid eastGrid{35786023.0, 6378137.0, 6356752.31414, -75.2};
+    for (double lat = 20.0; lat <= 50.0; lat += 2.5) {
+        for (double lon = -125.0; lon <= -65.0; lon += 2.5) {
+            const auto projected = goesFixedForward(eastGrid, lon, lat);
+            const auto unprojected =
+                goesFixedInverse(eastGrid, projected.xRadians, projected.yRadians);
+            assert(wrapDiff(unprojected.longitudeDeg, lon) < 1e-2);
+            assert(std::abs(unprojected.latitudeDeg - lat) < 1e-2);
+        }
+    }
+    const auto norman = goesFixedForward(eastGrid, -97.44, 35.22);
+    const auto normanBack = goesFixedInverse(eastGrid, norman.xRadians, norman.yRadians);
+    assert(wrapDiff(normanBack.longitudeDeg, -97.44) < 1e-2);
+    assert(std::abs(normanBack.latitudeDeg - 35.22) < 1e-2);
+    // Off-limb sight lines fail closed, never clamped to the disc edge.
+    const auto limb = goesFixedInverse(west, 0.3, 0.3);
+    assert(std::isnan(limb.longitudeDeg) && std::isnan(limb.latitudeDeg));
+    // NaN in, NaN out; degenerate ellipsoid fails closed.
+    const auto bad = goesFixedForward(west, std::numeric_limits<double>::quiet_NaN(), 35.0);
+    assert(std::isnan(bad.xRadians) && std::isnan(bad.yRadians));
+    GoesFixedGrid flat = west;
+    flat.semiMinorMeters = 0.0;
+    const auto flatOut = goesFixedForward(flat, -137.0, 20.0);
+    assert(std::isnan(flatOut.xRadians));
+    const auto flatBack = goesFixedInverse(flat, 0.01, 0.01);
+    assert(std::isnan(flatBack.longitudeDeg));
+}
+
+void testGoesFixture() {
+    if (!goesReaderAvailable()) return;
+#ifdef CAPPEDWEATHER_EXPECT_NETCDF
+    assert(goesReaderAvailable());
+#endif
+    const auto path = fixturePath("goes13_ok.nc");
+    assert(!path.empty());
+    const auto frame = readGoesRad(path);
+    assert(frame.has_value());
+    assert(frame->nx == 250 && frame->ny == 150);
+    assert(frame->brightnessCelsius.size() == 250 * 150);
+    assert(frame->channel == 13);
+    assert(std::abs(frame->grid.subpointLongitudeDeg + 137.0) < 1e-9);
+    assert(std::abs(frame->grid.perspectiveHeightMeters - 35786023.0) < 1.0);
+    // Absolute placement against the file's own `geospatial_lat_lon_extent`
+    // record (west 175.62E, north 53.5, east -89.62, south 14.57, center
+    // -137/29.97): grid corners land on those bounds to 1 deg, which a
+    // spherical-`a` got wrong by 20 deg. y runs north-down in storage, so
+    // row 0 is the north edge; longitudes compare wrap-aware.
+    const double cornerLon[2][2] = {{175.63, -90.21}, {-161.59, -112.6}};
+    const double cornerLat[2][2] = {{53.5, 53.44}, {14.98, 14.98}};
+    for (std::size_t iy = 0; iy < 2; ++iy) {
+        for (std::size_t ix = 0; ix < 2; ++ix) {
+            const double gx = (ix == 0) ? frame->x0Radians
+                                        : frame->x0Radians + (frame->nx - 1) * frame->dxRadians;
+            const double gy = (iy == 0) ? frame->y0Radians
+                                        : frame->y0Radians + (frame->ny - 1) * frame->dyRadians;
+            const auto corner = goesFixedInverse(frame->grid, gx, gy);
+            assert(std::isfinite(corner.latitudeDeg) && std::isfinite(corner.longitudeDeg));
+            double lonDelta = std::fmod(corner.longitudeDeg - cornerLon[iy][ix] + 540.0, 360.0);
+            lonDelta -= 180.0;
+            assert(std::abs(lonDelta) < 1.0);
+            assert(std::abs(corner.latitudeDeg - cornerLat[iy][ix]) < 1.0);
+        }
+    }
+    // Scan-start time: 2026-10-10 15:02:38Z (J2000 seconds + 946728000).
+    assert(frame->validEpochSeconds == 1791644558LL);
+    // Live afternoon scene: real BT spread (cold tops near -53 C, warm
+    // ground near +25 C), median near +12 C, spot gate near +6.9 C.
+    // Tolerances are loose (float32 Planck math), the shape is the contract.
+    float finiteMin = std::numeric_limits<float>::infinity();
+    float finiteMax = -std::numeric_limits<float>::infinity();
+    double sum = 0.0;
+    std::size_t finite = 0;
+    for (const float value : frame->brightnessCelsius) {
+        if (!std::isfinite(value)) continue;
+        finiteMin = std::min(finiteMin, value);
+        finiteMax = std::max(finiteMax, value);
+        sum += value;
+        ++finite;
+    }
+    assert(finite == 250 * 150);
+    assert(finiteMin > -60.0F && finiteMin < -45.0F);
+    assert(finiteMax > 20.0F && finiteMax < 30.0F);
+    assert(sum / finite > 5.0 && sum / finite < 20.0);
+    assert(std::abs(frame->brightnessCelsius[75 * 250 + 125] - 6.9F) < 1.0F);
+    // Garbage fails closed.
+    assert(!readGoesRad("tests/fixtures/does-not-exist.nc").has_value());
 }
 
 void testVadProfile() {
@@ -2614,6 +2735,8 @@ int main() {
     testHailSwaths();
     testLambert();
     testHrrrFixture();
+    testFixedGrid();
+    testGoesFixture();
     testSounding();
     testSrh();
     testTbss();

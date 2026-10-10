@@ -1322,6 +1322,17 @@ void RadarMapCanvas::setHrrrVisible(const bool visible) {
     update();
 }
 
+void RadarMapCanvas::setGoesFrame(std::optional<GoesFrame> frame) {
+    goesFrame_ = std::move(frame);
+    update();
+}
+
+void RadarMapCanvas::setGoesVisible(const bool visible) {
+    if (goesVisible_ == visible) return;
+    goesVisible_ = visible;
+    update();
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -3062,6 +3073,41 @@ void RadarMapCanvas::paintHrrr(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintGoes(QPainter& painter) {
+    if (!goesVisible_ || !goesFrame_.has_value()) return;
+    // Observed IR context under live echo: grayscale by cloud-top coldness,
+    // warm ground skipped so the map never washes out. Same raster idiom
+    // and no-click rule as HRRR.
+    const GoesFrame& frame = *goesFrame_;
+    if (frame.nx == 0 || frame.ny == 0 ||
+        frame.brightnessCelsius.size() != frame.nx * frame.ny)
+        return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
+    const double cell = zoom_ >= 6 ? 4.0 : 2.5;
+    for (std::size_t iy = 0; iy < frame.ny; ++iy) {
+        for (std::size_t ix = 0; ix < frame.nx; ++ix) {
+            const float bt = frame.brightnessCelsius[iy * frame.nx + ix];
+            if (!std::isfinite(bt) || bt > 10.0F) continue;
+            const double xRad = frame.x0Radians + ix * frame.dxRadians;
+            const double yRad = frame.y0Radians + iy * frame.dyRadians;
+            const auto lonLat = goesFixedInverse(frame.grid, xRad, yRad);
+            if (!std::isfinite(lonLat.longitudeDeg) || !std::isfinite(lonLat.latitudeDeg))
+                continue;
+            const auto point =
+                screenPoint(lonLat.latitudeDeg, lonLat.longitudeDeg);
+            if (!viewport.contains(point)) continue;
+            // Cold white to warm dark over -90..+10 C.
+            const int gray = std::clamp(
+                static_cast<int>(255.0F * (10.0F - bt) / 100.0F), 0, 255);
+            painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
+                             QColor(gray, gray, gray, 110));
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
@@ -4025,6 +4071,26 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
                                              : QStringLiteral("?"));
         }
         painter.drawText(QRectF(20, 230, 242, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
+    }
+    // Fifth context row: GOES scan time. Same model/observed-context idiom.
+    if (goesVisible_) {
+        const QRectF goesPanel(12, 250, 258, 20);
+        const bool active = goesFrame_.has_value();
+        painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
+        painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
+        painter.drawRoundedRect(goesPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(active ? QColor(200, 200, 200) : QColor(148, 163, 184));
+        QString label = QStringLiteral("GOES: none");
+        if (active) {
+            const auto valid =
+                QDateTime::fromSecsSinceEpoch(goesFrame_->validEpochSeconds, QTimeZone::UTC);
+            label = QStringLiteral("GOES C%1 %2")
+                        .arg(goesFrame_->channel)
+                        .arg(valid.isValid() ? valid.toString(QStringLiteral("HH:mm'Z'"))
+                                             : QStringLiteral("?"));
+        }
+        painter.drawText(QRectF(20, 252, 242, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -5538,6 +5604,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintSpcFireOutlook(painter);
         paintWpcOutlook(painter);
         paintHrrr(painter);
+        paintGoes(painter);
         paintRadarOverlay(painter);
         paintWeatherOverlays(painter);
     } else {
@@ -5545,6 +5612,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintSpcFireOutlook(painter);
         paintWpcOutlook(painter);
         paintHrrr(painter);
+        paintGoes(painter);
         paintWeatherOverlays(painter);
         paintRadarOverlay(painter);
     }

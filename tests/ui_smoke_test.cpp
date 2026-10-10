@@ -10,6 +10,7 @@
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
 #include "app/hrrr_source.hpp"
+#include "app/goes_source.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2367,6 +2368,53 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // GOES listing URL, newest-key pick, and slot clock: hermetic against
+    // hand-built XML in the live ListBucketResult shape.
+    {
+        const auto url = goesListUrl(QStringLiteral("noaa-goes19"),
+                                     QDateTime(QDate(2026, 10, 10), QTime(15, 0), QTimeZone::UTC));
+        const auto text = url.toString();
+        if (!url.isValid() || !text.contains(QStringLiteral("noaa-goes19")) ||
+            !text.contains(QStringLiteral("ABI-L1b-RadC/2026/283/15")) ||
+            !text.contains(QStringLiteral("max-keys=300"))) {
+            std::cerr << "GOES list URL is wrong: " << text.toStdString() << '\n';
+            return 1;
+        }
+        if (goesListUrl(QString(), QDateTime(QDate(2026, 10, 10), QTime(15, 0), QTimeZone::UTC))
+                .isValid() ||
+            goesListUrl(QStringLiteral("noaa-goes19"), QDateTime()).isValid()) {
+            std::cerr << "GOES list URL should reject bad input\n";
+            return 1;
+        }
+        if (!goesChannelSupported(13) || !goesChannelSupported(7) ||
+            goesChannelSupported(2) || goesChannelSupported(16)) {
+            std::cerr << "GOES channel gate is wrong\n";
+            return 1;
+        }
+        const QByteArray listing =
+            R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Contents><Key>ABI-L1b-RadC/2026/283/15/OR_ABI-L1b-RadC-M6C13_G18_s20262831501189_e20262831503574_c20262831504026.nc</Key></Contents>
+<Contents><Key>ABI-L1b-RadC/2026/283/15/OR_ABI-L1b-RadC-M6C13_G18_s20262831506189_e20262831508574_c20262831509043.nc</Key></Contents>
+<Contents><Key>ABI-L1b-RadC/2026/283/15/OR_ABI-L1b-RadC-M6C07_G18_s20262831506189_e20262831508574_c20262831509043.nc</Key></Contents>
+</ListBucketResult>)XML";
+        if (newestGoesKey(listing, 13) !=
+                QStringLiteral("ABI-L1b-RadC/2026/283/15/OR_ABI-L1b-RadC-M6C13_G18_s20262831506189_e20262831508574_c20262831509043.nc") ||
+            newestGoesKey(listing, 7) !=
+                QStringLiteral("ABI-L1b-RadC/2026/283/15/OR_ABI-L1b-RadC-M6C07_G18_s20262831506189_e20262831508574_c20262831509043.nc") ||
+            !newestGoesKey(listing, 2).isEmpty() || !newestGoesKey(QByteArray("garbage"), 13).isEmpty()) {
+            std::cerr << "GOES newest-key pick is wrong\n";
+            return 1;
+        }
+        const auto at = [](int hour, int minute) {
+            return QDateTime(QDate(2026, 10, 10), QTime(hour, minute), QTimeZone::UTC);
+        };
+        if (latestGoesSlot(at(15, 37)) != at(15, 25) || latestGoesSlot(at(15, 4)) != at(14, 50) ||
+            latestGoesSlot(QDateTime()).isValid()) {
+            std::cerr << "GOES slot clock is wrong\n";
+            return 1;
+        }
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {
@@ -3222,6 +3270,8 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setNhcVisible(false);
     map->setHmsVisible(false);
     map->setDatVisible(false);
+    map->setHrrrVisible(false);
+    map->setGoesVisible(false);
     application.processEvents();
     QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, map->rect().center());
     application.processEvents();
@@ -3347,6 +3397,8 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setNhcVisible(false);
     map->setHmsVisible(false);
     map->setDatVisible(false);
+    map->setHrrrVisible(false);
+    map->setGoesVisible(false);
     const auto probePoint = map->radarScreenPoint(QStringLiteral("TATL")) + QPoint(20, 0);
     map->inspectAt(QPointF(probePoint));
     if (map->probeText().isEmpty() || !map->probeText().contains(QStringLiteral("dBZ"))) {

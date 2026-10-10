@@ -15,6 +15,7 @@
 #include "app/hms_smoke.hpp"
 #include "app/dat_paths.hpp"
 #include "app/hrrr_source.hpp"
+#include "app/goes_source.hpp"
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
 #include "app/metar_source.hpp"
@@ -394,6 +395,7 @@ MainWindow::MainWindow(QWidget* parent)
       hmsSource_(new HmsSmokeSource(this)),
       datSource_(new DatPathSource(this)),
       hrrrSource_(new HrrrSource(this)),
+      goesSource_(new GoesSource(this)),
       metarSource_(new MetarSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
@@ -654,6 +656,11 @@ MainWindow::MainWindow(QWidget* parent)
         if (visible && hrrrSource_) hrrrSource_->refresh();
         refreshLayerBadges();
     });
+    connect(goesCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setGoesVisible(visible);
+        if (visible && goesSource_) goesSource_->refresh();
+        refreshLayerBadges();
+    });
     connect(datCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setDatVisible(visible);
         refreshLayerBadges();
@@ -791,6 +798,14 @@ MainWindow::MainWindow(QWidget* parent)
                 refreshLayerBadges();
             });
     connect(hrrrSource_, &HrrrSource::statusChanged, this, [this](const QString& status) {
+        statusBar()->showMessage(status, 8000);
+    });
+    connect(goesSource_, &GoesSource::frameReady, this,
+            [this](std::optional<GoesFrame> frame) {
+                for (auto* panel : maps_) panel->setGoesFrame(frame);
+                refreshLayerBadges();
+            });
+    connect(goesSource_, &GoesSource::statusChanged, this, [this](const QString& status) {
         statusBar()->showMessage(status, 8000);
     });
     connect(metarSource_, &MetarSource::metarsReady, this, [this](QVector<MetarObs> metars) {
@@ -984,6 +999,7 @@ MainWindow::MainWindow(QWidget* parent)
     hmsSource_->refresh();
     datSource_->refresh();
     hrrrSource_->refresh();
+    goesSource_->refresh();
     metarSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
@@ -1532,6 +1548,30 @@ void MainWindow::buildUi() {
                  QStringLiteral("Model reflectivity under echo"), hrrrBadge_,
                  QStringLiteral("hrrrBadge"), true,
                  QStringLiteral("HRRR composite reflectivity for the latest analysis, painted under live echo in echo colors at reduced alpha. Model guidance with its valid hour on display, never observed echo."));
+    makeLayerRow(goesCheck_, QStringLiteral("GOES infrared"), QStringLiteral("goesCheck"),
+                 QStringLiteral("Cloud tops under echo"), goesBadge_,
+                 QStringLiteral("goesBadge"), true,
+                 QStringLiteral("GOES ABI infrared brightness temperature under live echo in grayscale (cold white). Observed context with its scan time on display."));
+    {
+        // Channel picker lives directly under its layer row: clean-window
+        // IR (13) or shortwave IR (7). Visible channels stay out (file size
+        // plus a solar path the IR painter does not need).
+        auto* goesChannelRow = new QHBoxLayout();
+        goesChannelRow->setSpacing(8);
+        auto* goesChannelLabel = new QLabel(QStringLiteral("Band"), controlBody);
+        goesChannelCombo_ = new QComboBox(controlBody);
+        goesChannelCombo_->setObjectName(QStringLiteral("goesChannelCombo"));
+        goesChannelCombo_->addItem(QStringLiteral("13 clean IR"), 13);
+        goesChannelCombo_->addItem(QStringLiteral("7 shortwave IR"), 7);
+        goesChannelCombo_->setToolTip(QStringLiteral("GOES ABI infrared band. Refetches on change."));
+        goesChannelRow->addWidget(goesChannelLabel);
+        goesChannelRow->addWidget(goesChannelCombo_, 1);
+        layersGroup->addLayout(goesChannelRow);
+        connect(goesChannelCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+            if (!goesSource_ || index < 0) return;
+            goesSource_->setChannel(goesChannelCombo_->itemData(index).toInt());
+        });
+    }
     makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
@@ -3369,6 +3409,7 @@ void MainWindow::restoreSettings() {
         panel->setHmsVisible(hmsCheck_->isChecked());
         panel->setDatVisible(datCheck_->isChecked());
         panel->setHrrrVisible(hrrrCheck_->isChecked());
+        panel->setGoesVisible(goesCheck_->isChecked());
         panel->setMcdVisible(mcdCheck_->isChecked());
         panel->setMetarVisible(metarCheck_->isChecked());
     }
@@ -3384,6 +3425,13 @@ void MainWindow::restoreSettings() {
     hmsCheck_->setChecked(settings.value(QStringLiteral("overlays/hmsSmoke"), true).toBool());
     datCheck_->setChecked(settings.value(QStringLiteral("overlays/datPaths"), true).toBool());
     hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), true).toBool());
+    goesCheck_->setChecked(settings.value(QStringLiteral("overlays/goes"), true).toBool());
+    {
+        const int channel = settings.value(QStringLiteral("overlays/goesChannel"), 13).toInt();
+        const int index = goesChannelCombo_->findData(goesChannelSupported(channel) ? channel : 13);
+        goesChannelCombo_->setCurrentIndex(std::max(0, index));
+        if (goesSource_) goesSource_->setChannel(goesChannelCombo_->currentData().toInt());
+    }
     mcdCheck_->setChecked(settings.value(QStringLiteral("overlays/mcd"), true).toBool());
     metarCheck_->setChecked(settings.value(QStringLiteral("overlays/metar"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
@@ -3448,6 +3496,8 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/hmsSmoke"), hmsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/datPaths"), datCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/hrrr"), hrrrCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/goes"), goesCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/goesChannel"), goesChannelCombo_->currentData().toInt());
     settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/metar"), metarCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
@@ -4526,6 +4576,15 @@ void MainWindow::refreshLayerBadges() {
         hrrrBadge_->setToolTip(!on ? QStringLiteral("HRRR layer is off")
                                : has ? QStringLiteral("Model reflectivity frame on the map")
                                      : QStringLiteral("Layer is on; no model frame loaded yet"));
+    }
+    if (goesBadge_) {
+        const bool has = map_->goesHasFrame();
+        const bool on = goesCheck_ && goesCheck_->isChecked();
+        goesBadge_->setText(!on ? QStringLiteral("off") : has ? QStringLiteral("1")
+                                                              : QStringLiteral("quiet"));
+        goesBadge_->setToolTip(!on ? QStringLiteral("GOES layer is off")
+                               : has ? QStringLiteral("Satellite frame on the map")
+                                     : QStringLiteral("Layer is on; no satellite frame loaded yet"));
     }
     if (metarBadge_) {
         const auto n = map_->metarCount();

@@ -32,7 +32,6 @@ Ready to build (data live now, testable hermetically plus replay):
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
 
 Research-gated (confirm open shape first, METAR/ECCC style):
-- [ ] GOES satellite overlay. CONFIRMED live 2026-10-10: anonymous `noaa-goes18` bucket, `ABI-L1b-RadC/YYYY/DDD/HH/OR_ABI-L1b-RadC-M6Cnn_G18_s.._e.._c...nc` at 5-min cadence minutes fresh. Sizes per file: C01_Stokes visible ~6 MB, C13 clean-IR similar, C02 red visible ~52 MB (too heavy at full res, skip or downsample). Remap via fixed-grid projection attrs plus kappa0/Planck through the optional netCDF reader, CONUS RadC first. Needs: channel picker plus remap plus layer with tests.
 - [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
 
 ## Non-goals (for now)
@@ -42,6 +41,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- GOES ABI infrared (anonymous S3 RadC C13/C07 brightness temperature via fixed-grid remap validated against the file's own extent record, observed context under echo with scan time and band picker, layer with badge and persisted toggle, hermetic tests on a committed fixture).
 - HRRR simulated reflectivity (TDS NCSS REFC subset, Lambert math validated against the live grid, model-context raster under echo with valid hour, layer with badge and persisted toggle, hermetic tests on a committed fixture).
 - RAOB sounding hodograph (IEM 00Z/12Z fetch with station memory, height-colored trace plus storm-motion vector, sounding-vs-VAD SRH ground truth sharing one integrator, freezing-level readout, hermetic parser/clock/paint tests, live-verified payload shape).
 - NWS DAT survey paths (90-day recency-bounded GeoJSON with EF colors, line layer with badge and persisted toggle, live-verified query shape, hermetic parser and color tests).
