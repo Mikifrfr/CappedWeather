@@ -10,6 +10,7 @@
 #include "app/session_prefetch.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/spc_convective.hpp"
+#include "app/nhc_cyclone.hpp"
 #include "app/metar_source.hpp"
 #include "app/placefile_source.hpp"
 #include "app/archive_source.hpp"
@@ -382,6 +383,7 @@ MainWindow::MainWindow(QWidget* parent)
       glmSource_(new GlmSource(this)),
       overlaySource_(new WeatherOverlaySource(this)),
       spcSource_(new SpcConvectiveSource(this)),
+      nhcSource_(new NhcCycloneSource(this)),
       metarSource_(new MetarSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
@@ -505,6 +507,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(refreshTimer_, &QTimer::timeout, this, &MainWindow::requestSelectedRadar);
     connect(overlayRefreshTimer_, &QTimer::timeout, overlaySource_, &WeatherOverlaySource::refresh);
     connect(overlayRefreshTimer_, &QTimer::timeout, spcSource_, &SpcConvectiveSource::refresh);
+    connect(overlayRefreshTimer_, &QTimer::timeout, nhcSource_, &NhcCycloneSource::refresh);
     connect(overlayRefreshTimer_, &QTimer::timeout, metarSource_, &MetarSource::refresh);
     connect(animationTimer_, &QTimer::timeout, this, &MainWindow::advanceFrame);
     // Countdown ticker: re-renders the warning inbox every 30 s so the
@@ -621,6 +624,10 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto* panel : maps_) panel->setSpcFireVisible(visible);
         refreshLayerBadges();
     });
+    connect(nhcCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setNhcVisible(visible);
+        refreshLayerBadges();
+    });
     connect(mcdCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setMcdVisible(visible);
         refreshLayerBadges();
@@ -710,6 +717,14 @@ MainWindow::MainWindow(QWidget* parent)
     connect(spcSource_, &SpcConvectiveSource::statusChanged, this, [this](const QString& status) {
         spcStatus_ = status;
         updateUnifiedStatus();
+    });
+    connect(nhcSource_, &NhcCycloneSource::cyclonesReady, this,
+            [this](QVector<NhcStorm> storms) {
+                for (auto* panel : maps_) panel->setNhcStorms(storms);
+                refreshLayerBadges();
+            });
+    connect(nhcSource_, &NhcCycloneSource::statusChanged, this, [this](const QString& status) {
+        statusBar()->showMessage(status, 8000);
     });
     connect(metarSource_, &MetarSource::metarsReady, this, [this](QVector<MetarObs> metars) {
         for (auto* panel : maps_) panel->setMetars(metars);
@@ -897,6 +912,7 @@ MainWindow::MainWindow(QWidget* parent)
                                     30, 600) * 1000);
     overlaySource_->refresh();
     spcSource_->refresh();
+    nhcSource_->refresh();
     metarSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
@@ -1425,6 +1441,10 @@ void MainWindow::buildUi() {
                  QStringLiteral("Day 1 + 2 Elevated/Critical risk"), spcFireBadge_,
                  QStringLiteral("spcFireBadge"), true,
                  QStringLiteral("Storm Prediction Center Day 1 and Day 2 fire-weather outlooks (DryT + WindRH) in official orange colors. Context, not a warning."));
+    makeLayerRow(nhcCheck_, QStringLiteral("NHC cyclones"), QStringLiteral("nhcCheck"),
+                 QStringLiteral("Active cones + forecast tracks"), nhcBadge_,
+                 QStringLiteral("nhcBadge"), true,
+                 QStringLiteral("National Hurricane Center active tropical cyclones: forecast cone plus track line. Hurricane watches/warnings already arrive through NWS alerts."));
     makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
@@ -3249,6 +3269,7 @@ void MainWindow::restoreSettings() {
         panel->setTdsVisible(tdsCheck_->isChecked());
         panel->setSpcOutlookVisible(spcOutlookCheck_->isChecked());
         panel->setSpcFireVisible(spcFireCheck_->isChecked());
+        panel->setNhcVisible(nhcCheck_->isChecked());
         panel->setMcdVisible(mcdCheck_->isChecked());
         panel->setMetarVisible(metarCheck_->isChecked());
     }
@@ -3259,6 +3280,7 @@ void MainWindow::restoreSettings() {
     placefilesCheck_->setChecked(settings.value(QStringLiteral("overlays/placefiles"), true).toBool());
     spcOutlookCheck_->setChecked(settings.value(QStringLiteral("overlays/spcOutlook"), true).toBool());
     spcFireCheck_->setChecked(settings.value(QStringLiteral("overlays/spcFire"), true).toBool());
+    nhcCheck_->setChecked(settings.value(QStringLiteral("overlays/nhc"), true).toBool());
     mcdCheck_->setChecked(settings.value(QStringLiteral("overlays/mcd"), true).toBool());
     metarCheck_->setChecked(settings.value(QStringLiteral("overlays/metar"), true).toBool());
     // Map legacy 3-item speed index (0=1x, 1=2x, 2=4x) onto the new 6-item
@@ -3318,6 +3340,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/placefiles"), placefilesCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/spcOutlook"), spcOutlookCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/spcFire"), spcFireCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/nhc"), nhcCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/metar"), metarCheck_->isChecked());
     settings.setValue(QStringLiteral("timeline/speed"), speedCombo_->currentIndex());
@@ -4351,6 +4374,15 @@ void MainWindow::refreshLayerBadges() {
         spcFireBadge_->setToolTip(!on ? QStringLiteral("SPC fire layer is off")
                                   : n > 0 ? QStringLiteral("Day 1 + 2 fire-weather areas on the map")
                                           : QStringLiteral("Layer is on; no fire-weather areas issued right now"));
+    }
+    if (nhcBadge_) {
+        const auto n = map_->nhcStormCount();
+        const bool on = nhcCheck_ && nhcCheck_->isChecked();
+        nhcBadge_->setText(!on ? QStringLiteral("off") : n > 0 ? QString::number(n)
+                                                               : QStringLiteral("quiet"));
+        nhcBadge_->setToolTip(!on ? QStringLiteral("NHC cyclone layer is off")
+                              : n > 0 ? QStringLiteral("Active tropical cyclones on the map")
+                                      : QStringLiteral("Layer is on; no tropical cyclones active right now"));
     }
     if (metarBadge_) {
         const auto n = map_->metarCount();

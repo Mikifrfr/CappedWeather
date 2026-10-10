@@ -9,6 +9,7 @@
 #include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
 #include "app/spc_convective.hpp"
+#include "app/nhc_cyclone.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -196,6 +197,10 @@ public:
     void setMcdVisible(bool visible);
     [[nodiscard]] bool mcdVisible() const { return mcdVisible_; }
     [[nodiscard]] int mcdCount() const;
+    void setNhcStorms(QVector<NhcStorm> storms);
+    void setNhcVisible(bool visible);
+    [[nodiscard]] bool nhcVisible() const { return nhcVisible_; }
+    [[nodiscard]] int nhcStormCount() const;
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -398,6 +403,7 @@ private:
         Placefile,
         SpcOutlook,
         SpcMcd,
+        NhcStorm,
         Metar,
         // A frozen cursor readout. "Inspect at cursor" used to write the same
         // transient text the hover uses, so the next mouse move silently wiped
@@ -516,6 +522,10 @@ private:
     QVector<SpcOutlookFeature> spcFireOutlooks_;
     void paintSpcOutlook(QPainter& painter);
     void paintSpcFireOutlook(QPainter& painter);
+    // NHC cyclones: cone polygons + forecast-track lines, vector-painted
+    // like MCDs (a handful of rings, no raster cache).
+    QVector<NhcStorm> nhcStorms_;
+    void paintNhcOverlays(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -637,6 +647,7 @@ private:
     bool stormReportsVisible_ = true;
     bool spcOutlookVisible_ = true;
     bool spcFireVisible_ = true;
+    bool nhcVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

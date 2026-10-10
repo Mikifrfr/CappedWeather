@@ -36,7 +36,6 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - [ ] GOES satellite overlay. HRV/IR from the anonymous NOAA S3 buckets through the optional netCDF reader, remapped to the panel grid. Confirm product keys and sizes first.
 - [ ] HRRR simulated reflectivity. NOMADS or TDS NetCDF subset as a model-context overlay with valid-time labels, never mixed with observed echo. Confirm subset API first.
 - [ ] Observed soundings plus hodograph. IEM parsed-sounding JSON for 00Z/12Z sites, Skew-T-lite or hodograph pop-out feeding SRH ground truth. Confirm feed shape first.
-- [ ] NHC cyclone plus cone overlay. Open NHC GIS for active storms, same polygon machinery as warnings, seasonal value. Confirm endpoint first.
 - [ ] HMS fire/smoke overlay. NOAA open smoke/fire polygons for western sessions, same machinery as warnings. Confirm endpoint first.
 - [ ] WPC excessive-rainfall outlooks. Same SPC-style GeoJSON pattern from another office; confirm file layout first.
 - [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
@@ -48,6 +47,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- NHC tropical cyclone overlay (active-storm KMZ discovery plus cone/track KMZ geometry, layer with badge and persisted toggle, live-verified during Isaias/Rachel/Simon, hermetic parser and KMZ-extraction tests).
 - Precip-type map (METAR surface temps crossed with the measured melting level, dotted station rings plus card line, strict fail-closed gating, hermetic classifier tests, experimental until a winter-season scoring).
 - Hail swaths from tracks plus cores (per-storm convex-hull footprints of persisted hail fixes, painted under the hail toggle, Placemark polygons in the frame KML export, six-case core tests plus KML builder tests).
 - TVS/meso markers into AlertCenter (opt-in sink off by default, TVS at Severe+ and meso at Moderate+, radar-scoped dedup with suppression and priming, always labeled guidance, Settings checkbox with persisted key, hermetic ingest tests).

@@ -213,6 +213,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/shortcut_help_dialog.hpp
             src/app/spc_convective.cpp
             src/app/spc_convective.hpp
+            src/app/nhc_cyclone.cpp
+            src/app/nhc_cyclone.hpp
             src/app/offline_pack.cpp
             src/app/offline_pack.hpp
             src/app/case_pack.cpp

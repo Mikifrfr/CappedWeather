@@ -55,6 +55,7 @@ class CrossSectionWidget;
 class RadarListModel;
 class WeatherOverlaySource;
 class SpcConvectiveSource;
+class NhcCycloneSource;
 class MetarSource;
 class PlacefileSource;
 class ArchiveSource;
@@ -344,6 +345,8 @@ private:
     QLabel* spcOutlookBadge_ = nullptr;
     QCheckBox* spcFireCheck_ = nullptr;
     QLabel* spcFireBadge_ = nullptr;
+    QCheckBox* nhcCheck_ = nullptr;
+    QLabel* nhcBadge_ = nullptr;
     QCheckBox* mcdCheck_ = nullptr;
     QLabel* mcdBadge_ = nullptr;
     QCheckBox* metarCheck_ = nullptr;
@@ -386,6 +389,7 @@ private:
     GlmSource* glmSource_ = nullptr;
     WeatherOverlaySource* overlaySource_ = nullptr;
     SpcConvectiveSource* spcSource_ = nullptr;
+    NhcCycloneSource* nhcSource_ = nullptr;
     MetarSource* metarSource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;
     ArchiveSource* archiveSource_ = nullptr;

@@ -3,6 +3,7 @@
 #include "app/radar_list_model.hpp"
 #include "app/weather_overlay_source.hpp"
 #include "app/spc_convective.hpp"
+#include "app/nhc_cyclone.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -37,6 +38,7 @@
 #include <QPair>
 #include <QPolygonF>
 #include <QSet>
+#include <QDataStream>
 #include <QSlider>
 #include <QSpinBox>
 #include <QProgressBar>
@@ -2048,6 +2050,93 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     if (!parseSpcOutlookGeoJson(fireQuiet, 1, &parseError).isEmpty() || !parseError.isEmpty()) {
         std::cerr << "Quiet fire outlook should parse to zero features\n";
         return 1;
+    }
+    // NHC cyclones: live-shaped active feed (two storm folders + a
+    // non-storm folder), cone ring and track line in real KML shape.
+    const QByteArray nhcActive = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document id="active">
+<Folder id="wsp"><name>Wind Speed Probabilities (120 hours)</name>
+<NetworkLink id="wsp34"><name>34-kt</name><Link><href>https://example.invalid/wsp34.kmz</href></Link></NetworkLink>
+</Folder>
+<Folder id="ep5"><name>Hurricane Simon</name>
+<NetworkLink id="cone"><Link><href>https://www.nhc.noaa.gov/storm_graphics/api/EP202026_012Aadv_CONE.kmz</href></Link></NetworkLink>
+<NetworkLink id="track"><Link><href>https://www.nhc.noaa.gov/storm_graphics/api/EP202026_012Aadv_TRACK.kmz</href></Link></NetworkLink>
+</Folder>
+<Folder id="ep3"><name>Tropical Storm Rachel</name>
+<NetworkLink id="cone"><Link><href>https://www.nhc.noaa.gov/storm_graphics/api/EP182026_053Aadv_CONE.kmz</href></Link></NetworkLink>
+<NetworkLink id="track"><Link><href>https://www.nhc.noaa.gov/storm_graphics/api/EP182026_053Aadv_TRACK.kmz</href></Link></NetworkLink>
+</Folder>
+</Document></kml>)XML";
+    const auto nhcLinks = parseNhcActiveKml(nhcActive, &parseError);
+    if (!parseError.isEmpty() || nhcLinks.size() != 2 || nhcLinks.front().id != QStringLiteral("EP202026") ||
+        nhcLinks.front().name != QStringLiteral("Hurricane Simon") ||
+        !nhcLinks.front().coneUrl.endsWith(QStringLiteral("EP202026_012Aadv_CONE.kmz")) ||
+        !nhcLinks.front().trackUrl.endsWith(QStringLiteral("EP202026_012Aadv_TRACK.kmz")) ||
+        nhcLinks.back().id != QStringLiteral("EP182026")) {
+        std::cerr << "NHC active feed parsing failed\n";
+        return 1;
+    }
+    if (!parseNhcActiveKml(QByteArray("<kml><broken"), &parseError).isEmpty() ||
+        parseError.isEmpty()) {
+        std::cerr << "Malformed NHC feed should fail closed with an error\n";
+        return 1;
+    }
+    const QByteArray nhcCone = R"XML(<?xml version='1.0' encoding='UTF-8'?>
+<kml xmlns='http://earth.google.com/kml/2.1'><Document>
+<name>Hurricane Simon (Advisory #12A) - Forecast Track Uncertainty</name>
+<Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>
+-104.79318,17.033,0 -104.7859,17.0334,0 -104.77814,17.0346,0 -104.75231,17.03969,0
+</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Document></kml>)XML";
+    const auto coneRing = parseNhcConeRing(nhcCone, &parseError);
+    if (!parseError.isEmpty() || coneRing.size() != 4 ||
+        std::abs(coneRing.front().x() + 104.79318) > 0.00001 ||
+        std::abs(coneRing.front().y() - 17.033) > 0.00001) {
+        std::cerr << "NHC cone ring parsing failed\n";
+        return 1;
+    }
+    if (!parseNhcConeRing(QByteArray("<kml><Document></Document></kml>"), &parseError).isEmpty() ||
+        parseError.isEmpty()) {
+        std::cerr << "Coneless KML should fail closed with an error\n";
+        return 1;
+    }
+    const QByteArray nhcTrack = R"XML(<?xml version='1.0' encoding='UTF-8'?>
+<kml xmlns='http://earth.google.com/kml/2.1'><Document>
+<Placemark><LineString><coordinates>-104.8,17.3,0 -104.7,17.8,0 -104.9,18.8,0</coordinates></LineString></Placemark>
+<Placemark><Point><coordinates>-104.8,17.3,0</coordinates></Point></Placemark>
+</Document></kml>)XML";
+    const auto trackLine = parseNhcTrackLine(nhcTrack, &parseError);
+    if (!parseError.isEmpty() || trackLine.size() != 3 ||
+        std::abs(trackLine.back().x() + 104.9) > 0.00001) {
+        std::cerr << "NHC track line parsing failed\n";
+        return 1;
+    }
+    // KMZ extraction: a stored (uncompressed) .kml entry needs no zlib and
+    // exercises the header walk; garbage fails closed.
+    {
+        const QByteArray payload("<kml><Document><name>stored</name></Document></kml>");
+        const QByteArray kmlName("t.kml");
+        QByteArray kmz;
+        QDataStream stream(&kmz, QIODevice::WriteOnly);
+        stream.setByteOrder(QDataStream::LittleEndian);
+        stream << static_cast<quint32>(0x04034B50) << static_cast<quint16>(20)
+               << static_cast<quint16>(0) << static_cast<quint16>(0) << static_cast<quint16>(0)
+               << static_cast<quint16>(0) << static_cast<quint32>(0)
+               << static_cast<quint32>(payload.size()) << static_cast<quint32>(payload.size())
+               << static_cast<quint16>(kmlName.size()) << static_cast<quint16>(0);
+        stream.writeRawData(kmlName.constData(), kmlName.size());
+        kmz.append(payload);
+        QString kmzError;
+        const auto extracted = extractKmlFromKmz(kmz, &kmzError);
+        if (extracted != payload || !kmzError.isEmpty()) {
+            std::cerr << "Stored KMZ entry should extract verbatim\n";
+            return 1;
+        }
+        if (!extractKmlFromKmz(QByteArray("not a zip"), &kmzError).isEmpty() ||
+            kmzError.isEmpty()) {
+            std::cerr << "Garbage KMZ should fail closed with an error\n";
+            return 1;
+        }
     }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.

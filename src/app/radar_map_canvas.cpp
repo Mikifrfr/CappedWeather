@@ -1241,6 +1241,21 @@ int RadarMapCanvas::spcFireCount() const {
     return static_cast<int>(spcFireOutlooks_.size());
 }
 
+void RadarMapCanvas::setNhcStorms(QVector<NhcStorm> storms) {
+    nhcStorms_ = std::move(storms);
+    update();
+}
+
+void RadarMapCanvas::setNhcVisible(const bool visible) {
+    if (nhcVisible_ == visible) return;
+    nhcVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::nhcStormCount() const {
+    return static_cast<int>(nhcStorms_.size());
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -2752,6 +2767,46 @@ void RadarMapCanvas::paintSpcFireOutlook(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintNhcOverlays(QPainter& painter) {
+    if (!nhcVisible_ || nhcStorms_.isEmpty()) return;
+    // Cyclone context above warnings: translucent cone + white track line.
+    // Cones are large; the viewport check keeps off-screen storms cheap.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto& storm : nhcStorms_) {
+        if (storm.cone.size() >= 4) {
+            QPolygonF polygon;
+            polygon.reserve(storm.cone.size());
+            for (const auto& lonLat : storm.cone) polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (viewport.intersects(polygon.boundingRect())) {
+                QColor fill(255, 123, 0);
+                fill.setAlpha(30);
+                painter.setBrush(fill);
+                painter.setPen(QPen(QColor(255, 123, 0), 1.5));
+                painter.drawPolygon(polygon, Qt::OddEvenFill);
+                if (zoom_ >= 5 && !storm.name.isEmpty()) {
+                    const auto bounds = polygon.boundingRect();
+                    painter.setPen(QColor(255, 200, 150));
+                    painter.setFont(hudFont(7, QFont::DemiBold));
+                    painter.drawText(QRectF(bounds.left(), bounds.top() - 18, 240, 16),
+                                     Qt::AlignLeft | Qt::AlignVCenter, storm.name);
+                }
+            }
+        }
+        if (storm.track.size() >= 2) {
+            QPolygonF line;
+            for (const auto& lonLat : storm.track) line.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (viewport.intersects(line.boundingRect())) {
+                painter.setBrush(Qt::NoBrush);
+                painter.setPen(QPen(QColor(245, 245, 245), 1.5));
+                painter.drawPolyline(line);
+            }
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {
     if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
@@ -3623,6 +3678,31 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         painter.drawText(QRectF(20, 164, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
                          quiet.join(QStringLiteral(" · ")));
     }
+    if (nhcVisible_ && !nhcStorms_.isEmpty()) {
+        // Cyclone chip below the SPC row: first storm name plus overflow.
+        const QRectF nhcPanel(12, 184, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
+        painter.setBrush(QColor(8, 15, 19, 205));
+        painter.drawRoundedRect(nhcPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(QColor(253, 186, 116));
+        const auto label = nhcStorms_.size() == 1
+                               ? nhcStorms_.front().name
+                               : QStringLiteral("%1 + %2 more")
+                                     .arg(nhcStorms_.front().name)
+                                     .arg(nhcStorms_.size() - 1);
+        painter.drawText(QRectF(20, 186, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("🌀 %1").arg(label));
+    } else if (nhcVisible_) {
+        const QRectF nhcPanel(12, 184, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, 60), 1));
+        painter.setBrush(QColor(8, 15, 19, 150));
+        painter.drawRoundedRect(nhcPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(QColor(148, 163, 184));
+        painter.drawText(QRectF(20, 186, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("NHC: none active"));
+    }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
     // vehicle lose orientation at a glance. Paint a compact N arrow top-right.
@@ -4388,6 +4468,20 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
             }
         }
     }
+    if (nhcVisible_) {
+        // Above background outlooks, below NWS warnings (hurricane warnings
+        // already arrive through the warnings path and win the click above).
+        for (const auto& storm : nhcStorms_) {
+            if (storm.cone.size() < 4) continue;
+            QPolygonF polygon;
+            for (const auto& lonLat : storm.cone) polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (!polygon.containsPoint(point, Qt::OddEvenFill)) continue;
+            return {QStringLiteral("%1 (%2)\nNHC forecast cone + track. Watches/warnings for this storm arrive through NWS alerts.\nSource: NHC GIS (experimental product)")
+                        .arg(storm.name.isEmpty() ? QStringLiteral("Tropical cyclone") : storm.name,
+                             storm.id),
+                    PinnedInfoKind::NhcStorm, std::nullopt};
+        }
+    }
     if (spcOutlookVisible_) {
         // Lowest click priority: the outlook is background context, so
         // warnings, reports, and MCDs all win the click above.
@@ -5020,6 +5114,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintRadarOverlay(painter);
     }
     paintMcdOverlays(painter);
+    paintNhcOverlays(painter);
     paintMetars(painter);
     paintPlacefiles(painter);
     paintLightningOverlay(painter);
