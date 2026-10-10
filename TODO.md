@@ -35,7 +35,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - [ ] NWS damage-assessment (DAT) tornado paths. Post-event survey polygons as an overlay layer; confirm the open endpoint shape first.
 - [ ] GOES satellite overlay. HRV/IR from the anonymous NOAA S3 buckets through the optional netCDF reader, remapped to the panel grid. Confirm product keys and sizes first.
 - [ ] HRRR simulated reflectivity. NOMADS or TDS NetCDF subset as a model-context overlay with valid-time labels, never mixed with observed echo. Confirm subset API first.
-- [ ] Observed soundings plus hodograph. IEM parsed-sounding JSON for 00Z/12Z sites, Skew-T-lite or hodograph pop-out feeding SRH ground truth. Confirm feed shape first.
+- [ ] Observed soundings plus hodograph. IEM raob.py CONFIRMED live 2026-10-10 (KOUN 12Z: `{profiles:[{station,valid,profile:[{pres,hght,tmpc,dwpc,drct,sknt}]}]}`, nulls for missing winds). Skew-T-lite or hodograph pop-out feeding SRH ground truth. Needs: nearest-sounding-station table plus parser plus dialog with tests.
 - [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
 
 ## Non-goals (for now)
