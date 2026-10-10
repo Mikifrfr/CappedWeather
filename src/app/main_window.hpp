@@ -57,6 +57,7 @@ class WeatherOverlaySource;
 class SpcConvectiveSource;
 class NhcCycloneSource;
 class WpcEroSource;
+class HmsSmokeSource;
 class MetarSource;
 class PlacefileSource;
 class ArchiveSource;
@@ -350,6 +351,8 @@ private:
     QLabel* nhcBadge_ = nullptr;
     QCheckBox* wpcCheck_ = nullptr;
     QLabel* wpcBadge_ = nullptr;
+    QCheckBox* hmsCheck_ = nullptr;
+    QLabel* hmsBadge_ = nullptr;
     QCheckBox* mcdCheck_ = nullptr;
     QLabel* mcdBadge_ = nullptr;
     QCheckBox* metarCheck_ = nullptr;
@@ -394,6 +397,7 @@ private:
     SpcConvectiveSource* spcSource_ = nullptr;
     NhcCycloneSource* nhcSource_ = nullptr;
     WpcEroSource* wpcSource_ = nullptr;
+    HmsSmokeSource* hmsSource_ = nullptr;
     MetarSource* metarSource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;
     ArchiveSource* archiveSource_ = nullptr;

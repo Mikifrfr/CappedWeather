@@ -11,6 +11,7 @@
 #include "app/spc_convective.hpp"
 #include "app/nhc_cyclone.hpp"
 #include "app/wpc_ero.hpp"
+#include "app/hms_smoke.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -206,6 +207,10 @@ public:
     void setWpcVisible(bool visible);
     [[nodiscard]] bool wpcVisible() const { return wpcVisible_; }
     [[nodiscard]] int wpcOutlookCount() const;
+    void setHmsSmoke(QVector<HmsSmokePlume> plumes);
+    void setHmsVisible(bool visible);
+    [[nodiscard]] bool hmsVisible() const { return hmsVisible_; }
+    [[nodiscard]] int hmsSmokeCount() const;
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -409,6 +414,7 @@ private:
         SpcOutlook,
         SpcMcd,
         NhcStorm,
+        HmsSmoke,
         Metar,
         // A frozen cursor readout. "Inspect at cursor" used to write the same
         // transient text the hover uses, so the next mouse move silently wiped
@@ -535,6 +541,9 @@ private:
     // as the SPC outlooks: official fills at low alpha, Day 1 on top).
     QVector<SpcOutlookFeature> wpcOutlooks_;
     void paintWpcOutlook(QPainter& painter);
+    // HMS smoke plumes: density-tinted polygons, vector-painted like MCDs.
+    QVector<HmsSmokePlume> hmsPlumes_;
+    void paintHmsSmoke(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -658,6 +667,7 @@ private:
     bool spcFireVisible_ = true;
     bool nhcVisible_ = true;
     bool wpcVisible_ = true;
+    bool hmsVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

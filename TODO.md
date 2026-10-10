@@ -36,7 +36,6 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - [ ] GOES satellite overlay. HRV/IR from the anonymous NOAA S3 buckets through the optional netCDF reader, remapped to the panel grid. Confirm product keys and sizes first.
 - [ ] HRRR simulated reflectivity. NOMADS or TDS NetCDF subset as a model-context overlay with valid-time labels, never mixed with observed echo. Confirm subset API first.
 - [ ] Observed soundings plus hodograph. IEM parsed-sounding JSON for 00Z/12Z sites, Skew-T-lite or hodograph pop-out feeding SRH ground truth. Confirm feed shape first.
-- [ ] HMS fire/smoke overlay. NOAA open smoke/fire polygons for western sessions, same machinery as warnings. Confirm endpoint first.
 - [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
 
 ## Non-goals (for now)
@@ -46,6 +45,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- HMS smoke overlay (daily KML with density/satellite/times, official green/yellow/red fills, today-then-yesterday fallback, clean-air quiet state, layer with badge and persisted toggle, live-verified, hermetic parser and URL tests).
 - WPC excessive-rainfall outlooks Day 1-3 (Esri REST GeoJSON with official renderer colors, layer with badge and persisted toggle, live-verified against today's SE US ERO, hermetic parser tests).
 - NHC tropical cyclone overlay (active-storm KMZ discovery plus cone/track KMZ geometry, layer with badge and persisted toggle, live-verified during Isaias/Rachel/Simon, hermetic parser and KMZ-extraction tests).
 - Precip-type map (METAR surface temps crossed with the measured melting level, dotted station rings plus card line, strict fail-closed gating, hermetic classifier tests, experimental until a winter-season scoring).

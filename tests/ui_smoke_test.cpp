@@ -5,6 +5,7 @@
 #include "app/spc_convective.hpp"
 #include "app/nhc_cyclone.hpp"
 #include "app/wpc_ero.hpp"
+#include "app/hms_smoke.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2177,6 +2178,56 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "Malformed WPC payload should fail closed with an error\n";
         return 1;
     }
+    // HMS smoke KML: live-shaped light + heavy plumes (styleUrl density,
+    // CDATA satellite/times, newline-separated triples), overlay-only
+    // Placemarks skipped, day-stamped URL builder.
+    const QByteArray hmsLive = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<Placemark><description><![CDATA[<div>Start Time: 2026282 1220UTC<br>End Time: 2026282 1500UTC<br>Density: Light<br>Satellite: GOES-WEST</div>]]></description>
+<styleUrl>#Smoke_Light_style</styleUrl>
+<Polygon><outerBoundaryIs><LinearRing><coordinates>
+-93.24,31.36,0 -93.25,31.35,0 -93.26,31.34,0 -93.24,31.36,0
+</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+<Placemark><description><![CDATA[<div>Start Time: 2026282 1220UTC<br>End Time: 2026282 1500UTC<br>Density: Heavy<br>Satellite: GOES-EAST</div>]]></description>
+<styleUrl>#Smoke_Heavy</styleUrl>
+<Polygon><outerBoundaryIs><LinearRing><coordinates>
+-90.10,32.40,0 -90.20,32.30,0 -90.30,32.35,0 -90.10,32.40,0
+</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+<Placemark><name>NOAA logo</name><ScreenOverlay><Icon><href>https://example.invalid/logo.png</href></Icon></ScreenOverlay></Placemark>
+</Document></kml>)XML";
+    const auto smoke = parseHmsSmokeKml(hmsLive, &parseError);
+    if (!parseError.isEmpty() || smoke.size() != 2 ||
+        smoke.front().density != HmsSmokeDensity::Light ||
+        smoke.front().satellite != QStringLiteral("GOES-WEST") ||
+        smoke.front().startText != QStringLiteral("2026282 1220UTC") ||
+        smoke.front().ring.size() != 4 ||
+        std::abs(smoke.front().ring.front().x() + 93.24) > 0.00001 ||
+        smoke.back().density != HmsSmokeDensity::Heavy ||
+        hmsSmokeDensityLabel(HmsSmokeDensity::Medium) != QStringLiteral("medium")) {
+        std::cerr << "HMS smoke parsing failed\n";
+        return 1;
+    }
+    // Clean-air day: overlays only, zero plumes, clear error.
+    const QByteArray hmsQuiet = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Smoke-20261010</name>
+<Placemark><name>Legend</name></Placemark>
+</Document></kml>)XML";
+    if (!parseHmsSmokeKml(hmsQuiet, &parseError).isEmpty() || !parseError.isEmpty()) {
+        std::cerr << "Clean-air smoke file should parse to zero plumes\n";
+        return 1;
+    }
+    if (!parseHmsSmokeKml(QByteArray("<kml><broken"), &parseError).isEmpty() ||
+        parseError.isEmpty()) {
+        std::cerr << "Malformed smoke KML should fail closed with an error\n";
+        return 1;
+    }
+    if (hmsSmokeUrl(QDate(2026, 10, 10)).toString() !=
+        QStringLiteral("https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Smoke_Polygons/"
+                       "KML/2026/10/hms_smoke20261010.kml")) {
+        std::cerr << "HMS smoke URL builder is wrong: "
+                  << hmsSmokeUrl(QDate(2026, 10, 10)).toString().toStdString() << '\n';
+        return 1;
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {
@@ -3094,6 +3145,7 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setWpcVisible(false);
     map->setMcdVisible(false);
     map->setNhcVisible(false);
+    map->setHmsVisible(false);
     const auto probePoint = map->radarScreenPoint(QStringLiteral("TATL")) + QPoint(20, 0);
     map->inspectAt(QPointF(probePoint));
     if (map->probeText().isEmpty() || !map->probeText().contains(QStringLiteral("dBZ"))) {

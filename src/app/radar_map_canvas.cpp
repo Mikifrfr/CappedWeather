@@ -1271,6 +1271,21 @@ int RadarMapCanvas::wpcOutlookCount() const {
     return static_cast<int>(wpcOutlooks_.size());
 }
 
+void RadarMapCanvas::setHmsSmoke(QVector<HmsSmokePlume> plumes) {
+    hmsPlumes_ = std::move(plumes);
+    update();
+}
+
+void RadarMapCanvas::setHmsVisible(const bool visible) {
+    if (hmsVisible_ == visible) return;
+    hmsVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::hmsSmokeCount() const {
+    return static_cast<int>(hmsPlumes_.size());
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -2866,6 +2881,39 @@ void RadarMapCanvas::paintWpcOutlook(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintHmsSmoke(QPainter& painter) {
+    if (!hmsVisible_ || hmsPlumes_.isEmpty()) return;
+    // Smoke shading above warnings: official HMS hues (green/yellow/red)
+    // at low alpha, density in the label. Never hides what is underneath.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto& plume : hmsPlumes_) {
+        if (plume.ring.size() < 4) continue;
+        QPolygonF polygon;
+        polygon.reserve(plume.ring.size());
+        for (const auto& lonLat : plume.ring) polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+        if (!viewport.intersects(polygon.boundingRect())) continue;
+        const QColor base = plume.density == HmsSmokeDensity::Heavy     ? QColor(255, 0, 0)
+                            : plume.density == HmsSmokeDensity::Medium ? QColor(255, 255, 0)
+                                                                       : QColor(0, 255, 0);
+        QColor fill = base;
+        fill.setAlpha(40);
+        painter.setBrush(fill);
+        painter.setPen(QPen(base, 1.0));
+        painter.drawPolygon(polygon, Qt::OddEvenFill);
+        if (zoom_ >= 6) {
+            const auto bounds = polygon.boundingRect();
+            painter.setPen(base);
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(QRectF(bounds.left(), bounds.top() - 18, 200, 16),
+                             Qt::AlignLeft | Qt::AlignVCenter,
+                             QStringLiteral("SMOKE %1").arg(hmsSmokeDensityLabel(plume.density)));
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
@@ -3779,6 +3827,21 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             }
         }
     }
+    // Third context row: HMS smoke plume count. Own row so the ERO/NHC row
+    // never overflows when every layer is on at once.
+    if (hmsVisible_) {
+        const bool active = !hmsPlumes_.isEmpty();
+        const QRectF smokePanel(12, 206, 258, 20);
+        painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
+        painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
+        painter.drawRoundedRect(smokePanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(active ? QColor(180, 180, 180) : QColor(148, 163, 184));
+        painter.drawText(
+            QRectF(20, 208, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
+            active ? QStringLiteral("SMOKE %1 plumes").arg(static_cast<int>(hmsPlumes_.size()))
+                   : QStringLiteral("Smoke: none"));
+    }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
     // vehicle lose orientation at a glance. Paint a compact N arrow top-right.
@@ -4653,6 +4716,27 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
                     PinnedInfoKind::SpcOutlook, std::nullopt};
         }
     }
+    if (hmsVisible_) {
+        // Above warnings like the other translucent context: smoke never
+        // hides radar, and NWS warnings still win the click above it.
+        // (This branch sits after warnings in overlayAt order.)
+        for (const auto& plume : hmsPlumes_) {
+            if (plume.ring.size() < 4) continue;
+            QPolygonF polygon;
+            for (const auto& lonLat : plume.ring) polygon.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            if (!polygon.containsPoint(point, Qt::OddEvenFill)) continue;
+            const auto window = !plume.startText.isEmpty() && !plume.endText.isEmpty()
+                                    ? QStringLiteral("Window (UTC): %1 - %2").arg(plume.startText,
+                                                                                 plume.endText)
+                                    : QStringLiteral("Window: see HMS");
+            const auto source = plume.satellite.isEmpty()
+                                    ? QStringLiteral("NOAA HMS")
+                                    : QStringLiteral("NOAA HMS (%1)").arg(plume.satellite);
+            return {QStringLiteral("Smoke (%1 density)\n%2\n%3")
+                        .arg(hmsSmokeDensityLabel(plume.density), window, source),
+                    PinnedInfoKind::HmsSmoke, std::nullopt};
+        }
+    }
     return {};
 }
 
@@ -5221,6 +5305,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     }
     paintMcdOverlays(painter);
     paintNhcOverlays(painter);
+    paintHmsSmoke(painter);
     paintMetars(painter);
     paintPlacefiles(painter);
     paintLightningOverlay(painter);
