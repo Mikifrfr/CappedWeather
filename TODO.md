@@ -40,6 +40,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Raster paint profile hooks (CAPPEDWEATHER_PAINT_PROFILE=1 stderr timings per context layer; measured 6-10 ms GOES, 0 ms quiet HRRR, 1-3 ms mosaic at fixture scale: no optimization justified).
 - Windows update discovery (Help action checks public stable-release metadata with explicit current/newer/no-info/error states, host-validated releases link, no downloads; hermetic version/parser tests).
 - ESRI shapefile placefiles (binary .shp polygon/polyline rings as Polygon/Line elements via magic sniff in both load paths, unprojected lon/lat only with an explicit projected-data error, sibling .dbf names as hover text, same safety envelope as text placefiles, hermetic parser plus source tests on Census-county fixtures).
 - GRLevelX color-table import (Product/Units/Step/Decimals/Scale headers plus Color/Color4/SolidColor rules into custom step stops, sorted, fail-closed with line numbers, live RTWX_REF shape verified, hermetic parser tests).

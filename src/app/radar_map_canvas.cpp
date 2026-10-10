@@ -31,6 +31,7 @@
 #include <QNativeGestureEvent>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <cstdio>
 #include <QThreadPool>
 #include <QToolTip>
 #include <QStandardPaths>
@@ -3060,6 +3061,12 @@ void RadarMapCanvas::paintHrrr(QPainter& painter) {
     if (frame.nx == 0 || frame.ny == 0 ||
         frame.reflectivityDbz.size() != frame.nx * frame.ny)
         return;
+    // Opt-in paint profile (CAPPEDWEATHER_PAINT_PROFILE=1): wall time plus
+    // painted cells on stderr. Off by default: zero overhead.
+    QElapsedTimer profileClock;
+    std::size_t profileCells = 0;
+    const bool profiling = qEnvironmentVariableIsSet("CAPPEDWEATHER_PAINT_PROFILE");
+    if (profiling) profileClock.start();
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
     const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
@@ -3079,7 +3086,13 @@ void RadarMapCanvas::paintHrrr(QPainter& painter) {
             painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
                              colorForValue(ProductKind::Reflectivity, dbz, palette_, 45,
                                            customPalette_));
+            ++profileCells;
         }
+    }
+    if (profiling) {
+        std::fprintf(stderr, "paintHrrr: %lld ms, %zu cells\n",
+                     static_cast<long long>(profileClock.elapsed()),
+                     static_cast<std::size_t>(profileCells));
     }
     painter.restore();
 }
@@ -3093,6 +3106,10 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
     if (frame.nx == 0 || frame.ny == 0 ||
         frame.brightnessCelsius.size() != frame.nx * frame.ny)
         return;
+    QElapsedTimer profileClock;
+    std::size_t profileCells = 0;
+    const bool profiling = qEnvironmentVariableIsSet("CAPPEDWEATHER_PAINT_PROFILE");
+    if (profiling) profileClock.start();
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
     const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
@@ -3114,7 +3131,13 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
                 static_cast<int>(255.0F * (10.0F - bt) / 100.0F), 0, 255);
             painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
                              QColor(gray, gray, gray, 110));
+            ++profileCells;
         }
+    }
+    if (profiling) {
+        std::fprintf(stderr, "paintGoes: %lld ms, %zu cells\n",
+                     static_cast<long long>(profileClock.elapsed()),
+                     static_cast<std::size_t>(profileCells));
     }
     painter.restore();
 }
@@ -3130,6 +3153,10 @@ void RadarMapCanvas::paintMosaic(QPainter& painter) {
         static_cast<std::size_t>(image.width()) != frame.grid.nx ||
         static_cast<std::size_t>(image.height()) != frame.grid.ny)
         return;
+    QElapsedTimer profileClock;
+    std::size_t profileCells = 0;
+    const bool profiling = qEnvironmentVariableIsSet("CAPPEDWEATHER_PAINT_PROFILE");
+    if (profiling) profileClock.start();
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
     const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
@@ -3147,7 +3174,13 @@ void RadarMapCanvas::paintMosaic(QPainter& painter) {
             color.setAlpha(100);
             painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
                              color);
+            ++profileCells;
         }
+    }
+    if (profiling) {
+        std::fprintf(stderr, "paintMosaic: %lld ms, %zu cells\n",
+                     static_cast<long long>(profileClock.elapsed()),
+                     static_cast<std::size_t>(profileCells));
     }
     painter.restore();
 }
