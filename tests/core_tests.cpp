@@ -8,6 +8,7 @@
 #include "core/vad.hpp"
 #include "core/bright_band.hpp"
 #include "core/bunkers.hpp"
+#include "core/srh.hpp"
 #include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
 #include "core/lightning_jump.hpp"
@@ -795,6 +796,75 @@ void testBunkers() {
                                               syntheticVadLevel(5000.0, 10.0, 0.0)};
         const auto motion = estimateBunkersMotion(levels, 300.0, {});
         assert(motion.valid && motion.quality == VadQuality::Marginal);
+    }
+}
+
+void testSrh() {
+    // Zero SRH: uniform flow equal to storm motion, every (V-C) vanishes.
+    {
+        const std::vector<VadLevel> levels = {
+            syntheticVadLevel(400.0, 10.0, 0.0), syntheticVadLevel(1000.0, 10.0, 0.0),
+            syntheticVadLevel(1800.0, 10.0, 0.0), syntheticVadLevel(2800.0, 10.0, 0.0)};
+        BunkersMotion motion;
+        motion.valid = true;
+        motion.weakShear = true;
+        motion.meanFromDegrees = 270.0;
+        motion.meanSpeedMps = 10.0;
+        motion.quality = VadQuality::Good;
+        const auto srh = estimateSrh(levels, motion, 300.0, {});
+        assert(srh.valid && srh.srh01Valid && srh.srh03Valid);
+        assert(srh.quality == VadQuality::Good);
+        assert(std::abs(srh.srh01M2PerS2) < 0.01);
+        assert(std::abs(srh.srh03M2PerS2) < 0.01);
+    }
+    // Curved hodograph: linear speed shear u = 10 + 0.005*z with an
+    // off-line right-mover c = (12.5, -7.5). Closed form per pair:
+    // -cy * du = 7.5 * du, giving SRH01 = 18.75 and
+    // SRH03 = 18.75 + 28.125 + 37.5 = 84.375.
+    {
+        const std::vector<VadLevel> levels = {
+            syntheticVadLevel(550.0, 11.25, 0.0), syntheticVadLevel(1050.0, 13.75, 0.0),
+            syntheticVadLevel(1800.0, 17.5, 0.0), syntheticVadLevel(2800.0, 22.5, 0.0)};
+        BunkersMotion motion;
+        motion.valid = true;
+        motion.weakShear = false;
+        motion.rightFromDegrees = 301.0;
+        motion.rightSpeedMps = 14.58;
+        motion.quality = VadQuality::Good;
+        const auto srh = estimateSrh(levels, motion, 300.0, {});
+        assert(srh.valid && srh.srh01Valid && srh.srh03Valid);
+        assert(srh.quality == VadQuality::Good);
+        assert(std::abs(srh.srh01M2PerS2 - 18.75) < 1.5);
+        assert(std::abs(srh.srh03M2PerS2 - 84.38) < 3.0);
+    }
+    // Single row: no pair, no helicity.
+    {
+        const std::vector<VadLevel> levels = {syntheticVadLevel(500.0, 10.0, 0.0)};
+        BunkersMotion motion;
+        motion.valid = true;
+        motion.weakShear = true;
+        motion.meanFromDegrees = 270.0;
+        motion.meanSpeedMps = 10.0;
+        assert(!estimateSrh(levels, motion, 300.0, {}).valid);
+    }
+    // No storm motion, no SRH.
+    {
+        const std::vector<VadLevel> levels = {syntheticVadLevel(500.0, 10.0, 0.0),
+                                              syntheticVadLevel(1500.0, 10.0, 0.0)};
+        assert(!estimateSrh(levels, BunkersMotion{}, 300.0, {}).valid);
+    }
+    // Two shallow rows: 0-1 km Marginal without the 0-3 km layer.
+    {
+        const std::vector<VadLevel> levels = {syntheticVadLevel(500.0, 10.0, 0.0),
+                                              syntheticVadLevel(1100.0, 12.0, 0.0)};
+        BunkersMotion motion;
+        motion.valid = true;
+        motion.weakShear = true;
+        motion.meanFromDegrees = 270.0;
+        motion.meanSpeedMps = 11.0;
+        const auto srh = estimateSrh(levels, motion, 300.0, {});
+        assert(srh.valid && srh.srh01Valid && !srh.srh03Valid);
+        assert(srh.quality == VadQuality::Marginal);
     }
 }
 
@@ -2206,6 +2276,7 @@ int main() {
     testVadProfile();
     testBrightBand();
     testBunkers();
+    testSrh();
     testTbss();
     testZdrColumns();
     testMessage31MomentLayout();

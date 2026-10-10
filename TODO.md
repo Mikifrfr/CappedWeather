@@ -29,7 +29,6 @@ Short active list. Done work stays in git history and release notes, not in this
 ## Proposed (researched, not committed)
 
 Ready to build (data live now, testable hermetically plus replay):
-- [ ] Storm-relative helicity estimate. VAD profile plus Bunkers motion integrated 0-1 and 0-3 km, shown in the scan pop-out with the same quality flags. Verify: synthetic hodographs with closed-form SRH.
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
 - [ ] TVS/meso markers into AlertCenter. Opt-in sink like warnings and lightning, always labeled guidance, honoring severity and suppression settings. Verify: hermetic ingest tests.
 - [ ] Hail swaths from tracks plus cores. Per-storm polygons accumulate along StormTracker paths where hail tiers persist, exportable like warnings. Verify: synthetic tracks plus case replays.
@@ -52,6 +51,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Storm-relative helicity 0-1/0-3 km from VAD plus Bunkers motion (pair-sum integration with per-layer span gates, scan pop-out readout with quality flags, closed-form core tests, documented in derived-products).
 - Bunkers storm motion from VAD (0-6 km gateCount-weighted mean wind with 7.5 m/s shear-perpendicular split, weak-shear flag, VAD-style quality, right-mover line in the scan pop-out, closed-form core tests).
 - TBSS hail-spike detector (60+ dBZ core with 4-30 km down-radial weak-echo spike on 3+ adjacent rays, map layer with badge and persisted toggle, six-case core tests).
 - Basemap preset gallery (one-click IEM US + RainViewer global mosaic templates in Settings, keyless Custom no longer falls back to Esri, RainViewer frame resolver with hermetic tests, live 200-PNG verification, documented in europe-sources).

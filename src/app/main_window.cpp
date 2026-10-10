@@ -17,6 +17,7 @@
 #include "core/vad.hpp"
 #include "core/bright_band.hpp"
 #include "core/bunkers.hpp"
+#include "core/srh.hpp"
 #include "app/case_pack.hpp"
 #include "app/offline_pack.hpp"
 #include "app/cross_section_widget.hpp"
@@ -4798,6 +4799,10 @@ void MainWindow::populateScanDialog() {
     // northern-hemisphere default, flagged when the shear is too weak to
     // split. Feeds the SRH estimate next; shown here with the same honesty.
     const auto bunkers = estimateBunkersMotion(levels, radarElevationMeters);
+    // SRH from the same rows + the Bunkers motion above: 0-1/0-3 km pair
+    // sums, each gated on its own span so a shallow two-row profile reads
+    // "0-1 only" instead of a deep-layer number.
+    const auto srh = estimateSrh(levels, bunkers, radarElevationMeters);
     QString motionSuffix;
     if (bunkers.valid) {
         const QString motionQuality =
@@ -4812,6 +4817,20 @@ void MainWindow::populateScanDialog() {
                       .arg(bunkers.rightSpeedMps * 1.94384, 0, 'f', 0)
                       .arg(bunkers.rightFromDegrees, 0, 'f', 0)
                       .arg(QChar(0x00b0), motionQuality);
+    }
+    if (srh.valid) {
+        const QString srhQuality =
+            srh.quality == VadQuality::Good ? QStringLiteral("good") : QStringLiteral("marginal");
+        if (srh.srh01Valid && srh.srh03Valid) {
+            motionSuffix += QStringLiteral(" · SRH 0-1 %1 / 0-3 %2 (%3)")
+                                .arg(srh.srh01M2PerS2, 0, 'f', 0)
+                                .arg(srh.srh03M2PerS2, 0, 'f', 0)
+                                .arg(srhQuality);
+        } else if (srh.srh01Valid) {
+            motionSuffix += QStringLiteral(" · SRH 0-1 %1 (%2)")
+                                .arg(srh.srh01M2PerS2, 0, 'f', 0)
+                                .arg(srhQuality);
+        }
     }
     if (melt.valid) {
         const QString meltQuality = melt.quality == BrightBandQuality::Good          ? QStringLiteral("good")

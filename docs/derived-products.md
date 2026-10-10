@@ -62,8 +62,31 @@ air. Guidance only, never warnings. Core contract tests fit a known wind on
 a synthetic two-tilt volume (speed, FROM direction, tilt height separation)
 plus singular, all-missing, and infinite-gate fail-closed cases.
 
-## VAD live-volume check (KTLX, 2026-10-09)
+## Bunkers storm motion + SRH (from the VAD rows)
 
+Storm motion follows Bunkers et al. 2000 (ID method): gateCount-weighted
+0-6 km AGL mean wind from Good/Marginal VAD rows, deviated 7.5 m/s
+perpendicular-right of the deep-layer shear (upper 4-6 km mean minus lower
+0-2 km mean). Shear under 5 m/s means no split: motion equals the mean wind
+with a weak-shear flag. Both halves plus 4+ rows read Good, both halves
+with 2-3 rows Marginal, anything less Invalid.
+
+SRH integrates the same rows bottom-to-top per layer:
+
+```text
+SRH = Σ [(u_{i+1}-cx)(v_i-cy) - (u_i-cx)(v_{i+1}-cy)]
+```
+
+Storm motion is the right-mover when the shear splits, the mean wind when
+weak. 0-1 km needs one pair spanning 500+ m; 0-3 km needs 2+ pairs spanning
+1500+ m, so a shallow two-row profile reads "0-1 only" instead of a
+deep-layer number. No surface interpolation: the lowest VAD row anchors the
+bottom, and under-sampled boundary layers read low. Both print in the scan
+pop-out summary with their quality flags. Core tests use closed-form
+hodographs (uniform flow = zero SRH; linear shear with an off-line mover =
+18.75 / 84.38 m²/s²) plus single-row, no-motion, and shallow-profile cases.
+
+## VAD live-volume check (KTLX, 2026-10-09)
 First real-data read, via `rotation_replay --vad` on three consecutive
 Archive-II volumes (16:37, 16:44, 16:51Z, ~6 MB each, VCP212-style splits).
 No tuning: default Nyquist, same dealiased velocity the dialog fits.

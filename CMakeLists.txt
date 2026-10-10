@@ -46,6 +46,7 @@ add_library(cappedweather_core STATIC
     src/core/circulation_detector.cpp
     src/core/bright_band.cpp
     src/core/bunkers.cpp
+    src/core/srh.cpp
     src/core/tbss_detector.cpp
     src/core/zdr_column.cpp
     src/core/hail_detector.cpp
