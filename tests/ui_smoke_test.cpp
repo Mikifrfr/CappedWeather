@@ -1911,6 +1911,21 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "Quiet fire outlook should parse to zero features\n";
         return 1;
     }
+    // Warning countdowns: clock-injected, minute/hour/day bands plus the
+    // expired and undated fail-closed states.
+    {
+        const QDateTime now(QDate(2026, 10, 10), QTime(12, 0), QTimeZone::UTC);
+        if (warningCountdownText(now.addSecs(18 * 60), now) != QStringLiteral("18m left") ||
+            warningCountdownText(now.addSecs(2 * 3600 + 5 * 60), now) !=
+                QStringLiteral("2h 5m left") ||
+            warningCountdownText(now.addSecs(26 * 3600), now) != QStringLiteral("1d 2h left") ||
+            warningCountdownText(now.addSecs(30), now) != QStringLiteral("<1m left") ||
+            warningCountdownText(now.addSecs(-60), now) != QStringLiteral("expired") ||
+            warningCountdownText({}, now) != QStringLiteral("no expiry listed")) {
+            std::cerr << "Warning countdown formatting failed\n";
+            return 1;
+        }
+    }
     // ECCC alerts (MSC GeoMet OGC API): same warning rows as NWS, mapped
     // from alert_name_en/type with title-cased events, no status filtering.
     {

@@ -384,6 +384,16 @@ WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
     connect(publishTimer_, &QTimer::timeout, this, &WeatherOverlaySource::publishOverlaySnapshot);
 }
 
+QString warningCountdownText(const QDateTime& expires, const QDateTime& now) {
+    if (!expires.isValid() || !now.isValid()) return QStringLiteral("no expiry listed");
+    const qint64 secs = now.secsTo(expires);
+    if (secs <= 0) return QStringLiteral("expired");
+    if (secs < 60) return QStringLiteral("<1m left");
+    if (secs < 3600) return QStringLiteral("%1m left").arg(secs / 60);
+    if (secs < 86400) return QStringLiteral("%1h %2m left").arg(secs / 3600).arg((secs % 3600) / 60);
+    return QStringLiteral("%1d %2h left").arg(secs / 86400).arg((secs % 86400) / 3600);
+}
+
 QVector<WeatherWarning> WeatherOverlaySource::parseAlerts(const QByteArray& data, QString* error) {
     QJsonParseError parseError;
     const auto document = QJsonDocument::fromJson(data, &parseError);

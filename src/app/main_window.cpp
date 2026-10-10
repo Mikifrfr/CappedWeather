@@ -501,6 +501,14 @@ MainWindow::MainWindow(QWidget* parent)
     connect(overlayRefreshTimer_, &QTimer::timeout, spcSource_, &SpcConvectiveSource::refresh);
     connect(overlayRefreshTimer_, &QTimer::timeout, metarSource_, &MetarSource::refresh);
     connect(animationTimer_, &QTimer::timeout, this, &MainWindow::advanceFrame);
+    // Countdown ticker: re-renders the warning inbox every 30 s so the
+    // per-item time-to-expire suffixes tick down between feed rounds.
+    // Same cost as one inbox rebuild (capped at 200 rows), no network.
+    auto* inboxTicker = new QTimer(this);
+    inboxTicker->setInterval(30'000);
+    inboxTicker->setSingleShot(false);
+    connect(inboxTicker, &QTimer::timeout, this, &MainWindow::refreshWarningList);
+    inboxTicker->start();
     healthTimer_->setInterval(30'000); // 30 s — enough resolution to flip Online/Stale
     healthTimer_->setSingleShot(false);
     connect(healthTimer_, &QTimer::timeout, this, &MainWindow::recomputeRadarHealth);
@@ -4319,17 +4327,27 @@ void MainWindow::refreshWarningList() {
         const auto& l = latestWarnings_.at(left);
         const auto& r = latestWarnings_.at(right);
         if (l.alertPriority != r.alertPriority) return l.alertPriority < r.alertPriority;
+        // Soonest-expiring first inside a severity band: the item needing
+        // eyes now reads first. Undated items sink below dated ones; onset
+        // breaks remaining ties newest-first.
+        const bool lDated = l.expires.isValid();
+        const bool rDated = r.expires.isValid();
+        if (lDated != rDated) return lDated;
+        if (lDated && l.expires != r.expires) return l.expires < r.expires;
         return l.onset > r.onset;
     });
     warningList_->setUpdatesEnabled(false);
     warningList_->clear();
     constexpr int kInboxCap = 200;
+    const auto now = QDateTime::currentDateTimeUtc();
     for (int n = 0; n < order.size() && n < kInboxCap; ++n) {
         const auto& w = latestWarnings_.at(order.at(n));
         const auto when = w.onset.isValid() ? w.onset.toLocalTime().toString(QStringLiteral("MMM d HH:mm"))
                                             : QStringLiteral("—");
         auto* item = new QListWidgetItem(
-            QStringLiteral("%1 — %2 (%3)").arg(w.event, w.headline.isEmpty() ? w.severity : w.headline, when),
+            QStringLiteral("%1 — %2 (%3 · %4)")
+                .arg(w.event, w.headline.isEmpty() ? w.severity : w.headline, when,
+                     warningCountdownText(w.expires, now)),
             warningList_);
         item->setData(Qt::UserRole, order.at(n));
         item->setToolTip(QStringLiteral("%1\n%2\nValid: %3 – %4")

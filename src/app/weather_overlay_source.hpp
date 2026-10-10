@@ -68,6 +68,11 @@ struct StormReport {
     QString comments;
 };
 
+// Time-to-expire suffix for the warning inbox ("18m left", "2h 5m left",
+// "expired", "no expiry listed"). Pure, clock-injected for hermetic tests;
+// both timestamps are UTC instants as parsed from the feeds.
+QString warningCountdownText(const QDateTime& expires, const QDateTime& now);
+
 class WeatherOverlaySource final : public QObject {
     Q_OBJECT
 
