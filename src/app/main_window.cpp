@@ -6201,7 +6201,7 @@ void MainWindow::downloadOfflinePack() {
 void MainWindow::openLocalPlacefile() {
     const auto paths = QFileDialog::getOpenFileNames(
         this, QStringLiteral("Open GR placefile"), {},
-        QStringLiteral("GR placefiles (*.txt *.placefile);;Text files (*.txt);;All files (*.*)"));
+        QStringLiteral("GR placefiles (*.txt *.placefile *.shp);;Shapefiles (*.shp);;Text files (*.txt);;All files (*.*)"));
     if (paths.isEmpty()) return;
     QStringList failures;
     for (const auto& path : paths) {

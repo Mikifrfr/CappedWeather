@@ -59,7 +59,9 @@ bool PlacefileSource::addLocalFile(const QString& path, QString* error) {
         return false;
     }
     QString parseError;
-    auto document = parsePlacefile(file.readAll(), &parseError);
+    const QByteArray payload = file.readAll();
+    auto document = looksLikeShapefile(payload) ? parseShapefile(payload, &parseError)
+                                                : parsePlacefile(payload, &parseError);
     if (!document) {
         if (error) *error = parseError;
         return false;
@@ -212,7 +214,8 @@ void PlacefileSource::finish(QNetworkReply* reply) {
     } else if (response.size() > kMaximumResponseBytes) {
         failure = QStringLiteral("response exceeds the 2 MB safety limit");
     } else {
-        document = parsePlacefile(response, &failure);
+        document = looksLikeShapefile(response) ? parseShapefile(response, &failure)
+                                                : parsePlacefile(response, &failure);
     }
     if (document) {
         document->source = displaySource(entry.url);

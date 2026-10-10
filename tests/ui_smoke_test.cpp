@@ -2488,6 +2488,159 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // ESRI shapefiles: committed Oklahoma-county fixture plus hand-built
+    // binary (polyline with two parts, null filler, unsupported point
+    // record) and every malformed shape.
+    {
+        const auto fixtureBytes = [&] {
+            for (const auto& root : {std::string("tests/fixtures/"),
+                                     std::string("../tests/fixtures/"),
+                                     std::string("../../tests/fixtures/")}) {
+                QFile file(QString::fromStdString(root + "ok_counties_5.shp"));
+                if (file.open(QIODevice::ReadOnly)) return file.readAll();
+            }
+            return QByteArray{};
+        }();
+        if (fixtureBytes.isEmpty()) {
+            std::cerr << "Shapefile fixture missing\n";
+            return 1;
+        }
+        if (!looksLikeShapefile(fixtureBytes) || looksLikeShapefile(QByteArray("Place: 1,2,x"))) {
+            std::cerr << "Shapefile magic sniff is wrong\n";
+            return 1;
+        }
+        QString shpError;
+        const auto doc = parseShapefile(fixtureBytes, &shpError);
+        if (!doc.has_value() || doc->elements.size() != 5) {
+            std::cerr << "Shapefile fixture failed: " << shpError.toStdString() << '\n';
+            return 1;
+        }
+        for (const auto& element : doc->elements) {
+            if (element.kind != PlacefileElementKind::Polygon || element.points.size() < 3) {
+                std::cerr << "Shapefile fixture element is not a polygon\n";
+                return 1;
+            }
+            for (const auto& point : element.points) {
+                if (!std::isfinite(point.x()) || !std::isfinite(point.y()) ||
+                    point.x() < -180.0 || point.x() > 180.0 || point.y() < -90.0 ||
+                    point.y() > 90.0) {
+                    std::cerr << "Shapefile fixture point out of range\n";
+                    return 1;
+                }
+            }
+        }
+        const auto& first = doc->elements.front().points.front();
+        if (std::abs(first.x() + 94.4818) > 1e-4 || std::abs(first.y() - 33.789) > 1e-4) {
+            std::cerr << "Shapefile fixture first point moved: " << first.x() << ',' << first.y()
+                      << '\n';
+            return 1;
+        }
+        // Source wiring: the placefile loader sniffs shapefile magic and
+        // publishes polygons with no dialog involved.
+        {
+            QStringList roots;
+            for (const auto& root : {std::string("tests/fixtures/"),
+                                     std::string("../tests/fixtures/"),
+                                     std::string("../../tests/fixtures/")}) {
+                roots.push_back(QString::fromStdString(root + "ok_counties_5.shp"));
+            }
+            PlacefileSource source;
+            bool loaded = false;
+            for (const auto& path : roots) {
+                if (!QFile::exists(path)) continue;
+                QString loadError;
+                if (!source.addLocalFile(path, &loadError)) {
+                    std::cerr << "Shapefile addLocalFile failed: " << loadError.toStdString()
+                              << '\n';
+                    return 1;
+                }
+                loaded = true;
+                break;
+            }
+            if (!loaded) {
+                std::cerr << "Shapefile fixture missing for source test\n";
+                return 1;
+            }
+            const auto documents = source.documents();
+            if (documents.size() != 1 || documents.front().elements.size() != 5) {
+                std::cerr << "Shapefile source published the wrong document\n";
+                return 1;
+            }
+        }
+        // Hand-built: one 2-part polyline, one null, one point record.
+        QByteArray synthetic;
+        {
+            QDataStream head(&synthetic, QIODevice::WriteOnly);
+            head.setByteOrder(QDataStream::BigEndian);
+            head << static_cast<qint32>(9994) << static_cast<qint32>(0) << static_cast<qint32>(0)
+                 << static_cast<qint32>(0) << static_cast<qint32>(0) << static_cast<qint32>(0);
+            // File length patched below (16-bit words).
+            head << static_cast<qint32>(0);
+            head.setByteOrder(QDataStream::LittleEndian);
+            head << static_cast<qint32>(1000) << static_cast<qint32>(3);
+            head.writeRawData(QByteArray(64, 0).constData(), 64);
+            const auto record = [&](qint32 number, qint32 type, const QByteArray& body) {
+                QByteArray header;
+                QDataStream rec(&header, QIODevice::WriteOnly);
+                rec.setByteOrder(QDataStream::BigEndian);
+                rec << number << static_cast<qint32>((4 + body.size()) / 2);
+                rec.setByteOrder(QDataStream::LittleEndian);
+                rec << type;
+                synthetic.append(header);
+                synthetic.append(body);
+            };
+            QByteArray line;
+            QDataStream body(&line, QIODevice::WriteOnly);
+            body.setByteOrder(QDataStream::LittleEndian);
+            body.writeRawData(QByteArray(32, 0).constData(), 32);  // bbox
+            body << static_cast<qint32>(2) << static_cast<qint32>(5);
+            body << static_cast<qint32>(0) << static_cast<qint32>(3);
+            const double pts[] = {-97.0, 35.0, -96.0, 35.5, -95.0, 36.0, -94.0, 36.0, -93.0, 36.5};
+            for (const double v : pts) body << v;
+            record(1, 3, line);
+            record(2, 0, QByteArray());
+            record(3, 1, QByteArray(16, 0));
+            {
+                QDataStream fix(&synthetic, QIODevice::ReadWrite);
+                fix.setByteOrder(QDataStream::BigEndian);
+                fix.skipRawData(24);
+                fix << static_cast<qint32>(synthetic.size() / 2);
+            }
+        }
+        const auto syn = parseShapefile(synthetic, &shpError);
+        if (!syn.has_value() || syn->elements.size() != 2 ||
+            syn->elements.at(0).kind != PlacefileElementKind::Line ||
+            syn->elements.at(0).points.size() != 3 ||
+            syn->elements.at(1).points.size() != 2 || syn->warnings.isEmpty()) {
+            std::cerr << "Hand-built shapefile failed: " << shpError.toStdString() << '\n';
+            return 1;
+        }
+        // Every malformed shape fails closed with an error.
+        const auto bad = [&](QByteArray bytes) {
+            return parseShapefile(bytes, &shpError).has_value() || shpError.isEmpty();
+        };
+        if (bad(QByteArray("Place: 35,-97,x")) || bad(QByteArray(100, 0)) ||
+            bad(synthetic.left(64)) || bad(QByteArray("garbage")) ||
+            [&] {
+                // Projected (meter) coordinates on every ring: loud,
+                // specific failure instead of silent emptiness.
+                QByteArray proj = synthetic;
+                QDataStream patch(&proj, QIODevice::ReadWrite);
+                patch.setByteOrder(QDataStream::LittleEndian);
+                for (int point = 0; point < 5; ++point) {
+                    // Record at 100: 8 header + 4 type + 32 bbox + 4 + 4
+                    // counts + 8 part table (2 parts); points follow.
+                    patch.device()->seek(100 + 8 + 4 + 32 + 4 + 4 + 8 + point * 16);
+                    patch << 500000.0 << 4000000.0;
+                }
+                QString projError;
+                const auto parsed = parseShapefile(proj, &projError);
+                return parsed.has_value() || !projError.contains(QStringLiteral("projected"));
+            }()) {
+            std::cerr << "Malformed shapefile should fail closed\n";
+            return 1;
+        }
+    }
     // IEM mosaic listing pick and slot clock: hermetic against hand-built
     // directory HTML in the live archive shape.
     {

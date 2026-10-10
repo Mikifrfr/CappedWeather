@@ -40,6 +40,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- ESRI shapefile placefiles (binary .shp polygon/polyline rings as Polygon/Line elements via magic sniff in both load paths, unprojected lon/lat only with an explicit projected-data error, same safety envelope as text placefiles, hermetic parser plus source tests on a Census-county fixture).
 - GRLevelX color-table import (Product/Units/Step/Decimals/Scale headers plus Color/Color4/SolidColor rules into custom step stops, sorted, fail-closed with line numbers, live RTWX_REF shape verified, hermetic parser tests).
 - IEM NEXRAD national mosaic (5-minute N0Q archive PNG plus world file, exact filename timestamps, scaled decode to paint budget, native colors under echo with scan time, layer with badge and persisted toggle, hermetic parser/decode/paint tests on a committed fixture).
 - Case-pack export/import (.cwcase zip of spilled volumes plus manifest plus placefiles, File menu actions with progress and cancel, shared tested manifest/zip/rebuild logic with fault-in coverage).

@@ -33,6 +33,10 @@ The parser is case-insensitive and supports the high-value ecosystem primitives 
 
 This is a useful read subset, not a claim of byte-for-byte compatibility with every vendor extension in the GR placefile ecosystem.
 
+### Shapefiles
+
+Binary ESRI `.shp` files load through the same File/URL entries (sniffed by magic, not extension): 2D polygon/polyline rings become `Polygon`/`Line` elements, one per ring. Unprojected longitude/latitude only; Z/M flavors, projected coordinates, and `.dbf` labels stay out. Out-of-range rings warn and skip, and a file with nothing drawable fails closed with an explanation (projected files say so explicitly). Same 2 MiB / 50k-element / 10k-point envelope as text placefiles.
+
 ## Scoped Archive-II loading
 
 The playback dock exposes three offline/case-study actions:

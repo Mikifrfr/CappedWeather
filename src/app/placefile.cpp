@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace cappedweather {
 namespace {
@@ -244,6 +245,199 @@ std::optional<PlacefileDocument> parsePlacefile(const QByteArray& bytes, QString
     }
     if (document.elements.isEmpty()) {
         if (error) *error = QStringLiteral("placefile contains no drawable supported elements");
+        return std::nullopt;
+    }
+    return document;
+}
+
+namespace {
+
+// Big-endian shapefile header integers vs little-endian payload: every
+// read below is bounds-checked, positions are byte offsets.
+bool readBe32(const QByteArray& bytes, qsizetype pos, qint32& out) {
+    if (pos < 0 || pos + 4 > bytes.size()) return false;
+    const auto* data = reinterpret_cast<const uchar*>(bytes.constData() + pos);
+    out = static_cast<qint32>((static_cast<quint32>(data[0]) << 24) |
+                              (static_cast<quint32>(data[1]) << 16) |
+                              (static_cast<quint32>(data[2]) << 8) |
+                              static_cast<quint32>(data[3]));
+    return true;
+}
+
+bool readLe32(const QByteArray& bytes, qsizetype pos, qint32& out) {
+    if (pos < 0 || pos + 4 > bytes.size()) return false;
+    const auto* data = reinterpret_cast<const uchar*>(bytes.constData() + pos);
+    out = static_cast<qint32>(static_cast<quint32>(data[0]) |
+                              (static_cast<quint32>(data[1]) << 8) |
+                              (static_cast<quint32>(data[2]) << 16) |
+                              (static_cast<quint32>(data[3]) << 24));
+    return true;
+}
+
+bool readLeDouble(const QByteArray& bytes, qsizetype pos, double& out) {
+    if (pos < 0 || pos + 8 > bytes.size()) return false;
+    std::uint64_t bits = 0;
+    const auto* data = reinterpret_cast<const uchar*>(bytes.constData() + pos);
+    for (int i = 7; i >= 0; --i) bits = (bits << 8) | data[i];
+    std::memcpy(&out, &bits, sizeof(out));
+    return std::isfinite(out);
+}
+
+} // namespace
+
+bool looksLikeShapefile(const QByteArray& bytes) {
+    if (bytes.size() < 100) return false;
+    qint32 fileCode = 0;
+    return readBe32(bytes, 0, fileCode) && fileCode == 9994;
+}
+
+std::optional<PlacefileDocument> parseShapefile(const QByteArray& bytes, QString* error) {
+    if (error) error->clear();
+    if (!looksLikeShapefile(bytes)) {
+        if (error) *error = QStringLiteral("not an ESRI shapefile (file code 9994 missing)");
+        return std::nullopt;
+    }
+    qint32 declaredWords = 0;
+    qint32 version = 0;
+    qint32 headerType = 0;
+    if (!readBe32(bytes, 24, declaredWords) || !readLe32(bytes, 28, version) ||
+        !readLe32(bytes, 32, headerType)) {
+        if (error) *error = QStringLiteral("shapefile header is truncated");
+        return std::nullopt;
+    }
+    if (version != 1000) {
+        if (error) *error = QStringLiteral("unsupported shapefile version");
+        return std::nullopt;
+    }
+    if (headerType != 3 && headerType != 5 && headerType != 13 && headerType != 15 &&
+        headerType != 23 && headerType != 25) {
+        if (error) *error = QStringLiteral("shapefile holds no polygon/polyline geometry");
+        return std::nullopt;
+    }
+    if (static_cast<qint64>(declaredWords) * 2 > bytes.size()) {
+        if (error) *error = QStringLiteral("shapefile is truncated");
+        return std::nullopt;
+    }
+    const qsizetype declaredEnd = static_cast<qsizetype>(declaredWords) * 2;
+    if (declaredEnd < 100) {
+        if (error) *error = QStringLiteral("shapefile header is truncated");
+        return std::nullopt;
+    }
+    PlacefileDocument document;
+    qsizetype pos = 100;
+    qsizetype outOfRangeRings = 0;
+    while (pos + 8 <= declaredEnd) {
+        qint32 contentWords = 0;
+        qint32 recordType = 0;
+        if (!readBe32(bytes, pos + 4, contentWords) || contentWords < 0) {
+            if (error) *error = QStringLiteral("shapefile record header is truncated");
+            return std::nullopt;
+        }
+        const qsizetype recordEnd = pos + 8 + static_cast<qsizetype>(contentWords) * 2;
+        if (recordEnd > declaredEnd) {
+            if (error) *error = QStringLiteral("shapefile record overruns the file");
+            return std::nullopt;
+        }
+        if (!readLe32(bytes, pos + 8, recordType)) {
+            if (error) *error = QStringLiteral("shapefile record is truncated");
+            return std::nullopt;
+        }
+        pos += 8;
+        if (recordType == 0) {
+            pos = recordEnd;  // Null shape: filler, skip silently.
+            continue;
+        }
+        if (recordType != 3 && recordType != 5) {
+            document.warnings.push_back(
+                QStringLiteral("unsupported shape type %1").arg(recordType));
+            pos = recordEnd;
+            continue;
+        }
+        qint32 partCount = 0;
+        qint32 pointCount = 0;
+        // Content layout past the 4-byte type: 32-byte box, NumParts,
+        // NumPoints, part table, points.
+        if (!readLe32(bytes, pos + 36, partCount) || !readLe32(bytes, pos + 40, pointCount) ||
+            partCount < 0 || pointCount < 0 || partCount > 10'000 || pointCount > 256'000) {
+            if (error) *error = QStringLiteral("shapefile ring counts are malformed");
+            return std::nullopt;
+        }
+        if (pos + 44 + static_cast<qsizetype>(partCount) * 4 +
+                static_cast<qsizetype>(pointCount) * 16 >
+            recordEnd) {
+            if (error) *error = QStringLiteral("shapefile ring overruns its record");
+            return std::nullopt;
+        }
+        // Part table first (readable: bounds-checked above, so a short
+        // read here is unreachable, but never trust it blindly).
+        QVector<qint32> partStarts;
+        partStarts.reserve(partCount);
+        for (qint32 part = 0; part < partCount; ++part) {
+            qint32 start = 0;
+            if (!readLe32(bytes, pos + 44 + part * 4, start)) {
+                if (error) *error = QStringLiteral("shapefile part table is truncated");
+                return std::nullopt;
+            }
+            partStarts.push_back(start);
+        }
+        for (qint32 part = 0; part < partCount; ++part) {
+            const qint32 first = partStarts.at(part);
+            const qint32 last =
+                part + 1 < partCount ? partStarts.at(part + 1) : pointCount;
+            if (first < 0 || last < first || last > pointCount) {
+                if (error) *error = QStringLiteral("shapefile part index is malformed");
+                return std::nullopt;
+            }
+            if (static_cast<qsizetype>(last - first) > kMaximumPointsPerElement) {
+                document.warnings.push_back(QStringLiteral("ring exceeds the 10000 point limit"));
+                continue;
+            }
+            PlacefileElement element;
+            element.kind = recordType == 5 ? PlacefileElementKind::Polygon
+                                           : PlacefileElementKind::Line;
+            bool ringOk = true;
+            for (qint32 point = first; point < last; ++point) {
+                double x = 0.0;
+                double y = 0.0;
+                const qsizetype pointPos =
+                    pos + 44 + static_cast<qsizetype>(partCount) * 4 + static_cast<qsizetype>(point) * 16;
+                if (!readLeDouble(bytes, pointPos, x) || !readLeDouble(bytes, pointPos + 8, y) ||
+                    x < -180.0 || x > 180.0 || y < -90.0 || y > 90.0) {
+                    ringOk = false;
+                    break;
+                }
+                element.points.push_back({x, y});
+            }
+            if (!ringOk) {
+                // Projected (meter) shapefiles land here on every ring.
+                ++outOfRangeRings;
+                continue;
+            }
+            if (element.points.size() < (element.kind == PlacefileElementKind::Polygon ? 3 : 2)) {
+                continue;  // Degenerate ring: nothing to draw, not an error.
+            }
+            document.elements.push_back(std::move(element));
+            if (document.elements.size() > kMaximumElements) {
+                if (error) *error = QStringLiteral("shapefile exceeds the 50000 element safety limit");
+                return std::nullopt;
+            }
+        }
+        pos = recordEnd;
+    }
+    if (pos != declaredEnd) {
+        if (error) {
+            *error = pos > declaredEnd ? QStringLiteral("shapefile header is truncated")
+                                       : QStringLiteral("shapefile has trailing bytes");
+        }
+        return std::nullopt;
+    }
+    if (document.elements.isEmpty()) {
+        if (error) {
+            *error = outOfRangeRings > 0
+                         ? QStringLiteral("shapefile coordinates are not longitude/latitude "
+                                          "(projected shapefiles are unsupported)")
+                         : QStringLiteral("shapefile contains no drawable supported elements");
+        }
         return std::nullopt;
     }
     return document;

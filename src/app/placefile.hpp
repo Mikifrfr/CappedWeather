@@ -45,4 +45,13 @@ struct PlacefileDocument {
 // directives are retained as warnings instead of invalidating useful content.
 std::optional<PlacefileDocument> parsePlacefile(const QByteArray& bytes, QString* error = nullptr);
 
+// ESRI shapefiles (.shp) as placefile documents: 2D polygon/polyline rings
+// become Polygon/Line elements (one element per ring), unprojected
+// longitude/latitude only. Z/M record flavors, projected coordinates, and
+// attribute (.dbf) labels stay out: out-of-range rings warn and skip, and a
+// file with nothing drawable fails closed. Same 2 MiB / 50k-element /
+// 10k-point safety envelope as text placefiles.
+bool looksLikeShapefile(const QByteArray& bytes);
+std::optional<PlacefileDocument> parseShapefile(const QByteArray& bytes, QString* error = nullptr);
+
 } // namespace cappedweather
