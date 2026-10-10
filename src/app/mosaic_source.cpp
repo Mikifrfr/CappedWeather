@@ -68,7 +68,8 @@ std::optional<MosaicFrame> decodeMosaicFrame(const QByteArray& png, const std::s
     pngBuffer.open(QIODevice::ReadOnly);
     QImageReader reader(&pngBuffer);
     const QSize full = reader.size();
-    if (!full.isValid() || full.width() <= 0 || full.height() <= 0) return fail(QStringLiteral("bad image"));
+    if (!full.isValid() || full.width() <= 0 || full.height() <= 0)
+        return fail(QStringLiteral("bad image"));
     const auto cells = static_cast<double>(full.width()) * full.height();
     int stride = 1;
     while (cells / (stride * stride) > kMaxFrameCells) ++stride;
@@ -106,7 +107,10 @@ void MosaicSource::refresh() {
     if (!enabled_ || pending_) return;
     pending_ = true;
     if (!refreshTimer_->isActive()) refreshTimer_->start();
-    requestDay(QDateTime::currentDateTimeUtc().date(), true);
+    // Date of the latest plausible slot, not today blindly: just after
+    // midnight UTC the newest composite still lives in yesterday's folder.
+    const auto slot = latestMosaicSlot(QDateTime::currentDateTimeUtc());
+    requestDay(slot.isValid() ? slot.date() : QDateTime::currentDateTimeUtc().date(), true);
 }
 
 void MosaicSource::setEnabled(const bool enabled) {
@@ -141,9 +145,9 @@ void MosaicSource::requestDay(const QDate& dateUtc, const bool fallbackLeft) {
             emit statusChanged(QStringLiteral("Mosaic: no composite listed"));
             return;
         }
-        const QUrl base = mosaicListUrl(dateUtc).toString();
+        const QString base = mosaicListUrl(dateUtc).toString();
         auto* pngReply = network_.get(makeRequest(
-            QUrl(base.toString() + name), QStringLiteral("image/png"), QStringLiteral(" mosaic client")));
+            QUrl(base + name), QStringLiteral("image/png"), QStringLiteral(" mosaic client")));
         connect(pngReply, &QNetworkReply::finished, this, [this, pngReply, base, name] {
             pngReply->deleteLater();
             if (pngReply->error() != QNetworkReply::NoError) {
@@ -160,7 +164,7 @@ void MosaicSource::requestDay(const QDate& dateUtc, const bool fallbackLeft) {
             }
             const QString worldName = name.left(name.size() - 4) + QStringLiteral(".wld");
             auto* wldReply = network_.get(makeRequest(
-                QUrl(base.toString() + worldName), QStringLiteral("text/plain"),
+                QUrl(base + worldName), QStringLiteral("text/plain"),
                 QStringLiteral(" mosaic world client")));
             connect(wldReply, &QNetworkReply::finished, this,
                     [this, wldReply, png, name] {
