@@ -13,6 +13,7 @@
 #include "core/lambert.hpp"
 #include "core/goes_frame.hpp"
 #include "core/fixedgrid.hpp"
+#include "core/mosaic_frame.hpp"
 #include "core/sounding.hpp"
 #include "core/srh.hpp"
 #include "core/tbss_detector.hpp"
@@ -1322,6 +1323,39 @@ void testGoesFixture() {
     assert(std::abs(frame->brightnessCelsius[75 * 250 + 125] - 6.9F) < 1.0F);
     // Garbage fails closed.
     assert(!readGoesRad("tests/fixtures/does-not-exist.nc").has_value());
+}
+
+void testMosaicFrame() {
+    // Filename clock: n0q_202610101730.png is 2026-10-10 17:30Z (1791653400).
+    // Full keys, query suffixes, and garbage behave.
+    assert(parseMosaicTime("n0q_202610101730.png") == 1791653400LL);
+    assert(parseMosaicTime("GIS/uscomp/n0q_202610101730.png?x=1") == 1791653400LL);
+    assert(!parseMosaicTime("n0q_2026101017.png").has_value());
+    assert(!parseMosaicTime("n0q_202613011730.png").has_value());
+    assert(!parseMosaicTime("n0r_202610101730.png").has_value());
+    assert(!parseMosaicTime("").has_value());
+    // Live world file: 0.005 deg pixels, UL (-126, 50).
+    const std::string world("0.005\n0.0\n0.0\n-0.005\n-126.0\n50.0\n");
+    const auto grid = parseWorldFile(world, 12200, 5400);
+    assert(grid.has_value());
+    assert(grid->nx == 12200 && grid->ny == 5400);
+    assert(std::abs(grid->degreesPerPixelX - 0.005) < 1e-12);
+    assert(std::abs(grid->degreesPerPixelY + 0.005) < 1e-12);
+    assert(std::abs(grid->westLongitude + 126.0) < 1e-12);
+    assert(std::abs(grid->northLatitude - 50.0) < 1e-12);
+    // Corners land on the documented domain (126 W..65 W, 50 N..23 N).
+    double lon = 0.0, lat = 0.0;
+    mosaicCellLonLat(*grid, 0, 0, lon, lat);
+    assert(std::abs(lon + 125.9975) < 1e-9 && std::abs(lat - 49.9975) < 1e-9);
+    mosaicCellLonLat(*grid, 12199, 5399, lon, lat);
+    assert(std::abs(lon + 65.0025) < 1e-6 && std::abs(lat - 23.0025) < 1e-6);
+    // Rotated worlds, north-up flips, and degenerate sizes fail closed.
+    assert(!parseWorldFile("0.005\n0.1\n0.0\n-0.005\n-126.0\n50.0\n", 100, 100).has_value());
+    assert(!parseWorldFile("0.005\n0.0\n0.0\n0.005\n-126.0\n50.0\n", 100, 100).has_value());
+    assert(!parseWorldFile(world, 0, 100).has_value());
+    assert(!parseWorldFile("junk", 100, 100).has_value());
+    mosaicCellLonLat(*grid, 12200, 0, lon, lat);
+    assert(std::isnan(lon) && std::isnan(lat));
 }
 
 void testVadProfile() {
@@ -2737,6 +2771,7 @@ int main() {
     testHrrrFixture();
     testFixedGrid();
     testGoesFixture();
+    testMosaicFrame();
     testSounding();
     testSrh();
     testTbss();

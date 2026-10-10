@@ -15,6 +15,7 @@
 #include "app/dat_paths.hpp"
 #include "app/hrrr_source.hpp"
 #include "app/goes_source.hpp"
+#include "app/mosaic_source.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -228,6 +229,10 @@ public:
     void setGoesVisible(bool visible);
     [[nodiscard]] bool goesVisible() const { return goesVisible_; }
     [[nodiscard]] bool goesHasFrame() const { return goesFrame_.has_value(); }
+    void setMosaicFrame(std::optional<MosaicFrame> frame);
+    void setMosaicVisible(bool visible);
+    [[nodiscard]] bool mosaicVisible() const { return mosaicVisible_; }
+    [[nodiscard]] bool mosaicHasFrame() const { return mosaicFrame_.has_value(); }
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -580,6 +585,10 @@ private:
     // echo probe, so valid times read on the legend chips and badges.
     std::optional<GoesFrame> goesFrame_;
     void paintGoes(QPainter& painter);
+    // IEM national mosaic: observed context in native NWS colors, same
+    // raster idiom and no-click rule as HRRR/GOES.
+    std::optional<MosaicFrame> mosaicFrame_;
+    void paintMosaic(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -707,6 +716,7 @@ private:
     bool datVisible_ = true;
     bool hrrrVisible_ = true;
     bool goesVisible_ = true;
+    bool mosaicVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

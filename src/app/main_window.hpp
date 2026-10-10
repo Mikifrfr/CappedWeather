@@ -63,6 +63,7 @@ class HmsSmokeSource;
 class DatPathSource;
 class HrrrSource;
 class GoesSource;
+class MosaicSource;
 class MetarSource;
 class PlacefileSource;
 class ArchiveSource;
@@ -368,6 +369,8 @@ private:
     QCheckBox* goesCheck_ = nullptr;
     QLabel* goesBadge_ = nullptr;
     QComboBox* goesChannelCombo_ = nullptr;
+    QCheckBox* mosaicCheck_ = nullptr;
+    QLabel* mosaicBadge_ = nullptr;
     QCheckBox* mcdCheck_ = nullptr;
     QLabel* mcdBadge_ = nullptr;
     QCheckBox* metarCheck_ = nullptr;
@@ -416,6 +419,7 @@ private:
     DatPathSource* datSource_ = nullptr;
     HrrrSource* hrrrSource_ = nullptr;
     GoesSource* goesSource_ = nullptr;
+    MosaicSource* mosaicSource_ = nullptr;
     MetarSource* metarSource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;
     ArchiveSource* archiveSource_ = nullptr;

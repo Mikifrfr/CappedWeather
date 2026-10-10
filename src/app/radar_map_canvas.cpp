@@ -1333,6 +1333,17 @@ void RadarMapCanvas::setGoesVisible(const bool visible) {
     update();
 }
 
+void RadarMapCanvas::setMosaicFrame(std::optional<MosaicFrame> frame) {
+    mosaicFrame_ = std::move(frame);
+    update();
+}
+
+void RadarMapCanvas::setMosaicVisible(const bool visible) {
+    if (mosaicVisible_ == visible) return;
+    mosaicVisible_ = visible;
+    update();
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -3108,6 +3119,39 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintMosaic(QPainter& painter) {
+    if (!mosaicVisible_ || !mosaicFrame_.has_value()) return;
+    // National context under live echo: native IEM colors at reduced alpha,
+    // viewport-culled per cell. Near-black stays out (NODATA plus sub-zero
+    // echo share the black ramp entry), so the map never washes out.
+    const MosaicFrame& frame = *mosaicFrame_;
+    const QImage& image = frame.image;
+    if (image.isNull() || frame.grid.nx == 0 || frame.grid.ny == 0 ||
+        static_cast<std::size_t>(image.width()) != frame.grid.nx ||
+        static_cast<std::size_t>(image.height()) != frame.grid.ny)
+        return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
+    const double cell = zoom_ >= 6 ? 4.0 : 2.5;
+    for (std::size_t iy = 0; iy < frame.grid.ny; ++iy) {
+        for (std::size_t ix = 0; ix < frame.grid.nx; ++ix) {
+            const QRgb pixel = image.pixel(static_cast<int>(ix), static_cast<int>(iy));
+            if (std::max({qRed(pixel), qGreen(pixel), qBlue(pixel)}) < 12) continue;
+            double lon = 0.0, lat = 0.0;
+            mosaicCellLonLat(frame.grid, ix, iy, lon, lat);
+            if (!std::isfinite(lon) || !std::isfinite(lat)) continue;
+            const auto point = screenPoint(lat, lon);
+            if (!viewport.contains(point)) continue;
+            QColor color(pixel);
+            color.setAlpha(100);
+            painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
+                             color);
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
@@ -4091,6 +4135,25 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
                                              : QStringLiteral("?"));
         }
         painter.drawText(QRectF(20, 252, 242, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
+    }
+    // Sixth context row: IEM mosaic scan time. Same observed-context idiom.
+    if (mosaicVisible_) {
+        const QRectF mosaicPanel(12, 272, 258, 20);
+        const bool active = mosaicFrame_.has_value();
+        painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
+        painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
+        painter.drawRoundedRect(mosaicPanel, 4, 4);
+        painter.setFont(hudFont(7, QFont::DemiBold));
+        painter.setPen(active ? QColor(134, 239, 172) : QColor(148, 163, 184));
+        QString label = QStringLiteral("Mosaic: none");
+        if (active) {
+            const auto valid =
+                QDateTime::fromSecsSinceEpoch(mosaicFrame_->validEpochSeconds, QTimeZone::UTC);
+            label = QStringLiteral("Mosaic %1")
+                        .arg(valid.isValid() ? valid.toString(QStringLiteral("HH:mm'Z'"))
+                                             : QStringLiteral("?"));
+        }
+        painter.drawText(QRectF(20, 274, 242, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -5603,6 +5666,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintSpcOutlook(painter);
         paintSpcFireOutlook(painter);
         paintWpcOutlook(painter);
+        paintMosaic(painter);
         paintHrrr(painter);
         paintGoes(painter);
         paintRadarOverlay(painter);
@@ -5611,6 +5675,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
         paintSpcOutlook(painter);
         paintSpcFireOutlook(painter);
         paintWpcOutlook(painter);
+        paintMosaic(painter);
         paintHrrr(painter);
         paintGoes(painter);
         paintWeatherOverlays(painter);

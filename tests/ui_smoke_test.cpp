@@ -11,6 +11,7 @@
 #include "app/hodograph_widget.hpp"
 #include "app/hrrr_source.hpp"
 #include "app/goes_source.hpp"
+#include "app/mosaic_source.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -59,6 +60,8 @@
 #include <QTabWidget>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QBuffer>
+#include <QImage>
 #include <QPixmap>
 #include <QTimeZone>
 #include <QToolButton>
@@ -1571,6 +1574,7 @@ int main(int argc, char** argv) {
     if (auto* liveDat = window.findChild<DatPathSource*>()) liveDat->disconnect();
     if (auto* liveHrrr = window.findChild<HrrrSource*>()) liveHrrr->disconnect();
     if (auto* liveGoes = window.findChild<GoesSource*>()) liveGoes->disconnect();
+    if (auto* liveMosaic = window.findChild<MosaicSource*>()) liveMosaic->disconnect();
     if (auto* liveMetar = window.findChild<MetarSource*>()) liveMetar->disconnect();
 
     auto* map = window.findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
@@ -2433,6 +2437,77 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             return 1;
         }
     }
+    // IEM mosaic listing pick and slot clock: hermetic against hand-built
+    // directory HTML in the live archive shape.
+    {
+        const auto url = mosaicListUrl(QDate(2026, 10, 10));
+        if (!url.isValid() ||
+            url.toString() !=
+                QStringLiteral("https://mesonet.agron.iastate.edu/archive/data/2026/10/10/GIS/uscomp/")) {
+            std::cerr << "Mosaic list URL is wrong: " << url.toString().toStdString() << '\n';
+            return 1;
+        }
+        if (mosaicListUrl(QDate()).isValid()) {
+            std::cerr << "Mosaic list URL should reject bad input\n";
+            return 1;
+        }
+        const QByteArray listing =
+            R"HTML(<html><body>
+<a href="n0q_202610101720.png">n0q_202610101720.png</a>
+<a href="n0q_202610101730.png">n0q_202610101730.png</a>
+<a href="n0q_202610101730.wld">n0q_202610101730.wld</a>
+<a href="n0r_202610101730.png">n0r_202610101730.png</a>
+</body></html>)HTML";
+        if (newestMosaicFile(listing) != QStringLiteral("n0q_202610101730.png") ||
+            !newestMosaicFile(QByteArray("<html></html>")).isEmpty() ||
+            !newestMosaicFile(QByteArray("garbage")).isEmpty()) {
+            std::cerr << "Mosaic newest-file pick is wrong\n";
+            return 1;
+        }
+        const auto at = [](int hour, int minute) {
+            return QDateTime(QDate(2026, 10, 10), QTime(hour, minute), QTimeZone::UTC);
+        };
+        if (latestMosaicSlot(at(15, 37)) != at(15, 25) || latestMosaicSlot(at(15, 4)) != at(14, 50) ||
+            latestMosaicSlot(QDateTime()).isValid()) {
+            std::cerr << "Mosaic slot clock is wrong\n";
+            return 1;
+        }
+        // Decode helper: committed fixture plus garbage through the exact
+        // production path, including the scaled branch on a synthetic
+        // CONUS-scale image.
+        {
+            QString decodeError;
+            if (decodeMosaicFrame(QByteArray(), "0.005\n0.0\n0.0\n-0.005\n-126.0\n50.0\n",
+                                  1791653400LL, &decodeError)
+                    .has_value() ||
+                decodeError.isEmpty() ||
+                decodeMosaicFrame(QByteArray("not a png"),
+                                  "0.005\n0.0\n0.0\n-0.005\n-126.0\n50.0\n", 1791653400LL,
+                                  &decodeError)
+                    .has_value()) {
+                std::cerr << "Mosaic decode should fail closed on garbage\n";
+                return 1;
+            }
+            QImage big(2000, 2000, QImage::Format_ARGB32);
+            big.fill(QColor(0, 128, 0));
+            QByteArray bigPng;
+            QBuffer bigBuffer(&bigPng);
+            bigBuffer.open(QIODevice::WriteOnly);
+            if (!big.save(&bigBuffer, "PNG")) {
+                std::cerr << "Could not stage synthetic mosaic PNG\n";
+                return 1;
+            }
+            const auto bigFrame = decodeMosaicFrame(
+                bigPng, "0.005\n0.0\n0.0\n-0.005\n-126.0\n50.0\n", 1791653400LL, &decodeError);
+            if (!bigFrame.has_value() || bigFrame->image.width() > 300 ||
+                bigFrame->image.height() > 300 ||
+                static_cast<std::size_t>(bigFrame->image.width()) != bigFrame->grid.nx ||
+                !(bigFrame->grid.degreesPerPixelX > 0.03)) {
+                std::cerr << "Mosaic scaled decode is wrong\n";
+                return 1;
+            }
+        }
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {
@@ -3290,6 +3365,7 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setDatVisible(false);
     map->setHrrrVisible(false);
     map->setGoesVisible(false);
+    map->setMosaicVisible(false);
     application.processEvents();
     QTest::mouseClick(map, Qt::LeftButton, Qt::NoModifier, map->rect().center());
     application.processEvents();
@@ -3417,6 +3493,7 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setDatVisible(false);
     map->setHrrrVisible(false);
     map->setGoesVisible(false);
+    map->setMosaicVisible(false);
     const auto probePoint = map->radarScreenPoint(QStringLiteral("TATL")) + QPoint(20, 0);
     map->inspectAt(QPointF(probePoint));
     if (map->probeText().isEmpty() || !map->probeText().contains(QStringLiteral("dBZ"))) {
@@ -3588,6 +3665,48 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                     return 1;
                 }
                 map->setHrrrFrame(std::nullopt);
+            }
+            if (true) {
+                // IEM mosaic fixture through the same production path.
+                const auto pngPath = findFixture("mosaic_ok.png");
+                const auto wldPath = findFixture("mosaic_ok.wld");
+                if (pngPath.empty() || wldPath.empty()) {
+                    std::cerr << "Mosaic fixture missing\n";
+                    return 1;
+                }
+                QImage image(QString::fromStdString(pngPath));
+                if (image.isNull()) {
+                    std::cerr << "Mosaic fixture did not decode\n";
+                    return 1;
+                }
+                image = image.convertToFormat(QImage::Format_ARGB32);
+                QFile world(QString::fromStdString(wldPath));
+                if (!world.open(QIODevice::ReadOnly)) {
+                    std::cerr << "Mosaic world fixture missing\n";
+                    return 1;
+                }
+                const auto grid = parseWorldFile(
+                    world.readAll().toStdString(),
+                    static_cast<std::size_t>(image.width()),
+                    static_cast<std::size_t>(image.height()));
+                if (!grid.has_value()) {
+                    std::cerr << "Mosaic world fixture did not parse\n";
+                    return 1;
+                }
+                MosaicFrame mosaic;
+                mosaic.validEpochSeconds = 1791653400LL;
+                mosaic.image = image;
+                mosaic.grid = *grid;
+                map->setMosaicVisible(true);
+                map->setMosaicFrame(mosaic);
+                map->setView({-95.5, 36.5}, 5);
+                application.processEvents();
+                const QPixmap mosaicShot = map->grab();
+                if (mosaicShot.isNull()) {
+                    std::cerr << "Mosaic frame paint produced nothing\n";
+                    return 1;
+                }
+                map->setMosaicFrame(std::nullopt);
             }
         }
         std::cout << "P1 hermetic UI checks passed\n";

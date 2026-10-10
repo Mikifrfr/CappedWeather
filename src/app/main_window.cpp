@@ -16,6 +16,7 @@
 #include "app/dat_paths.hpp"
 #include "app/hrrr_source.hpp"
 #include "app/goes_source.hpp"
+#include "app/mosaic_source.hpp"
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
 #include "app/metar_source.hpp"
@@ -396,6 +397,7 @@ MainWindow::MainWindow(QWidget* parent)
       datSource_(new DatPathSource(this)),
       hrrrSource_(new HrrrSource(this)),
       goesSource_(new GoesSource(this)),
+      mosaicSource_(new MosaicSource(this)),
       metarSource_(new MetarSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
@@ -661,6 +663,11 @@ MainWindow::MainWindow(QWidget* parent)
         if (visible && goesSource_) goesSource_->refresh();
         refreshLayerBadges();
     });
+    connect(mosaicCheck_, &QCheckBox::toggled, this, [this](bool visible) {
+        for (auto* panel : maps_) panel->setMosaicVisible(visible);
+        if (visible && mosaicSource_) mosaicSource_->refresh();
+        refreshLayerBadges();
+    });
     connect(datCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setDatVisible(visible);
         refreshLayerBadges();
@@ -806,6 +813,14 @@ MainWindow::MainWindow(QWidget* parent)
                 refreshLayerBadges();
             });
     connect(goesSource_, &GoesSource::statusChanged, this, [this](const QString& status) {
+        statusBar()->showMessage(status, 8000);
+    });
+    connect(mosaicSource_, &MosaicSource::frameReady, this,
+            [this](std::optional<MosaicFrame> frame) {
+                for (auto* panel : maps_) panel->setMosaicFrame(frame);
+                refreshLayerBadges();
+            });
+    connect(mosaicSource_, &MosaicSource::statusChanged, this, [this](const QString& status) {
         statusBar()->showMessage(status, 8000);
     });
     connect(metarSource_, &MetarSource::metarsReady, this, [this](QVector<MetarObs> metars) {
@@ -1000,6 +1015,7 @@ MainWindow::MainWindow(QWidget* parent)
     datSource_->refresh();
     hrrrSource_->refresh();
     goesSource_->refresh();
+    mosaicSource_->refresh();
     metarSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
@@ -1572,6 +1588,10 @@ void MainWindow::buildUi() {
             goesSource_->setChannel(goesChannelCombo_->itemData(index).toInt());
         });
     }
+    makeLayerRow(mosaicCheck_, QStringLiteral("National mosaic"), QStringLiteral("mosaicCheck"),
+                 QStringLiteral("IEM N0Q under echo"), mosaicBadge_,
+                 QStringLiteral("mosaicBadge"), true,
+                 QStringLiteral("IEM NEXRAD national reflectivity mosaic under live echo in native colors (near-black stays out). Observed context with its scan time on display."));
     makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
@@ -3410,6 +3430,7 @@ void MainWindow::restoreSettings() {
         panel->setDatVisible(datCheck_->isChecked());
         panel->setHrrrVisible(hrrrCheck_->isChecked());
         panel->setGoesVisible(goesCheck_->isChecked());
+        panel->setMosaicVisible(mosaicCheck_->isChecked());
         panel->setMcdVisible(mcdCheck_->isChecked());
         panel->setMetarVisible(metarCheck_->isChecked());
     }
@@ -3426,6 +3447,7 @@ void MainWindow::restoreSettings() {
     datCheck_->setChecked(settings.value(QStringLiteral("overlays/datPaths"), true).toBool());
     hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), true).toBool());
     goesCheck_->setChecked(settings.value(QStringLiteral("overlays/goes"), true).toBool());
+    mosaicCheck_->setChecked(settings.value(QStringLiteral("overlays/mosaic"), true).toBool());
     {
         const int channel = settings.value(QStringLiteral("overlays/goesChannel"), 13).toInt();
         const int index = goesChannelCombo_->findData(goesChannelSupported(channel) ? channel : 13);
@@ -3497,6 +3519,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/datPaths"), datCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/hrrr"), hrrrCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/goes"), goesCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/mosaic"), mosaicCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/goesChannel"), goesChannelCombo_->currentData().toInt());
     settings.setValue(QStringLiteral("overlays/mcd"), mcdCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/metar"), metarCheck_->isChecked());
@@ -4585,6 +4608,15 @@ void MainWindow::refreshLayerBadges() {
         goesBadge_->setToolTip(!on ? QStringLiteral("GOES layer is off")
                                : has ? QStringLiteral("Satellite frame on the map")
                                      : QStringLiteral("Layer is on; no satellite frame loaded yet"));
+    }
+    if (mosaicBadge_) {
+        const bool has = map_->mosaicHasFrame();
+        const bool on = mosaicCheck_ && mosaicCheck_->isChecked();
+        mosaicBadge_->setText(!on ? QStringLiteral("off") : has ? QStringLiteral("1")
+                                                                : QStringLiteral("quiet"));
+        mosaicBadge_->setToolTip(!on ? QStringLiteral("Mosaic layer is off")
+                                 : has ? QStringLiteral("National mosaic frame on the map")
+                                       : QStringLiteral("Layer is on; no mosaic frame loaded yet"));
     }
     if (metarBadge_) {
         const auto n = map_->metarCount();
