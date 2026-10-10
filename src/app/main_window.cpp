@@ -753,6 +753,11 @@ MainWindow::MainWindow(QWidget* parent)
                 for (auto* panel : maps_) panel->setHmsSmoke(plumes);
                 refreshLayerBadges();
             });
+    connect(hmsSource_, &HmsSmokeSource::firesReady, this,
+            [this](QVector<HmsFirePoint> fires) {
+                for (auto* panel : maps_) panel->setHmsFires(fires);
+                refreshLayerBadges();
+            });
     connect(hmsSource_, &HmsSmokeSource::statusChanged, this, [this](const QString& status) {
         statusBar()->showMessage(status, 8000);
     });
@@ -1481,10 +1486,10 @@ void MainWindow::buildUi() {
                  QStringLiteral("Day 1-3 excessive rainfall risk"), wpcBadge_,
                  QStringLiteral("wpcBadge"), true,
                  QStringLiteral("Weather Prediction Center Day 1-3 excessive rainfall outlooks in official colors (Marginal green, Slight yellow, Moderate red, High pink). Flash-flood guidance context, not a warning."));
-    makeLayerRow(hmsCheck_, QStringLiteral("HMS smoke"), QStringLiteral("hmsCheck"),
-                 QStringLiteral("Daily smoke plumes by density"), hmsBadge_,
+    makeLayerRow(hmsCheck_, QStringLiteral("HMS fire + smoke"), QStringLiteral("hmsCheck"),
+                 QStringLiteral("Daily detections + plumes"), hmsBadge_,
                  QStringLiteral("hmsBadge"), true,
-                 QStringLiteral("NOAA Hazard Mapping System daily smoke polygons in official colors (light green, medium yellow, heavy red). Satellite analysis context, not a warning."));
+                 QStringLiteral("NOAA Hazard Mapping System: daily fire detections (satellite, FRP) plus smoke polygons in official density colors (light green, medium yellow, heavy red). Satellite analysis context, not a warning."));
     makeLayerRow(mcdCheck_, QStringLiteral("SPC discussions"), QStringLiteral("mcdCheck"),
                  QStringLiteral("Active mesoscale discussions"), mcdBadge_,
                  QStringLiteral("mcdBadge"), true,
@@ -4440,13 +4445,13 @@ void MainWindow::refreshLayerBadges() {
                                       : QStringLiteral("Layer is on; no excessive rainfall areas issued right now"));
     }
     if (hmsBadge_) {
-        const auto n = map_->hmsSmokeCount();
+        const auto n = map_->hmsSmokeCount() + map_->hmsFireCount();
         const bool on = hmsCheck_ && hmsCheck_->isChecked();
         hmsBadge_->setText(!on ? QStringLiteral("off") : n > 0 ? QString::number(n)
                                                                : QStringLiteral("quiet"));
-        hmsBadge_->setToolTip(!on ? QStringLiteral("HMS smoke layer is off")
-                              : n > 0 ? QStringLiteral("Smoke plumes on the map")
-                                      : QStringLiteral("Layer is on; no smoke plumes reported today"));
+        hmsBadge_->setToolTip(!on ? QStringLiteral("HMS layer is off")
+                              : n > 0 ? QStringLiteral("Fire detections + smoke plumes on the map")
+                                      : QStringLiteral("Layer is on; no fires or smoke reported today"));
     }
     if (metarBadge_) {
         const auto n = map_->metarCount();

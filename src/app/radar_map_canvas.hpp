@@ -211,6 +211,8 @@ public:
     void setHmsVisible(bool visible);
     [[nodiscard]] bool hmsVisible() const { return hmsVisible_; }
     [[nodiscard]] int hmsSmokeCount() const;
+    void setHmsFires(QVector<HmsFirePoint> fires);
+    [[nodiscard]] int hmsFireCount() const;
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -544,6 +546,11 @@ private:
     // HMS smoke plumes: density-tinted polygons, vector-painted like MCDs.
     QVector<HmsSmokePlume> hmsPlumes_;
     void paintHmsSmoke(QPainter& painter);
+    // HMS fire detections: orange dots (decluttered grid like storm reports
+    // at low zoom), full satellite/FRP/time on click.
+    QVector<HmsFirePoint> hmsFires_;
+    void paintHmsFires(QPainter& painter);
+    std::optional<HmsFirePoint> hmsFireNear(const QPointF& point) const;
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);

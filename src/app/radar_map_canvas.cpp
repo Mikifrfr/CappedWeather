@@ -1286,6 +1286,15 @@ int RadarMapCanvas::hmsSmokeCount() const {
     return static_cast<int>(hmsPlumes_.size());
 }
 
+void RadarMapCanvas::setHmsFires(QVector<HmsFirePoint> fires) {
+    hmsFires_ = std::move(fires);
+    update();
+}
+
+int RadarMapCanvas::hmsFireCount() const {
+    return static_cast<int>(hmsFires_.size());
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -2914,6 +2923,49 @@ void RadarMapCanvas::paintHmsSmoke(QPainter& painter) {
     painter.restore();
 }
 
+std::optional<HmsFirePoint> RadarMapCanvas::hmsFireNear(const QPointF& point) const {
+    if (!hmsVisible_ || hmsFires_.isEmpty()) return std::nullopt;
+    const HmsFirePoint* best = nullptr;
+    double bestDistance = 12.0;
+    for (const auto& fire : hmsFires_) {
+        const auto firePoint = screenPoint(fire.latitudeDeg, fire.longitudeDeg);
+        const double distance = QLineF(firePoint, point).length();
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = &fire;
+        }
+    }
+    if (!best) return std::nullopt;
+    return *best;
+}
+
+void RadarMapCanvas::paintHmsFires(QPainter& painter) {
+    if (!hmsVisible_ || hmsFires_.isEmpty()) return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
+    // Declutter like METAR dots: one marker per cell below zoom 7, so a
+    // big complex reads as embers instead of an orange blob.
+    QSet<QString> occupiedCells;
+    const bool declutter = zoom_ < 7;
+    painter.setFont(hudFont(7, QFont::DemiBold));
+    for (const auto& fire : hmsFires_) {
+        const auto point = screenPoint(fire.latitudeDeg, fire.longitudeDeg);
+        if (!viewport.contains(point)) continue;
+        if (declutter) {
+            const auto cell = QStringLiteral("%1/%2")
+                                  .arg(static_cast<int>(point.x()) / 14)
+                                  .arg(static_cast<int>(point.y()) / 14);
+            if (occupiedCells.contains(cell)) continue;
+            occupiedCells.insert(cell);
+        }
+        painter.setPen(QPen(QColor(10, 14, 17), 1.5));
+        painter.setBrush(QColor(255, 140, 0));
+        painter.drawEllipse(point, 3.0, 3.0);
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
@@ -3827,10 +3879,10 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             }
         }
     }
-    // Third context row: HMS smoke plume count. Own row so the ERO/NHC row
+    // Third context row: HMS fire + smoke counts. Own row so the ERO/NHC row
     // never overflows when every layer is on at once.
     if (hmsVisible_) {
-        const bool active = !hmsPlumes_.isEmpty();
+        const bool active = !hmsPlumes_.isEmpty() || !hmsFires_.isEmpty();
         const QRectF smokePanel(12, 206, 258, 20);
         painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
         painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
@@ -3839,8 +3891,10 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         painter.setPen(active ? QColor(180, 180, 180) : QColor(148, 163, 184));
         painter.drawText(
             QRectF(20, 208, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
-            active ? QStringLiteral("SMOKE %1 plumes").arg(static_cast<int>(hmsPlumes_.size()))
-                   : QStringLiteral("Smoke: none"));
+            active ? QStringLiteral("FIRE %1 · SMOKE %2")
+                         .arg(static_cast<int>(hmsFires_.size()))
+                         .arg(static_cast<int>(hmsPlumes_.size()))
+                   : QStringLiteral("Fire/smoke: none"));
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -4717,6 +4771,24 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
         }
     }
     if (hmsVisible_) {
+        // Fire points win over the smoke polygons they often sit inside.
+        if (const auto fire = hmsFireNear(point)) {
+            const auto frp = std::isnan(fire->frpMw)
+                                 ? QStringLiteral("FRP: unmeasured")
+                                 : QStringLiteral("FRP: %1 MW").arg(fire->frpMw, 0, 'f', 1);
+            const auto when = fire->yearDay > 0
+                                  ? QStringLiteral("Day %1 %2 UTC").arg(fire->yearDay).arg(
+                                        fire->timeHhmm, 4, 10, QLatin1Char('0'))
+                                  : QStringLiteral("time unknown");
+            const auto source = fire->satellite.isEmpty()
+                                    ? QStringLiteral("NOAA HMS")
+                                    : QStringLiteral("NOAA HMS (%1)").arg(fire->satellite);
+            return {QStringLiteral("Fire detection (%1°, %2°)\n%3 | %4\n%5")
+                        .arg(fire->latitudeDeg, 0, 'f', 3)
+                        .arg(fire->longitudeDeg, 0, 'f', 3)
+                        .arg(frp, when, source),
+                    PinnedInfoKind::HmsSmoke, std::nullopt};
+        }
         // Above warnings like the other translucent context: smoke never
         // hides radar, and NWS warnings still win the click above it.
         // (This branch sits after warnings in overlayAt order.)
@@ -5306,6 +5378,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     paintMcdOverlays(painter);
     paintNhcOverlays(painter);
     paintHmsSmoke(painter);
+    paintHmsFires(painter);
     paintMetars(painter);
     paintPlacefiles(painter);
     paintLightningOverlay(painter);

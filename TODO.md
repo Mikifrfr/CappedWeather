@@ -45,7 +45,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
-- HMS smoke overlay (daily KML with density/satellite/times, official green/yellow/red fills, today-then-yesterday fallback, clean-air quiet state, layer with badge and persisted toggle, live-verified, hermetic parser and URL tests).
+- HMS fire plus smoke overlay (daily detection text with satellite/FRP plus KML plumes with density/times, official colors, today-then-yesterday fallback, clean-air quiet state, layer with badge and persisted toggle, live-verified, hermetic parser and URL tests).
 - WPC excessive-rainfall outlooks Day 1-3 (Esri REST GeoJSON with official renderer colors, layer with badge and persisted toggle, live-verified against today's SE US ERO, hermetic parser tests).
 - NHC tropical cyclone overlay (active-storm KMZ discovery plus cone/track KMZ geometry, layer with badge and persisted toggle, live-verified during Isaias/Rachel/Simon, hermetic parser and KMZ-extraction tests).
 - Precip-type map (METAR surface temps crossed with the measured melting level, dotted station rings plus card line, strict fail-closed gating, hermetic classifier tests, experimental until a winter-season scoring).

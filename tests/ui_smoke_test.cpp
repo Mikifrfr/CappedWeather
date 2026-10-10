@@ -2228,6 +2228,30 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                   << hmsSmokeUrl(QDate(2026, 10, 10)).toString().toStdString() << '\n';
         return 1;
     }
+    // HMS fire text: live-shaped header plus detections (missing FRP stays
+    // NaN, bad rows drop), day-stamped URL builder.
+    const QByteArray hmsFires = "        Lon,        Lat, YearDay, Time,       Satellite,           Method, Ecosystem,        FRP\n"
+                                " -96.431657,  34.289140, 2026283, 0201,       GOES-EAST,         ANALYSIS,        91,   -999.000\n"
+                                "-101.698970,  48.485158, 2026283, 1530,       GOES-WEST,         ANALYSIS,        30,    12.500\n"
+                                "999.0, 48.0, 2026283, 0201, GOES-EAST, ANALYSIS, 30, 5.0\n"
+                                "short,row\n";
+    QString fireError;
+    const auto fires = parseHmsFireText(hmsFires, &fireError);
+    if (!fireError.isEmpty() || fires.size() != 2 ||
+        std::abs(fires.front().longitudeDeg + 96.431657) > 0.000001 ||
+        std::abs(fires.front().latitudeDeg - 34.28914) > 0.000001 ||
+        !std::isnan(fires.front().frpMw) || fires.front().satellite != QStringLiteral("GOES-EAST") ||
+        fires.front().yearDay != 2026283 || fires.front().timeHhmm != 201 ||
+        std::abs(fires.back().frpMw - 12.5) > 0.001) {
+        std::cerr << "HMS fire text parsing failed\n";
+        return 1;
+    }
+    if (hmsFireUrl(QDate(2026, 10, 10)).toString() !=
+        QStringLiteral("https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Fire_Points/"
+                       "Text/2026/10/hms_fire20261010.txt")) {
+        std::cerr << "HMS fire URL builder is wrong\n";
+        return 1;
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {

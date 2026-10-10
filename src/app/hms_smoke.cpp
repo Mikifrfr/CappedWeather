@@ -42,6 +42,17 @@ QUrl hmsSmokeUrl(const QDate date) {
                     .arg(date.day(), 2, 10, QLatin1Char('0')));
 }
 
+QUrl hmsFireUrl(const QDate date) {
+    if (!date.isValid()) return {};
+    return QUrl(QStringLiteral("https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/"
+                               "Fire_Points/Text/%1/%2/hms_fire%3%4%5.txt")
+                    .arg(date.year())
+                    .arg(date.month(), 2, 10, QLatin1Char('0'))
+                    .arg(date.year())
+                    .arg(date.month(), 2, 10, QLatin1Char('0'))
+                    .arg(date.day(), 2, 10, QLatin1Char('0')));
+}
+
 QString hmsSmokeDensityLabel(const HmsSmokeDensity density) {
     switch (density) {
     case HmsSmokeDensity::Heavy: return QStringLiteral("heavy");
@@ -49,6 +60,39 @@ QString hmsSmokeDensityLabel(const HmsSmokeDensity density) {
     case HmsSmokeDensity::Light:
     default: return QStringLiteral("light");
     }
+}
+
+QVector<HmsFirePoint> parseHmsFireText(const QByteArray& data, QString* error,
+                                       const int maxPoints) {
+    QVector<HmsFirePoint> fires;
+    const auto lines = data.split('\n');
+    for (const auto& rawLine : lines) {
+        const auto line = rawLine.trimmed();
+        if (line.isEmpty()) continue;
+        const auto fields = line.split(',');
+        if (fields.size() < 8) {
+            // Header ("Lon, Lat, ...") and short rows alike.
+            continue;
+        }
+        bool okLon = false, okLat = false;
+        const double lon = fields.at(0).trimmed().toDouble(&okLon);
+        const double lat = fields.at(1).trimmed().toDouble(&okLat);
+        if (!okLon || !okLat || lon < -180.0 || lon > 180.0 || lat < -90.0 || lat > 90.0)
+            continue;
+        HmsFirePoint fire;
+        fire.longitudeDeg = lon;
+        fire.latitudeDeg = lat;
+        fire.yearDay = fields.at(2).trimmed().toInt();
+        fire.timeHhmm = fields.at(3).trimmed().toInt();
+        fire.satellite = fields.at(4).trimmed();
+        bool okFrp = false;
+        const double frp = fields.at(7).trimmed().toDouble(&okFrp);
+        if (okFrp && frp >= 0.0) fire.frpMw = frp;
+        fires.push_back(fire);
+        if (static_cast<int>(fires.size()) >= maxPoints) break;
+    }
+    if (error) error->clear();
+    return fires;
 }
 
 QVector<HmsSmokePlume> parseHmsSmokeKml(const QByteArray& data, QString* error) {
@@ -152,16 +196,38 @@ void HmsSmokeSource::requestDay(const QDate date, const bool fallbackLeft) {
         }
         QString error;
         auto plumes = parseHmsSmokeKml(reply->readAll(), &error);
-        pending_ = false;
         if (!error.isEmpty()) {
+            pending_ = false;
             emit statusChanged(QStringLiteral("HMS smoke: %1").arg(error));
             return;
         }
         plumes_ = std::move(plumes);
         emit smokeReady(plumes_);
+        // Fire points ride the same round, dated to the smoke day that won.
+        // pending_ clears when the fire fetch lands (or fails) below.
+        requestFires(date);
         emit statusChanged(plumes_.isEmpty()
                                ? QStringLiteral("HMS smoke: none today")
                                : QStringLiteral("HMS smoke: %1 plumes").arg(plumes_.size()));
+    });
+}
+
+void HmsSmokeSource::requestFires(const QDate date) {
+    const QUrl url = hmsFireUrl(date);
+    if (!url.isValid()) {
+        pending_ = false;
+        return;
+    }
+    auto* reply = network_.get(
+        makeRequest(url, QStringLiteral("text/plain"), QStringLiteral(" HMS fire client")));
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        reply->deleteLater();
+        pending_ = false;
+        if (reply->error() != QNetworkReply::NoError) return;  // smoke status stands
+        QString error;
+        const auto fires = parseHmsFireText(reply->readAll(), &error);
+        if (!error.isEmpty()) return;
+        emit firesReady(fires);
     });
 }
 

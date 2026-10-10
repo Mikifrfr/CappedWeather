@@ -21,6 +21,8 @@
 #include <QUrl>
 #include <QVector>
 
+#include <limits>
+
 namespace cappedweather {
 
 enum class HmsSmokeDensity {
@@ -37,11 +39,30 @@ struct HmsSmokePlume {
     QVector<QPointF> ring;  // lon/lat, closed implicitly
 };
 
+// Active fire detections: same HMS program, plain-text rows
+// ("Lon, Lat, YearDay, Time, Satellite, Method, Ecosystem, FRP").
+// FRP is megawatts, -999 when unmeasured (stays NaN, never zero).
+struct HmsFirePoint {
+    double latitudeDeg = 0.0;
+    double longitudeDeg = 0.0;
+    QString satellite;
+    double frpMw = std::numeric_limits<double>::quiet_NaN();
+    int yearDay = 0;
+    int timeHhmm = 0;
+};
+
 // One day's smoke KML: plumes with drawable rings. Empty file (clean air)
 // parses to zero plumes with a clear error string.
 QVector<HmsSmokePlume> parseHmsSmokeKml(const QByteArray& data, QString* error);
+// One day's fire text: detections with sane coordinates. Header and
+// malformed rows are dropped, never fatal. Hard cap for hostile files
+// (daily files run a few thousand rows; the cap never trips on real data).
+QVector<HmsFirePoint> parseHmsFireText(const QByteArray& data, QString* error,
+                                       int maxPoints = 20000);
 // Day-stamped KML URL for a UTC date (monthly subdirectories).
 QUrl hmsSmokeUrl(QDate date);
+// Day-stamped fire-text URL for a UTC date (same monthly layout).
+QUrl hmsFireUrl(QDate date);
 QString hmsSmokeDensityLabel(HmsSmokeDensity density);
 
 class HmsSmokeSource : public QObject {
@@ -54,10 +75,12 @@ public:
 
 signals:
     void smokeReady(QVector<HmsSmokePlume> plumes);
+    void firesReady(QVector<HmsFirePoint> fires);
     void statusChanged(const QString& status);
 
 private:
     void requestDay(QDate date, bool fallbackLeft);
+    void requestFires(QDate date);
 
     bool enabled_ = true;
     bool pending_ = false;
