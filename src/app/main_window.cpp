@@ -16,6 +16,7 @@
 #include "core/derived_products.hpp"
 #include "core/vad.hpp"
 #include "core/bright_band.hpp"
+#include "core/bunkers.hpp"
 #include "app/case_pack.hpp"
 #include "app/offline_pack.hpp"
 #include "app/cross_section_widget.hpp"
@@ -4793,18 +4794,38 @@ void MainWindow::populateScanDialog() {
     // Melting-level line: single-volume estimate with its quality flag, so
     // a convective-only volume reads Poor instead of a confident height.
     const auto melt = estimateBrightBand(*chunk, radarElevationMeters);
+    // Bunkers storm motion from the same VAD rows: right-mover for the
+    // northern-hemisphere default, flagged when the shear is too weak to
+    // split. Feeds the SRH estimate next; shown here with the same honesty.
+    const auto bunkers = estimateBunkersMotion(levels, radarElevationMeters);
+    QString motionSuffix;
+    if (bunkers.valid) {
+        const QString motionQuality =
+            bunkers.quality == VadQuality::Good ? QStringLiteral("good") : QStringLiteral("marginal");
+        motionSuffix =
+            bunkers.weakShear
+                ? QStringLiteral(" · Motion ~%1 kt from %2%3 (%4, weak shear)")
+                      .arg(bunkers.meanSpeedMps * 1.94384, 0, 'f', 0)
+                      .arg(bunkers.meanFromDegrees, 0, 'f', 0)
+                      .arg(QChar(0x00b0), motionQuality)
+                : QStringLiteral(" · RM ~%1 kt from %2%3 (%4)")
+                      .arg(bunkers.rightSpeedMps * 1.94384, 0, 'f', 0)
+                      .arg(bunkers.rightFromDegrees, 0, 'f', 0)
+                      .arg(QChar(0x00b0), motionQuality);
+    }
     if (melt.valid) {
         const QString meltQuality = melt.quality == BrightBandQuality::Good          ? QStringLiteral("good")
                                     : melt.quality == BrightBandQuality::Marginal ? QStringLiteral("marginal")
                                                                                  : QStringLiteral("poor");
-        scanSummary_->setText(QStringLiteral("%1 · %2 · Melting ~%3 km (%4)")
+        scanSummary_->setText(QStringLiteral("%1 · %2 · Melting ~%3 km (%4)%5")
                                   .arg(map_->scanDiagnosticsText(),
                                        QStringLiteral("Volume follows the active panel"),
                                        QString::number(melt.heightMslMeters / 1000.0, 'f', 1),
-                                       meltQuality));
+                                       meltQuality, motionSuffix));
     } else {
-        scanSummary_->setText(QStringLiteral("%1 · %2").arg(map_->scanDiagnosticsText(),
-                                                            QStringLiteral("Volume follows the active panel")));
+        scanSummary_->setText(QStringLiteral("%1 · %2%3").arg(map_->scanDiagnosticsText(),
+                                                              QStringLiteral("Volume follows the active panel"),
+                                                              motionSuffix));
     }
     scanTable_->setRowCount(static_cast<int>(perTilt.size()));
     for (int row = 0; row < static_cast<int>(perTilt.size()); ++row) {

@@ -7,6 +7,7 @@
 #include "core/velocity_processing.hpp"
 #include "core/vad.hpp"
 #include "core/bright_band.hpp"
+#include "core/bunkers.hpp"
 #include "core/tbss_detector.hpp"
 #include "core/zdr_column.hpp"
 #include "core/lightning_jump.hpp"
@@ -726,6 +727,74 @@ void testTbss() {
             ray.fields.at(static_cast<std::size_t>(ProductKind::Reflectivity)).at(25) =
                 static_cast<std::uint16_t>(std::lround(50.0 * 2.0 + 66.0));
         assert(detectTbss(secondCell, 35.0, -97.0, 300.0, {}).empty());
+    }
+}
+
+namespace {
+VadLevel syntheticVadLevel(const double heightMslMeters, const double uEast, const double vNorth,
+                           const std::size_t gates = 200,
+                           const VadQuality quality = VadQuality::Good) {
+    VadLevel level;
+    level.heightMslMeters = heightMslMeters;
+    level.speedMetersPerSecond = std::hypot(uEast, vNorth);
+    level.directionFromDegrees =
+        std::fmod(std::atan2(-uEast, -vNorth) * 180.0 / 3.14159265358979323846 + 360.0, 360.0);
+    level.gateCount = gates;
+    level.azimuthCoverageDegrees = 360.0;
+    level.quality = quality;
+    return level;
+}
+}  // namespace
+
+void testBunkers() {
+    // Uniform westerly flow (u=10 everywhere): zero shear, motion = mean.
+    {
+        const std::vector<VadLevel> levels = {
+            syntheticVadLevel(500.0, 10.0, 0.0), syntheticVadLevel(1500.0, 10.0, 0.0),
+            syntheticVadLevel(4500.0, 10.0, 0.0), syntheticVadLevel(5500.0, 10.0, 0.0)};
+        const auto motion = estimateBunkersMotion(levels, 300.0, {});
+        assert(motion.valid && motion.weakShear);
+        assert(motion.quality == VadQuality::Good);
+        assert(std::abs(motion.shearMagnitudeMps) < 0.01);
+        assert(std::abs(motion.meanSpeedMps - 10.0) < 0.01);
+        assert(std::abs(motion.meanFromDegrees - 270.0) < 0.5);
+        assert(std::abs(motion.rightSpeedMps - 10.0) < 0.01);
+    }
+    // Sheared flow (5 m/s low, 20 m/s high, both westerly): mean 12.5 m/s,
+    // shear 15 m/s east, right-mover deviated 7.5 south of the mean.
+    {
+        const std::vector<VadLevel> levels = {
+            syntheticVadLevel(500.0, 5.0, 0.0), syntheticVadLevel(1500.0, 5.0, 0.0),
+            syntheticVadLevel(4500.0, 20.0, 0.0), syntheticVadLevel(5500.0, 20.0, 0.0)};
+        const auto motion = estimateBunkersMotion(levels, 300.0, {});
+        assert(motion.valid && !motion.weakShear);
+        assert(std::abs(motion.shearMagnitudeMps - 15.0) < 0.01);
+        assert(std::abs(motion.meanSpeedMps - 12.5) < 0.01);
+        assert(std::abs(motion.rightSpeedMps - 14.58) < 0.05);
+        assert(std::abs(motion.rightFromDegrees - 301.0) < 1.0);
+        // Left mover mirrors across the mean wind.
+        assert(std::abs(motion.leftSpeedMps - 14.58) < 0.05);
+        assert(std::abs(motion.leftFromDegrees - 239.0) < 1.0);
+    }
+    // Lower half missing: no shear, no motion.
+    {
+        const std::vector<VadLevel> levels = {syntheticVadLevel(4500.0, 20.0, 0.0),
+                                              syntheticVadLevel(5500.0, 20.0, 0.0)};
+        assert(!estimateBunkersMotion(levels, 300.0, {}).valid);
+    }
+    // Poor rows steer nothing: all-Poor profile is invalid.
+    {
+        const std::vector<VadLevel> levels = {
+            syntheticVadLevel(500.0, 10.0, 0.0, 200, VadQuality::Poor),
+            syntheticVadLevel(4500.0, 10.0, 0.0, 200, VadQuality::Poor)};
+        assert(!estimateBunkersMotion(levels, 300.0, {}).valid);
+    }
+    // Two qualifying levels still give a Marginal motion.
+    {
+        const std::vector<VadLevel> levels = {syntheticVadLevel(1000.0, 10.0, 0.0),
+                                              syntheticVadLevel(5000.0, 10.0, 0.0)};
+        const auto motion = estimateBunkersMotion(levels, 300.0, {});
+        assert(motion.valid && motion.quality == VadQuality::Marginal);
     }
 }
 
@@ -2136,6 +2205,7 @@ int main() {
     testVelocityProcessing();
     testVadProfile();
     testBrightBand();
+    testBunkers();
     testTbss();
     testZdrColumns();
     testMessage31MomentLayout();
