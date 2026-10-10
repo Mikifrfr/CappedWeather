@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QTimeZone>
 
+#include <algorithm>
 #include <cmath>
 
 namespace cappedweather {
@@ -32,10 +33,16 @@ QString isoTime(const QDateTime& moment) {
 }  // namespace
 
 QDateTime latestHrrrTime(const QDateTime& nowUtc) {
-    if (!nowUtc.isValid()) return {};
+    return hrrrValidTime(nowUtc, 0);
+}
+
+QDateTime hrrrValidTime(const QDateTime& nowUtc, const int leadHours) {
+    if (!nowUtc.isValid() || leadHours < 0 || leadHours > 18) return {};
     const QDateTime truncated(nowUtc.date(), QTime(nowUtc.time().hour(), 0), QTimeZone::UTC);
     // Analyses land ~1 h late; two hours back is reliably published.
-    return truncated.addSecs(-2 * 3600);
+    // Positive leads ride the same cycle's forecast steps through the
+    // identical subset path (verified live: +3 h resolves).
+    return truncated.addSecs((-2 + leadHours) * 3600);
 }
 
 QUrl hrrrSubsetUrl(const double centerLatitude, const double centerLongitude,
@@ -70,7 +77,18 @@ void HrrrSource::refresh() {
     if (!enabled_ || pending_) return;
     pending_ = true;
     if (!refreshTimer_->isActive()) refreshTimer_->start();
-    requestTime(latestHrrrTime(QDateTime::currentDateTimeUtc()), true);
+    requestTime(hrrrValidTime(QDateTime::currentDateTimeUtc(), leadHours_), true);
+}
+
+void HrrrSource::setLeadHours(const int hours) {
+    // Picker offers 0/1/2/3/6; clamp anything else into 0-18 and refetch.
+    const int clamped = std::clamp(hours, 0, 18);
+    if (clamped == leadHours_) return;
+    leadHours_ = clamped;
+    if (enabled_) {
+        pending_ = false;
+        refresh();
+    }
 }
 
 void HrrrSource::setEnabled(const bool enabled) {

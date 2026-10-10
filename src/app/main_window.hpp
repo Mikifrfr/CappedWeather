@@ -366,6 +366,7 @@ private:
     QLabel* datBadge_ = nullptr;
     QCheckBox* hrrrCheck_ = nullptr;
     QLabel* hrrrBadge_ = nullptr;
+    QComboBox* hrrrLeadCombo_ = nullptr;
     QCheckBox* goesCheck_ = nullptr;
     QLabel* goesBadge_ = nullptr;
     QComboBox* goesChannelCombo_ = nullptr;

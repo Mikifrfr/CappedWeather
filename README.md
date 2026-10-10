@@ -44,7 +44,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 - WPC Day 1-3 excessive rainfall outlooks in official colors (Marginal green, Slight yellow, Moderate red, High pink).
 - NOAA HMS daily fire detections plus smoke plumes in official density colors, with today-then-yesterday fallback.
 - NWS DAT tornado survey paths (last 90 days) in EF severity colors.
-- HRRR simulated reflectivity (TDS NetCDF subset, model context under echo with valid hour).
+- HRRR simulated reflectivity (TDS NetCDF subset, analysis plus forecast leads, model context under echo with valid hour).
 - IEM NEXRAD national mosaic (5-minute N0Q composite, observed context under echo with scan time).
 - GOES ABI infrared cloud tops (C13/C07/C08 brightness temperature, observed context under echo with scan time).
 - RAOB sounding hodograph (IEM 00Z/12Z) with sounding-vs-VAD SRH ground truth and freezing level.

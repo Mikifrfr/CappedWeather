@@ -1565,6 +1565,29 @@ void MainWindow::buildUi() {
                  QStringLiteral("Model reflectivity under echo"), hrrrBadge_,
                  QStringLiteral("hrrrBadge"), true,
                  QStringLiteral("HRRR composite reflectivity for the latest analysis, painted under live echo in echo colors at reduced alpha. Model guidance with its valid hour on display, never observed echo."));
+    {
+        // Lead picker directly under its layer row: analysis plus same-cycle
+        // forecast steps through the identical subset path. The legend chip
+        // always shows the frame's valid hour, so model runs never read as now.
+        auto* hrrrLeadRow = new QHBoxLayout();
+        hrrrLeadRow->setSpacing(8);
+        auto* hrrrLeadLabel = new QLabel(QStringLiteral("Valid"), controlBody);
+        hrrrLeadCombo_ = new QComboBox(controlBody);
+        hrrrLeadCombo_->setObjectName(QStringLiteral("hrrrLeadCombo"));
+        hrrrLeadCombo_->addItem(QStringLiteral("analysis"), 0);
+        hrrrLeadCombo_->addItem(QStringLiteral("+1 h"), 1);
+        hrrrLeadCombo_->addItem(QStringLiteral("+2 h"), 2);
+        hrrrLeadCombo_->addItem(QStringLiteral("+3 h"), 3);
+        hrrrLeadCombo_->addItem(QStringLiteral("+6 h"), 6);
+        hrrrLeadCombo_->setToolTip(QStringLiteral("HRRR valid time. Refetches on change."));
+        hrrrLeadRow->addWidget(hrrrLeadLabel);
+        hrrrLeadRow->addWidget(hrrrLeadCombo_, 1);
+        layersGroup->addLayout(hrrrLeadRow);
+        connect(hrrrLeadCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+            if (!hrrrSource_ || index < 0) return;
+            hrrrSource_->setLeadHours(hrrrLeadCombo_->itemData(index).toInt());
+        });
+    }
     makeLayerRow(goesCheck_, QStringLiteral("GOES infrared"), QStringLiteral("goesCheck"),
                  QStringLiteral("Cloud tops under echo"), goesBadge_,
                  QStringLiteral("goesBadge"), true,
@@ -1572,7 +1595,7 @@ void MainWindow::buildUi() {
     {
         // Channel picker lives directly under its layer row: clean IR (13),
         // upper water vapor (8), shortwave IR (7). Visible channels stay out
-        // plus a solar path the IR painter does not need).
+        // (file size plus a solar path the IR painter does not need).
         auto* goesChannelRow = new QHBoxLayout();
         goesChannelRow->setSpacing(8);
         auto* goesChannelLabel = new QLabel(QStringLiteral("Band"), controlBody);
@@ -3448,6 +3471,13 @@ void MainWindow::restoreSettings() {
     hmsCheck_->setChecked(settings.value(QStringLiteral("overlays/hmsSmoke"), true).toBool());
     datCheck_->setChecked(settings.value(QStringLiteral("overlays/datPaths"), true).toBool());
     hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), true).toBool());
+    {
+        // Lead hours persist; unknown stored values fall back to analysis.
+        const int lead = settings.value(QStringLiteral("overlays/hrrrLeadHours"), 0).toInt();
+        const int leadIndex = hrrrLeadCombo_->findData(lead);
+        hrrrLeadCombo_->setCurrentIndex(std::max(0, leadIndex));
+        if (hrrrSource_) hrrrSource_->setLeadHours(hrrrLeadCombo_->currentData().toInt());
+    }
     goesCheck_->setChecked(settings.value(QStringLiteral("overlays/goes"), true).toBool());
     mosaicCheck_->setChecked(settings.value(QStringLiteral("overlays/mosaic"), true).toBool());
     {
@@ -3520,6 +3550,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("overlays/hmsSmoke"), hmsCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/datPaths"), datCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/hrrr"), hrrrCheck_->isChecked());
+    settings.setValue(QStringLiteral("overlays/hrrrLeadHours"), hrrrLeadCombo_->currentData().toInt());
     settings.setValue(QStringLiteral("overlays/goes"), goesCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/mosaic"), mosaicCheck_->isChecked());
     settings.setValue(QStringLiteral("overlays/goesChannel"), goesChannelCombo_->currentData().toInt());

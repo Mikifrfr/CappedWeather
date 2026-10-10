@@ -2390,6 +2390,13 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             std::cerr << "HRRR clock is wrong\n";
             return 1;
         }
+        // Lead hours ride the same clock (verified live: +3 h resolves).
+        if (hrrrValidTime(at(15, 30), 0) != at(13, 0) || hrrrValidTime(at(15, 30), 3) != at(16, 0) ||
+            hrrrValidTime(at(15, 30), 6) != at(19, 0) || hrrrValidTime(at(15, 30), -1).isValid() ||
+            hrrrValidTime(at(15, 30), 19).isValid() || hrrrValidTime(QDateTime(), 2).isValid()) {
+            std::cerr << "HRRR lead clock is wrong\n";
+            return 1;
+        }
     }
     // GOES listing URL, newest-key pick, and slot clock: hermetic against
     // hand-built XML in the live ListBucketResult shape.
