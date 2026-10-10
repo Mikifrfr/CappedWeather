@@ -6,6 +6,7 @@
 #include "app/nhc_cyclone.hpp"
 #include "app/wpc_ero.hpp"
 #include "app/hms_smoke.hpp"
+#include "app/dat_paths.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2252,6 +2253,57 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cerr << "HMS fire URL builder is wrong\n";
         return 1;
     }
+    // DAT survey paths: live-shaped EF1 + EF0 LineStrings (epoch-ms dates),
+    // EF severity ramp, drawable-lines-only rule.
+    const QByteArray datLive = R"JSON({"type":"FeatureCollection","features":[
+      {"type":"Feature","id":2555,"geometry":{"type":"LineString","coordinates":[
+        [-85.656585339,32.536967769],[-85.649847629,32.541236855],[-85.640964153,32.547567751]]},
+       "properties":{"objectid":2555,"event_id":"","efscale":"EF1","stormdate":1321444320000,
+         "startlat":32.537,"startlon":-85.6566,"endlat":32.547,"endlon":-85.641}},
+      {"type":"Feature","id":2558,"geometry":{"type":"LineString","coordinates":[
+        [-86.974216057,32.869205322],[-86.968207373,32.870503387]]},
+       "properties":{"objectid":2558,"event_id":null,"efscale":"EF0","stormdate":1324560300000,
+         "startlat":32.8692,"startlon":-86.9742,"endlat":32.8796,"endlon":-86.9307}},
+      {"type":"Feature","id":9,"geometry":{"type":"Point","coordinates":[-86.9,32.4]},
+       "properties":{"objectid":9,"efscale":"EF0"}}
+    ]})JSON";
+    const auto datPaths = parseDatPaths(datLive, &parseError);
+    if (!parseError.isEmpty() || datPaths.size() != 2 ||
+        datPaths.front().efScale != QStringLiteral("EF1") ||
+        datPaths.front().line.size() != 3 ||
+        std::abs(datPaths.front().line.front().x() + 85.656585339) > 0.000001 ||
+        datPaths.front().stormDate !=
+            QDateTime::fromMSecsSinceEpoch(1321444320000, QTimeZone::UTC) ||
+        datPaths.back().efScale != QStringLiteral("EF0")) {
+        std::cerr << "DAT path parsing failed\n";
+        return 1;
+    }
+    {
+        QString stroke;
+        QString fill;
+        datPathColors(QStringLiteral("EF3"), stroke, fill);
+        QString mildStroke;
+        QString mildFill;
+        datPathColors(QStringLiteral("EF0"), mildStroke, mildFill);
+        QString unknownStroke;
+        QString unknownFill;
+        datPathColors(QString{}, unknownStroke, unknownFill);
+        if (stroke != QStringLiteral("#FF3B4D") || mildStroke != QStringLiteral("#53D769") ||
+            unknownStroke != mildStroke || fill.isEmpty()) {
+            std::cerr << "DAT EF colors are wrong\n";
+            return 1;
+        }
+    }
+    const QByteArray datQuiet = R"JSON({"type":"FeatureCollection","features":[]})JSON";
+    if (!parseDatPaths(datQuiet, &parseError).isEmpty() || !parseError.isEmpty()) {
+        std::cerr << "Empty DAT response should parse to zero paths\n";
+        return 1;
+    }
+    if (!parseDatPaths(QByteArray("not json"), &parseError).isEmpty() ||
+        parseError.isEmpty()) {
+        std::cerr << "Malformed DAT payload should fail closed with an error\n";
+        return 1;
+    }
     // Warning countdowns: clock-injected, minute/hour/day bands plus the
     // expired and undated fail-closed states.
     {
@@ -3170,6 +3222,7 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setMcdVisible(false);
     map->setNhcVisible(false);
     map->setHmsVisible(false);
+    map->setDatVisible(false);
     const auto probePoint = map->radarScreenPoint(QStringLiteral("TATL")) + QPoint(20, 0);
     map->inspectAt(QPointF(probePoint));
     if (map->probeText().isEmpty() || !map->probeText().contains(QStringLiteral("dBZ"))) {

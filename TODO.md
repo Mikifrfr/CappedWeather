@@ -32,8 +32,8 @@ Ready to build (data live now, testable hermetically plus replay):
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
 
 Research-gated (confirm open shape first, METAR/ECCC style):
-- [ ] NWS damage-assessment (DAT) tornado paths. Post-event survey polygons as an overlay layer; confirm the open endpoint shape first.
-- [ ] GOES satellite overlay. HRV/IR from the anonymous NOAA S3 buckets through the optional netCDF reader, remapped to the panel grid. Confirm product keys and sizes first.
+- [ ] NWS damage-assessment (DAT) tornado paths. CONFIRMED live 2026-10-10: `services.dat.noaa.gov/.../DamageViewer/MapServer/1/query` anonymous GeoJSON (outSR=4326), LineString paths with efscale/efnum, stormdate epoch-ms, start/end lat/lon; cap 2000 with exceededTransferLimit flag (bbox or recency bounded queries). Needs: recency-bounded fetcher plus EF-colored line layer with tests.
+- [ ] GOES satellite overlay. CONFIRMED live 2026-10-10: anonymous `noaa-goes18` bucket, `ABI-L1b-RadC/YYYY/DDD/HH/OR_ABI-L1b-RadC-M6Cnn_G18_s.._e.._c...nc` at 5-min cadence minutes fresh. Sizes per file: C01_Stokes visible ~6 MB, C13 clean-IR similar, C02 red visible ~52 MB (too heavy at full res, skip or downsample). Remap via fixed-grid projection attrs plus kappa0/Planck through the optional netCDF reader, CONUS RadC first. Needs: channel picker plus remap plus layer with tests.
 - [ ] HRRR simulated reflectivity. NOMADS or TDS NetCDF subset as a model-context overlay with valid-time labels, never mixed with observed echo. Confirm subset API first.
 - [ ] Observed soundings plus hodograph. IEM raob.py CONFIRMED live 2026-10-10 (KOUN 12Z: `{profiles:[{station,valid,profile:[{pres,hght,tmpc,dwpc,drct,sknt}]}]}`, nulls for missing winds). Skew-T-lite or hodograph pop-out feeding SRH ground truth. Needs: nearest-sounding-station table plus parser plus dialog with tests.
 - [ ] Nearest-radar mosaic. Composite of adjacent loaded sessions at matched tilts as optional context, Level II first per the research item. Prototype on two synced radars, measure seams before committing.
@@ -45,6 +45,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- NWS DAT survey paths (90-day recency-bounded GeoJSON with EF colors, line layer with badge and persisted toggle, live-verified query shape, hermetic parser and color tests).
 - HMS fire plus smoke overlay (daily detection text with satellite/FRP plus KML plumes with density/times, official colors, today-then-yesterday fallback, clean-air quiet state, layer with badge and persisted toggle, live-verified, hermetic parser and URL tests).
 - WPC excessive-rainfall outlooks Day 1-3 (Esri REST GeoJSON with official renderer colors, layer with badge and persisted toggle, live-verified against today's SE US ERO, hermetic parser tests).
 - NHC tropical cyclone overlay (active-storm KMZ discovery plus cone/track KMZ geometry, layer with badge and persisted toggle, live-verified during Isaias/Rachel/Simon, hermetic parser and KMZ-extraction tests).

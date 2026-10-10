@@ -219,6 +219,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/wpc_ero.hpp
             src/app/hms_smoke.cpp
             src/app/hms_smoke.hpp
+            src/app/dat_paths.cpp
+            src/app/dat_paths.hpp
             src/app/offline_pack.cpp
             src/app/offline_pack.hpp
             src/app/case_pack.cpp

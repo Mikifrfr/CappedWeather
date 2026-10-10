@@ -12,6 +12,7 @@
 #include "app/nhc_cyclone.hpp"
 #include "app/wpc_ero.hpp"
 #include "app/hms_smoke.hpp"
+#include "app/dat_paths.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
 #include "core/product.hpp"
@@ -213,6 +214,10 @@ public:
     [[nodiscard]] int hmsSmokeCount() const;
     void setHmsFires(QVector<HmsFirePoint> fires);
     [[nodiscard]] int hmsFireCount() const;
+    void setDatPaths(QVector<DatPath> paths);
+    void setDatVisible(bool visible);
+    [[nodiscard]] bool datVisible() const { return datVisible_; }
+    [[nodiscard]] int datPathCount() const;
     void setSpcFireOutlooks(QVector<SpcOutlookFeature> outlooks);
     void setSpcFireVisible(bool visible);
     [[nodiscard]] bool spcFireVisible() const { return spcFireVisible_; }
@@ -417,6 +422,7 @@ private:
         SpcMcd,
         NhcStorm,
         HmsSmoke,
+        DatSurvey,
         Metar,
         // A frozen cursor readout. "Inspect at cursor" used to write the same
         // transient text the hover uses, so the next mouse move silently wiped
@@ -551,6 +557,9 @@ private:
     QVector<HmsFirePoint> hmsFires_;
     void paintHmsFires(QPainter& painter);
     std::optional<HmsFirePoint> hmsFireNear(const QPointF& point) const;
+    // DAT survey centerlines: EF-colored polylines, vector-painted.
+    QVector<DatPath> datPaths_;
+    void paintDatPaths(QPainter& painter);
     void paintMcdOverlays(QPainter& painter);
     QVector<MetarObs> metars_;
     void paintMetars(QPainter& painter);
@@ -675,6 +684,7 @@ private:
     bool nhcVisible_ = true;
     bool wpcVisible_ = true;
     bool hmsVisible_ = true;
+    bool datVisible_ = true;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

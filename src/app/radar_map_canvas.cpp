@@ -1295,6 +1295,21 @@ int RadarMapCanvas::hmsFireCount() const {
     return static_cast<int>(hmsFires_.size());
 }
 
+void RadarMapCanvas::setDatPaths(QVector<DatPath> paths) {
+    datPaths_ = std::move(paths);
+    update();
+}
+
+void RadarMapCanvas::setDatVisible(const bool visible) {
+    if (datVisible_ == visible) return;
+    datVisible_ = visible;
+    update();
+}
+
+int RadarMapCanvas::datPathCount() const {
+    return static_cast<int>(datPaths_.size());
+}
+
 void RadarMapCanvas::setMcds(QVector<SpcMcd> mcds) {
     mcds_ = std::move(mcds);
     update();
@@ -2966,6 +2981,38 @@ void RadarMapCanvas::paintHmsFires(QPainter& painter) {
     painter.restore();
 }
 
+void RadarMapCanvas::paintDatPaths(QPainter& painter) {
+    if (!datVisible_ || datPaths_.isEmpty()) return;
+    // Survey centerlines above warnings: EF-colored polylines with a start
+    // dot. Post-event ground truth, never a forecast.
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF viewport(rect().adjusted(-80, -80, 80, 80));
+    for (const auto& path : datPaths_) {
+        if (path.line.size() < 2) continue;
+        QPolygonF line;
+        line.reserve(path.line.size());
+        for (const auto& lonLat : path.line) line.push_back(screenPoint(lonLat.y(), lonLat.x()));
+        if (!viewport.intersects(line.boundingRect())) continue;
+        QString stroke;
+        QString fill;
+        datPathColors(path.efScale, stroke, fill);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(stroke), 2.0));
+        painter.drawPolyline(line);
+        painter.setPen(QPen(QColor(10, 14, 17), 1.5));
+        painter.setBrush(QColor(stroke));
+        painter.drawEllipse(line.front(), 3.5, 3.5);
+        if (zoom_ >= 6 && !path.efScale.isEmpty()) {
+            painter.setPen(QColor(stroke));
+            painter.setFont(hudFont(7, QFont::DemiBold));
+            painter.drawText(QRectF(line.front().x() + 8.0, line.front().y() - 18, 120, 16),
+                             Qt::AlignLeft | Qt::AlignVCenter, path.efScale.toUpper());
+        }
+    }
+    painter.restore();
+}
+
 void RadarMapCanvas::paintMcdOverlays(QPainter& painter) {    if (!mcdVisible_ || mcds_.isEmpty()) return;
     // Watch-area outlines above warnings: dashed violet, never filled enough
     // to hide what is underneath. Labels carry the watch probability.
@@ -3879,22 +3926,36 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
             }
         }
     }
-    // Third context row: HMS fire + smoke counts. Own row so the ERO/NHC row
-    // never overflows when every layer is on at once.
-    if (hmsVisible_) {
-        const bool active = !hmsPlumes_.isEmpty() || !hmsFires_.isEmpty();
+    // Third context row: HMS fire/smoke plus DAT surveys, packed left so
+    // the row never overflows when every layer is on at once.
+    if (hmsVisible_ || datVisible_) {
+        const bool active =
+            (hmsVisible_ && (!hmsPlumes_.isEmpty() || !hmsFires_.isEmpty())) ||
+            (datVisible_ && !datPaths_.isEmpty());
         const QRectF smokePanel(12, 206, 258, 20);
         painter.setPen(QPen(QColor(205, 216, 222, active ? 100 : 60), 1));
         painter.setBrush(QColor(8, 15, 19, active ? 205 : 150));
         painter.drawRoundedRect(smokePanel, 4, 4);
         painter.setFont(hudFont(7, QFont::DemiBold));
-        painter.setPen(active ? QColor(180, 180, 180) : QColor(148, 163, 184));
-        painter.drawText(
-            QRectF(20, 208, 242, 16), Qt::AlignLeft | Qt::AlignVCenter,
-            active ? QStringLiteral("FIRE %1 · SMOKE %2")
-                         .arg(static_cast<int>(hmsFires_.size()))
-                         .arg(static_cast<int>(hmsPlumes_.size()))
-                   : QStringLiteral("Fire/smoke: none"));
+        int fx = 20;
+        if (hmsVisible_) {
+            const bool hmsActive = !hmsPlumes_.isEmpty() || !hmsFires_.isEmpty();
+            painter.setPen(hmsActive ? QColor(180, 180, 180) : QColor(148, 163, 184));
+            painter.drawText(
+                QRectF(fx, 208, 130, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                hmsActive ? QStringLiteral("FIRE %1 · SMOKE %2")
+                                .arg(static_cast<int>(hmsFires_.size()))
+                                .arg(static_cast<int>(hmsPlumes_.size()))
+                          : QStringLiteral("Fire/smoke: none"));
+            fx += 125;
+        }
+        if (datVisible_) {
+            painter.setPen(!datPaths_.isEmpty() ? QColor(192, 132, 252) : QColor(148, 163, 184));
+            painter.drawText(QRectF(fx, 208, 258 - (fx - 12), 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             !datPaths_.isEmpty()
+                                 ? QStringLiteral("DAT %1").arg(static_cast<int>(datPaths_.size()))
+                                 : QStringLiteral("DAT: none"));
+        }
     }
 
     // North arrow: always north-up in Web-Mercator, but chasers in a moving
@@ -4809,6 +4870,46 @@ RadarMapCanvas::OverlayHit RadarMapCanvas::overlayAt(const QPointF& point) const
                     PinnedInfoKind::HmsSmoke, std::nullopt};
         }
     }
+    if (datVisible_) {
+        // Survey lines win over polygons (a path inside a watch polygon is
+        // the more specific hit) but lose to live warnings above.
+        const DatPath* best = nullptr;
+        double bestDistance = 10.0;
+        for (const auto& path : datPaths_) {
+            if (path.line.size() < 2) continue;
+            QPolygonF line;
+            for (const auto& lonLat : path.line) line.push_back(screenPoint(lonLat.y(), lonLat.x()));
+            for (int i = 1; i < line.size(); ++i) {
+                const QLineF segment(line.at(i - 1), line.at(i));
+                QPointF nearest;
+                // Project the cursor onto the segment for a true distance.
+                const QPointF direction = segment.p2() - segment.p1();
+                const double lengthSquared =
+                    QPointF::dotProduct(direction, direction);
+                double t = 0.0;
+                if (lengthSquared > 0.0) {
+                    t = QPointF::dotProduct(point - segment.p1(), direction) / lengthSquared;
+                    t = std::clamp(t, 0.0, 1.0);
+                }
+                nearest = segment.p1() + direction * t;
+                const double distance = QLineF(nearest, point).length();
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = &path;
+                }
+            }
+        }
+        if (best) {
+            const auto when = best->stormDate.isValid()
+                                  ? best->stormDate.toString(QStringLiteral("MMM d yyyy 'UTC'"))
+                                  : QStringLiteral("date unknown");
+            const auto rating =
+                best->efScale.isEmpty() ? QStringLiteral("unrated") : best->efScale.toUpper();
+            return {QStringLiteral("Tornado survey (%1)\nSurveyed: %2\nNWS Damage Assessment Toolkit, preliminary")
+                        .arg(rating, when),
+                    PinnedInfoKind::DatSurvey, std::nullopt};
+        }
+    }
     return {};
 }
 
@@ -5379,6 +5480,7 @@ void RadarMapCanvas::paintEvent(QPaintEvent*) {
     paintNhcOverlays(painter);
     paintHmsSmoke(painter);
     paintHmsFires(painter);
+    paintDatPaths(painter);
     paintMetars(painter);
     paintPlacefiles(painter);
     paintLightningOverlay(painter);

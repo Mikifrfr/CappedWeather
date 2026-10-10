@@ -43,6 +43,7 @@ Release assets are built from tags (`v*`) by `.github/workflows/release.yml` wit
 - SPC Day 1 + 2 fire-weather outlooks (DryT + WindRH) and NHC active tropical cyclones (forecast cone plus track line; hurricane watches/warnings arrive through NWS alerts).
 - WPC Day 1-3 excessive rainfall outlooks in official colors (Marginal green, Slight yellow, Moderate red, High pink).
 - NOAA HMS daily fire detections plus smoke plumes in official density colors, with today-then-yesterday fallback.
+- NWS DAT tornado survey paths (last 90 days) in EF severity colors.
 - GOES GLM lightning-jump cells (2σ LJA) fused with reflectivity objects ([engine](docs/lightning-jump-engine.md)); honestly disabled without netCDF, live out of the box in releases.
 - Meteoalarm warnings for European sites; 130+ bucket-active OPERA radars as first-class sessions (CC BY 4.0 EUMETNET, [sources](docs/europe-sources.md)).
 - METAR surface stations near the selected radar (temp/dew markers colored by flight category, wind and age on click).
