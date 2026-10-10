@@ -405,6 +405,10 @@ MainWindow::MainWindow(QWidget* parent)
             if (row >= 0) radarSelected(model_->index(row, 0));
         });
         connect(panel, &RadarMapCanvas::activated, this, [this, panel] { activateMap(panel); });
+        connect(panel, &RadarMapCanvas::circulationsUpdated, this,
+                [this](const std::vector<CirculationDetection>& detections, const QString& radarId) {
+                    if (alertCenter_) alertCenter_->ingestCirculations(detections, radarId);
+                });
         connect(panel, &RadarMapCanvas::viewChanged, this,
                 [this, panel](const QPointF&, int) { synchronizeMapView(panel); });
         // Push the active panel's view to its undo stack. We only record when
@@ -3139,6 +3143,9 @@ void MainWindow::restoreSettings() {
         alertConfig.minSeverity = std::clamp(
             settings.value(QStringLiteral("alerts/minSeverity"), alertConfig.minSeverity).toInt(),
             0, 3);
+        alertConfig.circulationAlertsEnabled =
+            settings.value(QStringLiteral("alerts/circulations"), alertConfig.circulationAlertsEnabled)
+                .toBool();
         alertConfig.maxWarningAgeMinutes = std::clamp(
             settings.value(QStringLiteral("alerts/maxWarningAgeMinutes"),
                            alertConfig.maxWarningAgeMinutes)
@@ -3347,6 +3354,7 @@ void MainWindow::saveSettings() const {
         settings.setValue(QStringLiteral("alerts/lightningSigma"), alertConfig.lightningSigmaThreshold);
         settings.setValue(QStringLiteral("alerts/repeatSuppressionMinutes"), alertConfig.repeatSuppressionMinutes);
         settings.setValue(QStringLiteral("alerts/minSeverity"), alertConfig.minSeverity);
+        settings.setValue(QStringLiteral("alerts/circulations"), alertConfig.circulationAlertsEnabled);
         settings.setValue(QStringLiteral("alerts/maxWarningAgeMinutes"), alertConfig.maxWarningAgeMinutes);
         settings.setValue(QStringLiteral("alerts/customSoundPath"), alertConfig.customSoundPath);
     }
@@ -3704,6 +3712,10 @@ void MainWindow::showSettingsDialog() {
     alertsSoundPath->setPlaceholderText(QStringLiteral("(uses system beep when empty)"));
     auto* alertsBrowseButton = new QToolButton(&dialog);
     alertsBrowseButton->setText(QStringLiteral("Browse…"));
+    auto* alertsCirculations = new QCheckBox(QStringLiteral("TVS/mesocyclone marker alerts (guidance)"), &dialog);
+    alertsCirculations->setToolTip(QStringLiteral(
+        "Opt-in: notify for persisted rotation markers (TVS at Severe+, meso at Moderate+). "
+        "Always labeled guidance, never a warning. Off by default."));
     auto* alertsTestButton = new QPushButton(QStringLiteral("Test alert"), &dialog);
 
     // Populate from AlertCenter's current config.
@@ -3715,6 +3727,7 @@ void MainWindow::showSettingsDialog() {
         alertsSigma->setValue(cfg.lightningSigmaThreshold);
         alertsSuppression->setValue(cfg.repeatSuppressionMinutes);
         alertsSoundPath->setText(cfg.customSoundPath);
+        alertsCirculations->setChecked(cfg.circulationAlertsEnabled);
     }
 
     auto* alertsSoundRow = new QHBoxLayout();
@@ -3724,6 +3737,7 @@ void MainWindow::showSettingsDialog() {
     alertsSoundContainer->setLayout(alertsSoundRow);
 
     alertsLayout->addRow(alertsEnabled);
+    alertsLayout->addRow(alertsCirculations);
     alertsLayout->addRow(alertsEventFilter);
     alertsLayout->addRow(QStringLiteral("Event filter list"), alertsEventList);
     alertsLayout->addRow(QStringLiteral("Lightning jump threshold"), alertsSigma);
@@ -3828,6 +3842,7 @@ void MainWindow::showSettingsDialog() {
         pushProximityFilterToCanvases();
         AlertConfig cfg = alertCenter_->config();
         cfg.enabled = alertsEnabled->isChecked();
+        cfg.circulationAlertsEnabled = alertsCirculations->isChecked();
         cfg.eventFilterEnabled = alertsEventFilter->isChecked();
         cfg.lightningSigmaThreshold = alertsSigma->value();
         cfg.repeatSuppressionMinutes = alertsSuppression->value();

@@ -2,6 +2,7 @@
 
 #include "core/radar_geometry.hpp"
 #include "app/weather_overlay_source.hpp"
+#include "core/circulation_detector.hpp"
 #include "core/lightning_overlay.hpp"
 
 #include <QDateTime>
@@ -38,6 +39,11 @@ struct AlertConfig {
     QStringList eventFilter;
     // Trigger lightning alerts on cells whose sigmaLevel >= this threshold.
     double lightningSigmaThreshold = 2.0;
+    // Opt-in TVS/mesocyclone marker alerts. Off by default: rotation markers
+    // are guidance (algorithm output, not NWS warnings), so they must never
+    // page the operator unless explicitly asked. When on, TVS notifies at
+    // Severe+ and mesocyclones at Moderate+, honoring the severity knob.
+    bool circulationAlertsEnabled = false;
     // Minimum NWS CAP severity to alert on. The NWS severity taxonomy is
     // {Extreme, Severe, Moderate, Minor, Unknown}; the default (Severe) means
     // Tornado/Severe Thunderstorm warnings and up. Anything tagged Moderate
@@ -61,7 +67,7 @@ struct AlertConfig {
 
 // One row in the alert history (used by the Settings dialog "Test" + future log).
 struct AlertRecord {
-    QString kind;        // "warning" or "lightning-jump"
+    QString kind;        // "warning", "lightning-jump", or "rotation"
     QString title;
     QString detail;
     QDateTime at;
@@ -86,6 +92,12 @@ public:
     // call from the main thread.
     void ingestWarnings(const QVector<WeatherWarning>& warnings);
     void ingestLightningCells(const std::vector<LightningCellSnapshot>& cells);
+    // TVS/mesocyclone markers from the canvases (persisted 2+-volume tracks
+    // only: callers pass what they draw). Opt-in via circulationAlertsEnabled;
+    // every record is labeled guidance. radarId scopes the dedup key so two
+    // panels on different radars never suppress each other.
+    void ingestCirculations(const std::vector<CirculationDetection>& detections,
+                            const QString& radarId);
 
     // Resets the dedup memory (e.g. when the user explicitly clears the log).
     void clearMemory();
@@ -136,12 +148,14 @@ private:
     // Deduplication sets: warningId (NWS @id) and lightning cell key.
     QHash<QString, QDateTime> seenWarnings_;
     QHash<QString, QDateTime> seenLightningCells_;
+    QHash<QString, QDateTime> seenCirculations_;
     // First-sync priming: the first delivery after construction (or after
     // clearMemory) only seeds the dedupe sets without notifying, so alerts
     // that were already active before the operator started watching do not
     // all fire at once. Only genuinely new arrivals notify afterwards.
     bool warningsPrimed_ = false;
     bool cellsPrimed_ = false;
+    bool circulationsPrimed_ = false;
     // Bounded ring of recent alerts.
     QVector<AlertRecord> recent_;
     RadarCoord selectedRadar_;

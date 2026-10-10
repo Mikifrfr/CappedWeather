@@ -415,6 +415,108 @@ static bool testAlertCenterPrimingAndAge(QString* error) {
     return true;
 }
 
+namespace {
+CirculationDetection smokeCirculation(const CirculationKind kind, const double lat,
+                                      const double lon) {
+    CirculationDetection detection;
+    detection.kind = kind;
+    detection.latitudeDeg = lat;
+    detection.longitudeDeg = lon;
+    detection.maxDeltaVelocityMetersPerSecond =
+        kind == CirculationKind::TornadoVortex ? 35.0 : 15.0;
+    detection.depthMeters = 3000.0;
+    detection.tiltCount = 3;
+    return detection;
+}
+}  // namespace
+
+static bool testAlertCenterCirculations(QString* error) {
+    // Opt-in: disabled by default, markers never notify unless asked.
+    {
+        AlertCenter center;
+        auto config = smokeQuietConfig();
+        config.minSeverity = 0;
+        center.setConfig(config);
+        if (center.config().circulationAlertsEnabled) {
+            *error = QStringLiteral("circulation alerts must default off");
+            return false;
+        }
+        center.ingestCirculations(
+            {smokeCirculation(CirculationKind::TornadoVortex, 35.5, -97.5)}, QStringLiteral("KTLX"));
+        center.ingestCirculations(
+            {smokeCirculation(CirculationKind::TornadoVortex, 35.5, -97.5)}, QStringLiteral("KTLX"));
+        if (!center.recent().isEmpty()) {
+            *error = QStringLiteral("disabled sink must stay silent, got %1")
+                          .arg(center.recent().size());
+            return false;
+        }
+    }
+    AlertCenter center;
+    auto config = smokeQuietConfig();
+    config.minSeverity = 0;
+    config.repeatSuppressionMinutes = 30;
+    config.circulationAlertsEnabled = true;
+    center.setConfig(config);
+    const std::vector<CirculationDetection> first = {
+        smokeCirculation(CirculationKind::TornadoVortex, 35.5, -97.5),
+        smokeCirculation(CirculationKind::Mesocyclone, 35.7, -97.2)};
+    center.ingestCirculations(first, QStringLiteral("KTLX"));
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("circulations: first sync should prime silently, got %1")
+                      .arg(center.recent().size());
+        return false;
+    }
+    // Same markers repeat: suppression holds.
+    center.ingestCirculations(first, QStringLiteral("KTLX"));
+    if (!center.recent().isEmpty()) {
+        *error = QStringLiteral("circulations: repeat markers must stay silent, got %1")
+                      .arg(center.recent().size());
+        return false;
+    }
+    // A new TVS notifies, labeled guidance with the radar id.
+    center.ingestCirculations({smokeCirculation(CirculationKind::TornadoVortex, 35.9, -97.9)},
+                              QStringLiteral("KTLX"));
+    if (center.recent().size() != 1 || center.recent().front().kind != QStringLiteral("rotation") ||
+        !center.recent().front().title.contains(QStringLiteral("guidance")) ||
+        !center.recent().front().title.contains(QStringLiteral("KTLX")) ||
+        !center.recent().front().detail.contains(QStringLiteral("not a warning"))) {
+        *error = QStringLiteral("circulations: new TVS should alert once as guidance");
+        return false;
+    }
+    // Same marker on another radar is a different key, not suppression.
+    center.ingestCirculations({smokeCirculation(CirculationKind::TornadoVortex, 35.9, -97.9)},
+                              QStringLiteral("KINX"));
+    if (center.recent().size() != 2) {
+        *error = QStringLiteral("circulations: radar id should scope dedup, got %1")
+                      .arg(center.recent().size());
+        return false;
+    }
+    // Severity knob: Severe+ drops the meso but keeps the TVS.
+    {
+        AlertCenter severe;
+        auto severeConfig = smokeQuietConfig();
+        severeConfig.minSeverity = 2;
+        severeConfig.circulationAlertsEnabled = true;
+        severe.setConfig(severeConfig);
+        severe.ingestCirculations(first, QStringLiteral("KTLX"));  // prime
+        severe.ingestCirculations({smokeCirculation(CirculationKind::Mesocyclone, 35.8, -97.0)},
+                                  QStringLiteral("KTLX"));
+        if (!severe.recent().isEmpty()) {
+            *error = QStringLiteral("circulations: meso must not notify at Severe+, got %1")
+                          .arg(severe.recent().size());
+            return false;
+        }
+        severe.ingestCirculations({smokeCirculation(CirculationKind::TornadoVortex, 35.8, -97.0)},
+                                  QStringLiteral("KTLX"));
+        if (severe.recent().size() != 1) {
+            *error = QStringLiteral("circulations: TVS must notify at Severe+, got %1")
+                          .arg(severe.recent().size());
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool testBasemapTileUrls(QString* error) {
     // CARTO is the default: single layer, standard z/x/y order, key appended.
     const auto dark = basemapTileUrls(5, 7, 12, BasemapProvider::CartoDark,
@@ -2855,6 +2957,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testAlertCenterPrimingAndAge(&failure)) {
             std::cerr << "AlertCenter priming/age gate failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testAlertCenterCirculations(&failure)) {
+            std::cerr << "AlertCenter circulations failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testBasemapTileUrls(&failure)) {

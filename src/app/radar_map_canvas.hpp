@@ -366,6 +366,11 @@ signals:
     // panels for the linked readout. probeHidden clears those readouts.
     void probeMoved(const QPointF& lonLat);
     void probeHidden();
+    // Emitted on the GUI thread whenever persisted TVS/meso tracks refresh
+    // (2+-volume tracks only: what the map draws). MainWindow feeds the
+    // opt-in AlertCenter sink; radarId scopes dedup across panels.
+    void circulationsUpdated(const std::vector<CirculationDetection>& detections,
+                             const QString& radarId);
 
 protected:
     bool event(QEvent* event) override;

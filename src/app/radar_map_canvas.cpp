@@ -1121,6 +1121,7 @@ void RadarMapCanvas::persistCirculations(std::vector<CirculationDetection> fresh
     std::sort(circulations_.begin(), circulations_.end(), [](const auto& a, const auto& b) {
         return a.maxDeltaVelocityMetersPerSecond > b.maxDeltaVelocityMetersPerSecond;
     });
+    emit circulationsUpdated(circulations_, selectedRadar_);
 }
 
 void RadarMapCanvas::persistTds(std::vector<TdsDetection> fresh) {

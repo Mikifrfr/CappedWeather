@@ -78,11 +78,13 @@ void AlertCenter::setConfig(AlertConfig config) {
 void AlertCenter::clearMemory() {
     seenWarnings_.clear();
     seenLightningCells_.clear();
+    seenCirculations_.clear();
     recent_.clear();
     // Next delivery re-primes silently instead of bursting for everything
     // that is still active (e.g. right after the user clears the log).
     warningsPrimed_ = false;
     cellsPrimed_ = false;
+    circulationsPrimed_ = false;
 }
 
 std::optional<GeographicCoordinate> AlertCenter::filterAnchor() const {
@@ -214,6 +216,56 @@ void AlertCenter::ingestLightningCells(const std::vector<LightningCellSnapshot>&
     }
     cellsPrimed_ = true;
     pruneSeenEntries(seenLightningCells_);
+}
+
+void AlertCenter::ingestCirculations(const std::vector<CirculationDetection>& detections,
+                                     const QString& radarId) {
+    if (!config_.enabled || !config_.circulationAlertsEnabled) return;
+    const auto now = QDateTime::currentDateTimeUtc();
+    const bool priming = !circulationsPrimed_;
+    for (const auto& detection : detections) {
+        const bool isTvs = detection.kind == CirculationKind::TornadoVortex;
+        // Severity mapping, stated in the config docs: TVS notifies at
+        // Severe and up, mesocyclones at Moderate and up.
+        if (isTvs && config_.minSeverity > 2) continue;
+        if (!isTvs && config_.minSeverity > 1) continue;
+        if (!std::isfinite(detection.latitudeDeg) || !std::isfinite(detection.longitudeDeg))
+            continue;
+        if (config_.geographicFilterEnabled) {
+            const auto anchor = filterAnchor();
+            if (!anchor.has_value()) continue;
+            if (haversineMeters(anchor->latitude, anchor->longitude, detection.latitudeDeg,
+                                detection.longitudeDeg) >
+                config_.geographicFilterRadiusKm * 1000.0) {
+                continue;
+            }
+        }
+        const auto key = QStringLiteral("circ|%1|%2|%3|%4")
+                             .arg(radarId, isTvs ? QStringLiteral("TVS") : QStringLiteral("MESO"))
+                             .arg(detection.latitudeDeg, 0, 'f', 2)
+                             .arg(detection.longitudeDeg, 0, 'f', 2);
+        if (seenCirculations_.contains(key)) {
+            const auto last = seenCirculations_.value(key);
+            if (last.msecsTo(now) < config_.repeatSuppressionMinutes * 60 * 1000) continue;
+        }
+        seenCirculations_.insert(key, now);
+        if (priming) continue;  // first sync only seeds the dedupe set
+
+        const auto label = isTvs ? QStringLiteral("TVS") : QStringLiteral("Mesocyclone");
+        const auto title = QStringLiteral("%1 marker (guidance) — %2").arg(
+            label, radarId.isEmpty() ? QStringLiteral("unknown radar") : radarId);
+        const auto detail =
+            QStringLiteral("ΔV %1 m/s, depth %2 km, %3 tilts at (%4°, %5°). "
+                           "Algorithm guidance, not a warning.")
+                .arg(detection.maxDeltaVelocityMetersPerSecond, 0, 'f', 0)
+                .arg(detection.depthMeters / 1000.0, 0, 'f', 1)
+                .arg(detection.tiltCount)
+                .arg(detection.latitudeDeg, 0, 'f', 3)
+                .arg(detection.longitudeDeg, 0, 'f', 3);
+        raiseAlert(QStringLiteral("rotation"), title, detail);
+    }
+    circulationsPrimed_ = true;
+    pruneSeenEntries(seenCirculations_);
 }
 
 void AlertCenter::triggerTestAlert() {
