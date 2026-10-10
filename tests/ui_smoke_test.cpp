@@ -13,6 +13,7 @@
 #include "app/goes_source.hpp"
 #include "app/mosaic_source.hpp"
 #include "app/palette_import.hpp"
+#include "app/update_check.hpp"
 #include "app/gif_writer.hpp"
 #include "app/placefile.hpp"
 #include "app/placefile_source.hpp"
@@ -2714,6 +2715,76 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                 return parsed.has_value() || !projError.contains(QStringLiteral("projected"));
             }()) {
             std::cerr << "Malformed shapefile should fail closed\n";
+            return 1;
+        }
+    }
+    // Update discovery: version compare plus release-metadata parse in
+    // the live GitHub shape (tag, prerelease flag, page URL, timestamp).
+    {
+        const auto v = [](const char* text) { return parseAppVersion(QString::fromLatin1(text)); };
+        if (!v("0.7.0").valid || v("0.7.0").major != 0 || v("0.7.0").minor != 7 ||
+            v("0.7.0").patch != 0 || !v("v0.8.0").valid || !v("1.2").valid ||
+            v("1.2").patch != 0 || v("").valid || v("v").valid || v("0.7.0.1").valid ||
+            v("1.x").valid || v("-1.2").valid || v("  ").valid) {
+            std::cerr << "Update version parse is wrong\n";
+            return 1;
+        }
+        if (compareVersions(v("0.7.0"), v("0.8.0")) != -1 ||
+            compareVersions(v("0.8.0"), v("0.7.0")) != 1 ||
+            compareVersions(v("0.7.0"), v("v0.7.0")) != 0 ||
+            compareVersions(v("1.10.0"), v("1.9.9")) != 1) {
+            std::cerr << "Update version compare is wrong\n";
+            return 1;
+        }
+        if (currentAppVersion().isEmpty()) {
+            std::cerr << "Current app version is empty\n";
+            return 1;
+        }
+        const QByteArray liveShaped =
+            R"JSON({"tag_name":"v0.8.0","name":"0.8.0","prerelease":false,"draft":false,
+                    "published_at":"2026-10-01T12:00:00Z",
+                    "html_url":"https://github.com/Mikifrfr/CappedWeather/releases/tag/v0.8.0"})JSON";
+        QString releaseError;
+        const auto release = parseUpdateRelease(liveShaped, &releaseError);
+        if (!release.has_value() || release->tag != QStringLiteral("v0.8.0") ||
+            release->version.minor != 8 || release->prerelease ||
+            release->pageUrl.toString() !=
+                QStringLiteral("https://github.com/Mikifrfr/CappedWeather/releases/tag/v0.8.0") ||
+            projectReleasesUrl().toString() !=
+                QStringLiteral("https://github.com/Mikifrfr/CappedWeather/releases")) {
+            std::cerr << "Update release parse failed: " << releaseError.toStdString() << '\n';
+            return 1;
+        }
+        // Unverifiable page URLs drop the link, never the version; garbage
+        // fails closed with an error.
+        const QByteArray evilShaped =
+            R"JSON({"tag_name":"v0.8.0","html_url":"https://evil.example/r"})JSON";
+        const auto evil = parseUpdateRelease(evilShaped, &releaseError);
+        if (!evil.has_value() || evil->pageUrl.isValid()) {
+            std::cerr << "Update release should drop hostile page URLs\n";
+            return 1;
+        }
+        if (parseUpdateRelease(QByteArray("not json"), &releaseError).has_value() ||
+            parseUpdateRelease(QByteArray(R"JSON({"name":"x"})JSON"), &releaseError).has_value() ||
+            parseUpdateRelease(QByteArray(R"JSON({"tag_name":"soon"})JSON"), &releaseError)
+                .has_value() ||
+            releaseError.isEmpty()) {
+            std::cerr << "Malformed release metadata should fail closed\n";
+            return 1;
+        }
+    }
+    // Update discovery action is wired into the menus (the result dialog
+    // itself stays out of headless runs: modal exec would hang the suite).
+    {
+        bool foundUpdate = false;
+        for (auto* action : window.findChildren<QAction*>()) {
+            if (action->text() == QStringLiteral("Check for updates…")) {
+                foundUpdate = true;
+                break;
+            }
+        }
+        if (!foundUpdate) {
+            std::cerr << "Update check action is missing from the menus\n";
             return 1;
         }
     }

@@ -64,6 +64,7 @@ class DatPathSource;
 class HrrrSource;
 class GoesSource;
 class MosaicSource;
+class UpdateChecker;
 class MetarSource;
 class PlacefileSource;
 class ArchiveSource;
@@ -133,6 +134,9 @@ private slots:
     // RAOB sounding pop-out: hodograph plus sounding SRH ground truth and
     // freezing level for the current Bunkers motion. Real slot like above.
     void showSoundingDialog();
+    // Async update discovery: Help action plus completion dialog. Real slot
+    // so tests and the command palette share it with the menu.
+    void checkForUpdates();
 
 private:
     void buildUi();
@@ -421,6 +425,8 @@ private:
     HrrrSource* hrrrSource_ = nullptr;
     GoesSource* goesSource_ = nullptr;
     MosaicSource* mosaicSource_ = nullptr;
+    UpdateChecker* updateChecker_ = nullptr;
+    bool updateCheckPending_ = false;
     MetarSource* metarSource_ = nullptr;
     PlacefileSource* placefileSource_ = nullptr;
     ArchiveSource* archiveSource_ = nullptr;

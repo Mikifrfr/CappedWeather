@@ -18,6 +18,7 @@
 #include "app/goes_source.hpp"
 #include "app/mosaic_source.hpp"
 #include "app/palette_import.hpp"
+#include "app/update_check.hpp"
 #include "app/sounding_source.hpp"
 #include "app/hodograph_widget.hpp"
 #include "app/metar_source.hpp"
@@ -49,6 +50,7 @@
 #include <QDate>
 #include <QDateTime>
 #include <QDateTimeEdit>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -399,6 +401,7 @@ MainWindow::MainWindow(QWidget* parent)
       hrrrSource_(new HrrrSource(this)),
       goesSource_(new GoesSource(this)),
       mosaicSource_(new MosaicSource(this)),
+      updateChecker_(new UpdateChecker(this)),
       metarSource_(new MetarSource(this)),
       placefileSource_(new PlacefileSource(this)),
       archiveSource_(new ArchiveSource(this)),
@@ -4294,6 +4297,8 @@ void MainWindow::setupMenus() {
     });
     auto* aboutAction = helpMenu->addAction(QStringLiteral("About CappedWeather…"));
     connect(aboutAction, &QAction::triggered, this, &MainWindow::showAboutDialog);
+    auto* updateAction = helpMenu->addAction(QStringLiteral("Check for updates…"));
+    connect(updateAction, &QAction::triggered, this, &MainWindow::checkForUpdates);
 }
 
 void MainWindow::showCommandPalette() {
@@ -4388,6 +4393,62 @@ void MainWindow::showAboutDialog() {
                        "Source: https://github.com/Mikifrfr/CappedWeather\n"
                        "License: see LICENSE file.")
             .arg(QStringLiteral(CAPPEDWEATHER_VERSION)));
+}
+
+void MainWindow::checkForUpdates() {
+    // Discovery only: one async metadata fetch, then a plain dialog. No
+    // downloading, no installs. Concurrent triggers while pending are
+    // ignored so double-clicks never stack queries.
+    if (updateCheckPending_ || !updateChecker_) return;
+    updateCheckPending_ = true;
+    statusBar()->showMessage(QStringLiteral("Checking for updates…"), 10000);
+    auto connection = std::make_shared<QMetaObject::Connection>();
+    *connection = connect(updateChecker_, &UpdateChecker::finished, this,
+                          [this, connection](const UpdateResult& result) {
+                              QObject::disconnect(*connection);
+                              updateCheckPending_ = false;
+                              QMessageBox dialog(this);
+                              dialog.setWindowTitle(QStringLiteral("Check for updates"));
+                              const bool canOpen = result.pageUrl.isValid();
+                              const QString openLabel = QStringLiteral("Open releases page");
+                              switch (result.state) {
+                                  case UpdateState::Newer:
+                                  case UpdateState::UnknownCurrent:
+                                  case UpdateState::NoReleaseInfo: {
+                                      dialog.setText(result.detail);
+                                      if (canOpen) {
+                                          auto* open = dialog.addButton(
+                                              openLabel, QMessageBox::AcceptRole);
+                                          Q_UNUSED(open);
+                                      }
+                                      dialog.addButton(QMessageBox::Close);
+                                      dialog.exec();
+                                      if (dialog.clickedButton() &&
+                                          dialog.clickedButton()->text() == openLabel &&
+                                          result.pageUrl.isValid()) {
+                                          QDesktopServices::openUrl(result.pageUrl);
+                                      }
+                                      break;
+                                  }
+                                  case UpdateState::Current:
+                                      dialog.setText(result.detail);
+                                      dialog.addButton(QMessageBox::Close);
+                                      dialog.exec();
+                                      break;
+                                  case UpdateState::NetworkError:
+                                  case UpdateState::Malformed: {
+                                      dialog.setText(result.detail +
+                                                     QStringLiteral("\nCheck again shortly."));
+                                      auto* retry = dialog.addButton(QStringLiteral("Retry"),
+                                                                     QMessageBox::AcceptRole);
+                                      dialog.addButton(QMessageBox::Close);
+                                      dialog.exec();
+                                      if (dialog.clickedButton() == retry) checkForUpdates();
+                                      break;
+                                  }
+                              }
+                          });
+    updateChecker_->check();
 }
 
 void MainWindow::activateMap(RadarMapCanvas* map) {

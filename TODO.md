@@ -16,7 +16,7 @@ Short active list. Done work stays in git history and release notes, not in this
 
 ### Platform and UX
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
-- [ ] Flatpak plus Windows auto-update check. Artifacts already ship, discovery and updates are the gap.
+- [ ] Flatpak. Artifacts already ship, discovery is the gap. (Windows update discovery is done: Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only.)
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
 
 ### Research (explicitly not next)
@@ -40,6 +40,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Windows update discovery (Help action checks public stable-release metadata with explicit current/newer/no-info/error states, host-validated releases link, no downloads; hermetic version/parser tests).
 - ESRI shapefile placefiles (binary .shp polygon/polyline rings as Polygon/Line elements via magic sniff in both load paths, unprojected lon/lat only with an explicit projected-data error, sibling .dbf names as hover text, same safety envelope as text placefiles, hermetic parser plus source tests on Census-county fixtures).
 - GRLevelX color-table import (Product/Units/Step/Decimals/Scale headers plus Color/Color4/SolidColor rules into custom step stops, sorted, fail-closed with line numbers, live RTWX_REF shape verified, hermetic parser tests).
 - IEM NEXRAD national mosaic (5-minute N0Q archive PNG plus world file, exact filename timestamps, scaled decode to paint budget, native colors under echo with scan time, layer with badge and persisted toggle, hermetic parser/decode/paint tests on a committed fixture).
