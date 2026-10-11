@@ -1,11 +1,12 @@
-// GOES paint bench: cold/warm repaint cost of one real frame through the
-// real Qt renderer (offscreen). Not a test: prints p50/p95 grab timing,
+// GOES/HRRR paint bench: cold/warm repaint cost of one real frame through
+// the real Qt renderer (offscreen). Not a test: prints p50/p95 grab timing,
 // painted-cell counts (via CAPPEDWEATHER_PAINT_PROFILE), frame size and a
 // screenshot checksum for before/after correctness comparisons.
 //
-// Usage: goes_paint_bench <goes_rad.nc> [grabs]   (default grabs: 15)
+// Usage: goes_paint_bench <rad.nc|refc.nc> [grabs]   (default grabs: 15)
 #include "app/radar_map_canvas.hpp"
 #include "core/goes_frame.hpp"
+#include "core/hrrr_frame.hpp"
 
 #include <QApplication>
 #include <QElapsedTimer>
@@ -54,14 +55,23 @@ int main(int argc, char** argv) {
         std::cerr << "netCDF support unavailable\n";
         return 3;
     }
-    const auto frame = readGoesRad(path);
-    if (!frame.has_value()) {
+    // Frame kind follows the file: GOES Rad or HRRR REFC. HRRR reuses the
+    // same views so raster costs compare directly.
+    const auto goesFrame = readGoesRad(path);
+    const auto hrrrFrame = !goesFrame.has_value() ? readHrrrRefc(path)
+                                                  : std::optional<HrrrFrame>{};
+    if (!goesFrame.has_value() && !hrrrFrame.has_value()) {
         std::cerr << "unreadable frame: " << path << '\n';
         return 4;
     }
-    std::cout << "BENCH: frame nx=" << frame->nx << " ny=" << frame->ny
-              << " cells=" << (frame->nx * frame->ny)
-              << " channel=" << frame->channel << '\n';
+    if (goesFrame.has_value()) {
+        std::cout << "BENCH: frame nx=" << goesFrame->nx << " ny=" << goesFrame->ny
+                  << " cells=" << (goesFrame->nx * goesFrame->ny)
+                  << " channel=" << goesFrame->channel << '\n';
+    } else {
+        std::cout << "BENCH: frame nx=" << hrrrFrame->nx << " ny=" << hrrrFrame->ny
+                  << " cells=" << (hrrrFrame->nx * hrrrFrame->ny) << " hrrr\n";
+    }
 
     const View views[] = {
         {"national", -98.0, 38.0, 4},
@@ -75,8 +85,13 @@ int main(int argc, char** argv) {
         canvas.resize(1280, 800);
         canvas.show();
         application.processEvents();
-        canvas.setGoesVisible(true);
-        canvas.setGoesFrame(frame);
+        if (goesFrame.has_value()) {
+            canvas.setGoesVisible(true);
+            canvas.setGoesFrame(goesFrame);
+        } else {
+            canvas.setHrrrVisible(true);
+            canvas.setHrrrFrame(hrrrFrame);
+        }
         canvas.setView(QPointF(view.lon, view.lat), view.zoom);
         application.processEvents();
 
@@ -118,8 +133,10 @@ int main(int argc, char** argv) {
                   << " warm_p95_ms=" << percentile(warm, 0.95)
                   << " pan_ms=" << panMs << " checksum=" << coldSum << '\n';
         if (!saveDir.isEmpty()) {
-            cold.save(saveDir + QStringLiteral("/goes_") +
-                      QString::fromLatin1(view.name) + QStringLiteral(".png"));
+            const QString prefix = goesFrame.has_value() ? QStringLiteral("/goes_")
+                                                         : QStringLiteral("/hrrr_");
+            cold.save(saveDir + prefix + QString::fromLatin1(view.name) +
+                      QStringLiteral(".png"));
         }
     }
     std::cout << "BENCH: done\n";
