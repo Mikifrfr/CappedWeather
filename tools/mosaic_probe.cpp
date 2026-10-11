@@ -258,6 +258,7 @@ int main(int argc, char** argv) {
     std::string pathA, pathB, idA, idB;
     double targetElev = 0.5, boxHalfDeg = 2.0, stepDeg = 0.02, threshDbz = 10.0;
     double cappiMslMeters = std::numeric_limits<double>::quiet_NaN();
+    double advectKm = std::numeric_limits<double>::quiet_NaN();
     double centerLat = std::numeric_limits<double>::quiet_NaN();
     double centerLon = std::numeric_limits<double>::quiet_NaN();
     for (int i = 1; i < argc;) {
@@ -291,12 +292,13 @@ int main(int argc, char** argv) {
             continue;
         }
         if (flag == "--elev" || flag == "--box" || flag == "--step" || flag == "--thresh" ||
-            flag == "--clat" || flag == "--clon" || flag == "--cappi") {
+            flag == "--clat" || flag == "--clon" || flag == "--cappi" || flag == "--advect") {
             double* out = flag == "--elev"    ? &targetElev
                           : flag == "--box"   ? &boxHalfDeg
                           : flag == "--step"  ? &stepDeg
                           : flag == "--thresh" ? &threshDbz
                           : flag == "--cappi"  ? &cappiMslMeters
+                          : flag == "--advect" ? &advectKm
                           : flag == "--clat"   ? &centerLat
                                                : &centerLon;
             if (!needDouble(*out)) return EXIT_FAILURE;
@@ -311,11 +313,20 @@ int main(int argc, char** argv) {
                      "usage: mosaic_probe --a VOL --b VOL [--ida ID --idb ID] "
                      "--clat LAT --clon LON [--elev 0.5 --box 2 --step 0.02 --thresh 10]\n"
                      "  --cappi HMSL: sample each radar's tilt closest to HMSL MSL instead of one\n"
-                     "  matched tilt (altitude-matched compositing probe)\n");
+                     "  matched tilt (altitude-matched compositing probe)\n"
+                     "  --advect KM: lag table shifting radar B up to KM km (needs --cappi)\n");
         return EXIT_FAILURE;
     }
     if (std::isfinite(cappiMslMeters) && cappiMslMeters <= 0.0) {
         std::fprintf(stderr, "mosaic_probe: --cappi needs a positive MSL altitude in meters\n");
+        return EXIT_FAILURE;
+    }
+    if (std::isfinite(advectKm) && (advectKm <= 0.0 || advectKm > 10.0)) {
+        std::fprintf(stderr, "mosaic_probe: --advect needs a radius in km (0, 10]\n");
+        return EXIT_FAILURE;
+    }
+    if (std::isfinite(advectKm) && !std::isfinite(cappiMslMeters)) {
+        std::fprintf(stderr, "mosaic_probe: --advect currently rides --cappi sampling\n");
         return EXIT_FAILURE;
     }
 
@@ -345,6 +356,13 @@ int main(int argc, char** argv) {
     // either side; win rate is the share with smaller CAPPI error.
     std::vector<double> pairedBase;
     std::vector<double> pairedCappi;
+    struct PairedCell {
+        double lat = 0.0;
+        double lon = 0.0;
+        double aDbz = 0.0;
+        double bDbz = 0.0;
+    };
+    std::vector<PairedCell> pairedCells;
     // Seam table: disagreement conditioned on beam-height mismatch, so
     // geometry (different altitudes) separates from calibration (bias at
     // matched beams). Bin edges in meters MSL difference.
@@ -384,6 +402,7 @@ int main(int argc, char** argv) {
                     if (ba.hasEcho && bb.hasEcho) {
                         pairedBase.push_back(std::abs(ba.dbz - bb.dbz));
                         pairedCappi.push_back(std::abs(delta));
+                        pairedCells.push_back({lat, lon, sa.dbz, sb.dbz});
                     }
                 }
                 for (auto& bin : seamBins) {
@@ -443,6 +462,45 @@ int main(int argc, char** argv) {
         std::printf("paired same-cell (n=%zu): base rmse %.2f cappi rmse %.2f winrate %.1f%%\n", n,
                     n > 0 ? std::sqrt(baseSq / n) : 0.0, n > 0 ? std::sqrt(cappiSq / n) : 0.0,
                     n > 0 ? 100.0 * wins / n : 0.0);
+        // Advection lag search: resample radar B shifted by (dx,dy) km and
+        // re-score the paired cells. If the residual is time sync, the
+        // minimum sits near storm-motion x volume separation, and its
+        // depth bounds what any sync step can recover. A fixed population
+        // per shift would hide edge losses, so n rides along.
+        if (std::isfinite(advectKm) && !pairedCells.empty()) {
+            const double kmPerDegLat = 111.32;
+            const double kmPerDegLon = 111.32 * std::cos(centerLat * 3.14159265358979323846 / 180.0);
+            double bestRmse = std::numeric_limits<double>::infinity();
+            double bestDx = 0.0, bestDy = 0.0;
+            long long bestN = 0;
+            std::printf("advect lag table: dxE_km dyN_km n rmse\n");
+            for (double dy = -advectKm; dy <= advectKm + 1e-9; dy += 1.0) {
+                for (double dx = -advectKm; dx <= advectKm + 1e-9; dx += 1.0) {
+                    double sumSq = 0.0;
+                    long long count = 0;
+                    for (const auto& cell : pairedCells) {
+                        const auto shifted = sampleCappi(b, cell.lat - dy / kmPerDegLat,
+                                                         cell.lon - dx / kmPerDegLon, threshDbz,
+                                                         cappiMslMeters);
+                        if (!shifted.hasEcho) continue;
+                        const double delta = cell.aDbz - shifted.dbz;
+                        sumSq += delta * delta;
+                        ++count;
+                    }
+                    const double rmse =
+                        count > 0 ? std::sqrt(sumSq / count) : std::numeric_limits<double>::quiet_NaN();
+                    std::printf("  %+4.0f %+4.0f n=%lld rmse=%.2f\n", dx, dy, count, rmse);
+                    if (count > 0 && rmse < bestRmse) {
+                        bestRmse = rmse;
+                        bestDx = dx;
+                        bestDy = dy;
+                        bestN = count;
+                    }
+                }
+            }
+            std::printf("advect best: dxE=%+.0fkm dyN=%+.0fkm n=%lld rmse=%.2f\n", bestDx, bestDy,
+                        bestN, bestRmse);
+        }
     }
     return EXIT_SUCCESS;
 }

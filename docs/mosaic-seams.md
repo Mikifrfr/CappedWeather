@@ -121,6 +121,24 @@ This bounds the claim instead of inflating it: CAPPI matching alone does
 not fix compositing, and the decision above (time sync plus second case
 before any layer) stands, now with two scored cases behind it.
 
+## Advection lag search (2026-10-11, `--advect`, both cases)
+
+If the residual were volume time separation, shifting radar B should
+minimize paired RMSE near storm-motion x separation (~1-2.5 km NE both
+days). It does not:
+
+- Mayfield CAPPI 1500 m: best (0E,-1N) RMSE 8.12 (n=2099) vs 8.48
+  unshifted; surface shallow near center, rising past +/-3 km
+- Moore CAPPI 1500 m: best (+3E,+3N) RMSE 9.81 (n=823) vs 10.44, an
+  isolated dip surrounded by 10.5+ (noise fit, not a coherent minimum)
+
+Uniform bulk advection recovers at most ~0.6 dB with no physically
+coherent minimum on either case, so time sync is not the expected fix
+either: the ~8-10 dB floor is resolution, partial-beam and microphysical
+difference, not clock. A mosaic layer would need per-gate weighting or
+resolution-aware blending to move that floor, which is new research, not
+a tuning step. The probe keeps all three modes for re-scoring.
+
 Acquisition footnote: the probe needed offline site coordinates, and the
 fallback map only carried 12 radars (KPAH/KVWX missing: "site not in
 catalog"). Eight outbreak-belt sites were added from the live
