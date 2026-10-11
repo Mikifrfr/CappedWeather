@@ -568,6 +568,35 @@ static bool testHodographPaint(QString* error) {
     return true;
 }
 
+static bool testOptOutSourcesSilent(QString* error) {
+    // Opt-out contract: a disabled raster/context source must not touch
+    // the network on refresh (no status emissions, no timers tripped).
+    // This is what keeps HRRR/GOES/mosaic/WPC quiet at startup and on
+    // their periodic timers while the user leaves them off.
+    GoesSource goes;
+    HrrrSource hrrr;
+    MosaicSource mosaic;
+    WpcEroSource wpc;
+    const QSignalSpy goesSpy(&goes, &GoesSource::statusChanged);
+    const QSignalSpy hrrrSpy(&hrrr, &HrrrSource::statusChanged);
+    const QSignalSpy mosaicSpy(&mosaic, &MosaicSource::statusChanged);
+    const QSignalSpy wpcSpy(&wpc, &WpcEroSource::statusChanged);
+    goes.setEnabled(false);
+    hrrr.setEnabled(false);
+    mosaic.setEnabled(false);
+    wpc.setEnabled(false);
+    goes.refresh();
+    hrrr.refresh();
+    mosaic.refresh();
+    wpc.refresh();
+    QCoreApplication::processEvents();
+    if (!goesSpy.isEmpty() || !hrrrSpy.isEmpty() || !mosaicSpy.isEmpty() || !wpcSpy.isEmpty()) {
+        *error = QStringLiteral("disabled opt-out source must stay silent on refresh");
+        return false;
+    }
+    return true;
+}
+
 static bool testBasemapTileUrls(QString* error) {
     // CARTO is the default: single layer, standard z/x/y order, key appended.
     const auto dark = basemapTileUrls(5, 7, 12, BasemapProvider::CartoDark,
@@ -3906,6 +3935,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testHodographPaint(&failure)) {
             std::cerr << "Hodograph paint failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testOptOutSourcesSilent(&failure)) {
+            std::cerr << "Opt-out sources silent failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testBasemapTileUrls(&failure)) {

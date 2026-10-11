@@ -18,6 +18,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
 - [ ] Flatpak. Artifacts already ship, discovery is the gap. (Windows update discovery is done: Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only.)
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
+- [ ] Cold-start staging for the NWS zone fan-out (yesterday's launch fired ~276 zone requests behind one alerts response). Needs per-source counts/timing plus time-to-first-radar-render first; then prioritize viewport zones and defer the rest. Alerts stay complete: staging only, no filtering.
 
 ### Research (explicitly not next)
 - [ ] GPU volume rendering of live Level II. Design in `docs/gpu-volume-rendering.md` (shared VolumeBrick, GL raymarcher plus CPU twin). Not started.
@@ -40,7 +41,9 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
-- Raster paint profile hooks (CAPPEDWEATHER_PAINT_PROFILE=1 stderr timings per context layer; measured 6-10 ms GOES, 0 ms quiet HRRR, 1-3 ms mosaic at fixture scale: no optimization justified).
+- GOES paint
+ 
+...[truncated 305 chars]
 - Windows update discovery (Help action plus silent weekly auto-check, public stable-release metadata with explicit current/newer/no-info/error states, host-validated releases link, no downloads; hermetic version/parser/clock tests).
 - ESRI shapefile placefiles (binary .shp polygon/polyline rings as Polygon/Line elements via magic sniff in both load paths, unprojected lon/lat only with an explicit projected-data error, sibling .dbf names as hover text, same safety envelope as text placefiles, hermetic parser plus source tests on Census-county fixtures).
 - GRLevelX color-table import (Product/Units/Step/Decimals/Scale headers plus Color/Color4/SolidColor rules into custom step stops, sorted, fail-closed with line numbers, live RTWX_REF shape verified, hermetic parser tests).
