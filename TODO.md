@@ -42,6 +42,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Fractional wheel/trackpad zoom accumulation (sub-notch angle and pixel-only deltas accumulate to whole cursor-anchored steps instead of truncating to zero; remainder clears at limits and view jumps; synthetic Qt event regressions for sub-steps/pixel/full-notch/reverse/limits/anchor/pan; failure demonstrated on old code first).
 - Shared GOES georeference across panels (one immutable lon/lat grid per exact grid identity in `GoesGeoCache`, built once off the GUI thread with per-identity waiter coalescing; canvases attach by identity so rapid swaps, disable, close and nullopt fail safe; 2x2 cold wall 2116 to 51 ms with exactly one 30 MB grid; honest waiting state while building; committed sharing/swap/disable/destroy lifecycle tests).
 - NWS zone geometry disk cache (api.weather.gov zone bodies persist under CacheLocation, 7-day reuse without any request, 30-day prune, conditional revalidation after, one write per refresh round; warm starts skip unchanged geometry while alerts/reports stay live; live Dallas County TXC303 fixture plus round-trip/expiry/corrupt/preload hermetic tests).
 - NWS zone GeometryCollection members (census of today's 246 live zone shapes: the 12 standing "no polygon geometry" failures are all coastal FLZ forecast zones grouping mainland plus island MultiPolygons, verified against live FLZ050; parser recurses into members through the existing MultiPolygon path, minimal collection fixture test).
