@@ -18,7 +18,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
 - [ ] Flatpak. Artifacts already ship, discovery is the gap. (Windows update discovery is done: Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only.)
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
-- [ ] Live request-count check for the zone disk cache (hermetic round-trip/expiry/preload tests are green; still to read the status-bar request totals across two real launches with active alerts and confirm the second one drops to uncached-only).
+- [x] Zone disk cache live check (`tools/overlay_probe.cpp`, 2026-10-11, 306+ active alerts: cold launch 284 requests, warm launch 83 (same 12 unparseable zones refetch by design, rest is new-alert churn plus base feeds), warnings complete both runs (412/413). ~3.4x fewer requests.
 
 ### Research (explicitly not next)
 - [ ] GPU volume rendering of live Level II. Design in `docs/gpu-volume-rendering.md` (shared VolumeBrick, GL raymarcher plus CPU twin). Not started.

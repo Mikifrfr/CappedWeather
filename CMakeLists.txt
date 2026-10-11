@@ -375,6 +375,11 @@ if(CAPPEDWEATHER_BUILD_APP)
                 cappedweather_ui
                 Qt6::Test
             )
+
+            qt_add_executable(overlay_probe
+                tools/overlay_probe.cpp
+            )
+            target_link_libraries(overlay_probe PRIVATE cappedweather_ui)
         endif()
 
         set_target_properties(CappedWeather PROPERTIES
