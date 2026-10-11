@@ -751,6 +751,20 @@ private:
     // Direction changes simply add (opposite signs cancel); sources mix
     // freely because both normalize to the same 120-angle notch unit.
     double wheelZoomRemainder_ = 0.0;
+    // View-history gesture dampers: one undo entry per completed gesture.
+    // Drag and touchscreen pinch push lazily on the first applied move or
+    // step (a click or a motionless pinch pushes nothing); wheel pushes on
+    // the first applied step of each gesture (classic notches stay
+    // single-shot, trackpad ScrollBegin/Update share one, momentum after
+    // ScrollEnd starts a new one); native pinch has no begin/end, so each
+    // applied 1.25x step is its own entry like a wheel notch.
+    bool dragPushedHistory_ = false;
+    bool pinchPushedHistory_ = false;
+    bool wheelGestureActive_ = false;
+    // Records the pre-gesture view once per gesture. Discrete input (one
+    // notch, one button press) stays single-shot; continuous gestures
+    // share the entry opened by their first applied step.
+    void noteWheelNavigated(bool discrete);
     bool loading_ = false;
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;

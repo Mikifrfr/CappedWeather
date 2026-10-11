@@ -42,6 +42,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Map view undo that records origins (one entry per drag/wheel-gesture/pinch/button press at gesture start instead of destinations per mouse move; first Ctrl+Z restores the pre-action view; passive syncs, programmatic jumps and no-op inputs bank nothing; synthetic drag/wheel/pinch/redo/passive-sync regressions, failure demonstrated first: 10 entries per drag).
 - Fractional wheel/trackpad zoom accumulation (sub-notch angle and pixel-only deltas accumulate to whole cursor-anchored steps instead of truncating to zero; remainder clears at limits and view jumps; synthetic Qt event regressions for sub-steps/pixel/full-notch/reverse/limits/anchor/pan; failure demonstrated on old code first).
 - Bound-overscroll wheel fix (fractions pushing against min/max zoom drop at once, including leftovers from the arriving step, so the first inward notch always responds; symmetric min/max regressions, failure demonstrated first).
 - NWS zone GeometryCollection live check (`tools/overlay_probe.cpp` cold run with 9 FLZ forecast zones active: 355 drawable warnings, zero request failures; the standing 12-of-N partial is gone).

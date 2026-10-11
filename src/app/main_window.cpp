@@ -431,14 +431,10 @@ MainWindow::MainWindow(QWidget* parent)
                 });
         connect(panel, &RadarMapCanvas::viewChanged, this,
                 [this, panel](const QPointF&, int) { synchronizeMapView(panel); });
-        // Push the active panel's view to its undo stack. We only record when
-        // the active panel itself changed (not when it's a passive recipient
-        // of a sync) so the back stack represents user actions.
-        connect(panel, &RadarMapCanvas::viewChanged, this,
-                [this, panel](const QPointF&, int) {
-                    if (synchronizingMapView_) return;
-                    if (panel == map_) panel->pushViewHistory();
-                });
+        // No viewChanged history hook here on purpose: undo entries are
+        // recorded pre-gesture inside the canvas (drag/pinch/wheel), so the
+        // back stack holds origins, passive syncs and programmatic jumps
+        // bank nothing, and the first Ctrl+Z restores the pre-action view.
         connect(panel, &RadarMapCanvas::crossSectionRequested, this,
                 [this, panel](const QPointF& start, const QPointF& end) {
                     activateMap(panel);

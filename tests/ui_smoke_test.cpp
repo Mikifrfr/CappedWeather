@@ -47,6 +47,7 @@
 #include <QLabel>
 #include <QList>
 #include <QPointF>
+#include <QPointingDevice>
 #include <QPair>
 #include <QPolygonF>
 #include <QSet>
@@ -1557,6 +1558,144 @@ static bool testWheelSubStepZoom(QString* error) {
     if (canvas.viewCenter() == panBefore) {
         *error = QStringLiteral("dominant-horizontal wheel should pan the map");
         return false;
+    }
+    return true;
+}
+
+static bool testViewUndoWiring(MainWindow* window, QString* error) {
+    // Real MainWindow/canvas wiring (never manual history seeding): one
+    // drag is one undo entry and the first Ctrl+Z restores the exact
+    // pre-drag view. Zoom levels and centers are asserted, never pixels.
+    auto* map = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
+    if (!map) {
+        *error = QStringLiteral("main map panel missing");
+        return false;
+    }
+    const auto fuzzyCenter = [](const QPointF& got, double lon, double lat) {
+        return std::abs(got.x() - lon) < 1e-9 && std::abs(got.y() - lat) < 1e-9;
+    };
+    map->clearViewHistory();
+    map->setView(QPointF(-97.0, 35.0), 6);
+    map->clearViewHistory();
+    QCoreApplication::processEvents();
+    const QPoint center = map->rect().center();
+    QTest::mousePress(map, Qt::MiddleButton, Qt::NoModifier, center);
+    for (int i = 1; i <= 10; ++i) QTest::mouseMove(map, center + QPoint(i * 20, i * 10));
+    QTest::mouseRelease(map, Qt::MiddleButton, Qt::NoModifier, center + QPoint(200, 100));
+    QCoreApplication::processEvents();
+    if (map->viewBackSizeForUi() != 1) {
+        *error = QStringLiteral("one drag should bank one undo entry, got %1")
+                     .arg(map->viewBackSizeForUi());
+        return false;
+    }
+    const QPointF afterDrag = map->viewCenter();
+    const int zoomAfterDrag = map->viewZoom();
+    if (fuzzyCenter(afterDrag, -97.0, 35.0)) {
+        *error = QStringLiteral("drag should have moved the view");
+        return false;
+    }
+    // Window shortcuts need an active window even offscreen.
+    window->activateWindow();
+    window->raise();
+    QCoreApplication::processEvents();
+    // The app's real Undo shortcut restores the exact start, then Redo
+    // restores the drag end.
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCoreApplication::processEvents();
+    if (!fuzzyCenter(map->viewCenter(), -97.0, 35.0) || map->viewZoom() != 6) {
+        *error = QStringLiteral("first undo should restore the pre-drag view");
+        return false;
+    }
+    QTest::keyClick(window, Qt::Key_Y, Qt::ControlModifier);
+    QCoreApplication::processEvents();
+    if (!fuzzyCenter(map->viewCenter(), afterDrag.x(), afterDrag.y()) ||
+        map->viewZoom() != zoomAfterDrag) {
+        *error = QStringLiteral("redo should restore the drag end");
+        return false;
+    }
+    // A new real action after undo invalidates the redo stack.
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCoreApplication::processEvents();
+    QTest::mousePress(map, Qt::MiddleButton, Qt::NoModifier, center);
+    QTest::mouseMove(map, center + QPoint(30, 12));
+    QTest::mouseRelease(map, Qt::MiddleButton, Qt::NoModifier, center + QPoint(30, 12));
+    QCoreApplication::processEvents();
+    if (map->canRedoView()) {
+        *error = QStringLiteral("a new drag after undo should clear redo");
+        return false;
+    }
+    // Wheel gesture through the same wiring: fractional sub-steps bank one
+    // entry and zoom once; undo restores.
+    map->clearViewHistory();
+    map->setView(QPointF(-97.0, 35.0), 6);
+    map->clearViewHistory();
+    for (int i = 0; i < 8; ++i) {
+        QWheelEvent event{QPointF(center), QPointF(center), QPoint(0, 0), QPoint(0, 15),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false};
+        QCoreApplication::sendEvent(map, &event);
+    }
+    QCoreApplication::processEvents();
+    if (map->viewBackSizeForUi() != 1 || map->viewZoom() != 7) {
+        *error = QStringLiteral("wheel gesture should bank one entry and zoom once");
+        return false;
+    }
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCoreApplication::processEvents();
+    if (!fuzzyCenter(map->viewCenter(), -97.0, 35.0) || map->viewZoom() != 6) {
+        *error = QStringLiteral("undo should restore the pre-wheel view");
+        return false;
+    }
+    // Native trackpad pinch (synthetic event, real handler path): one
+    // applied 1.25x step zooms once with one entry; undo restores.
+    map->clearViewHistory();
+    {
+        // A real pointing device: the event constructor dereferences it,
+        // so nullptr (fine for the handler, fatal for Qt) is not an option.
+        QPointingDevice pad;
+        QNativeGestureEvent pinch{Qt::ZoomNativeGesture, &pad, 2, QPointF(center),
+                                  QPointF(center), QPointF(center), 1.3, QPointF(), 0};
+            QCoreApplication::sendEvent(map, &pinch);
+        }
+    QCoreApplication::processEvents();
+    if (map->viewBackSizeForUi() != 1 || map->viewZoom() != 7) {
+        *error = QStringLiteral("native pinch should bank one entry and zoom once, got back=%1 zoom=%2")
+                     .arg(map->viewBackSizeForUi())
+                     .arg(map->viewZoom());
+        return false;
+    }
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCoreApplication::processEvents();
+    if (map->viewZoom() != 6) {
+        *error = QStringLiteral("undo should restore the pre-pinch zoom");
+        return false;
+    }
+    // Passive synchronized panels follow the view but bank nothing.
+    auto* second = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
+    if (second) {
+        map->clearViewHistory();
+        second->clearViewHistory();
+        map->setView(QPointF(-97.0, 35.0), 6);
+        map->clearViewHistory();
+        second->clearViewHistory();
+        QCoreApplication::processEvents();
+        QTest::mousePress(map, Qt::MiddleButton, Qt::NoModifier, center);
+        QTest::mouseMove(map, center + QPoint(60, 25));
+        QTest::mouseRelease(map, Qt::MiddleButton, Qt::NoModifier, center + QPoint(60, 25));
+        QCoreApplication::processEvents();
+        if (map->viewBackSizeForUi() != 1) {
+            *error = QStringLiteral("synced drag should bank one entry on the active panel");
+            return false;
+        }
+        if (second->viewBackSizeForUi() != 0) {
+            *error = QStringLiteral("passive synchronized panel should bank no entries");
+            return false;
+        }
+        if (!fuzzyCenter(second->viewCenter(), map->viewCenter().x(), map->viewCenter().y())) {
+            *error = QStringLiteral("synchronized panel should follow the active view");
+            return false;
+        }
+        map->clearViewHistory();
+        second->clearViewHistory();
     }
     return true;
 }
@@ -4323,6 +4462,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testWheelSubStepZoom(&failure)) {
             std::cerr << "Wheel sub-step zoom failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testViewUndoWiring(&window, &failure)) {
+            std::cerr << "View undo wiring failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testPinnedLock(&failure)) {

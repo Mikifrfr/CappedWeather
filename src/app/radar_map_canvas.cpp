@@ -1823,10 +1823,14 @@ void RadarMapCanvas::recenterSelected() {
 }
 
 void RadarMapCanvas::zoomIn() {
+    // No-op at the limit pushes nothing (pushViewHistory dedupes only an
+    // identical top; a clamped press would bank a useless self-entry).
+    if (zoom_ < kMaxZoom) pushViewHistory();
     setZoomAt(zoom_ + 1, QPointF(width() / 2.0, height() / 2.0));
 }
 
 void RadarMapCanvas::zoomOut() {
+    if (zoom_ > kMinZoom) pushViewHistory();
     setZoomAt(zoom_ - 1, QPointF(width() / 2.0, height() / 2.0));
 }
 
@@ -6071,6 +6075,7 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
         }
         dragging_ = true;
         dragged_ = false;
+        dragPushedHistory_ = false;
         lastMousePosition_ = event->pos();
         event->accept();
         return;
@@ -6080,6 +6085,7 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::MiddleButton) {
         dragging_ = true;
         dragged_ = true; // never treat a middle drag as a click
+        dragPushedHistory_ = false;
         lastMousePosition_ = event->pos();
         setCursor(Qt::ClosedHandCursor);
         event->accept();
@@ -6170,6 +6176,12 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
         const auto delta = event->pos() - lastMousePosition_;
         if (!delta.isNull()) {
             dragged_ = true;
+            // One undo entry per drag, recording the pre-gesture view:
+            // push lazily on the first real move so a click pushes nothing.
+            if (!dragPushedHistory_) {
+                pushViewHistory();
+                dragPushedHistory_ = true;
+            }
             panBy(delta);
             lastMousePosition_ = event->pos();
         }
@@ -6247,11 +6259,13 @@ bool RadarMapCanvas::handleGestureEvent(QGestureEvent* gesture) {
     if (pinch == nullptr) return false;
     // Touchscreen pinch: accumulate the multiplicative scale and step the
     // integer zoom each 1.25x around the pinch center, reusing the
-    // cursor-anchored path (and its view-history push) from the wheel.
+    // cursor-anchored path. One undo entry per pinch via the lazy push
+    // below, mirroring the drag gesture boundary.
     switch (pinch->state()) {
         case Qt::GestureStarted:
             pinchBaseZoom_ = zoom_;
             pinchAccum_ = 1.0;
+            pinchPushedHistory_ = false;
             break;
         case Qt::GestureUpdated:
             pinchAccum_ *= pinch->scaleFactor();
@@ -6261,6 +6275,18 @@ bool RadarMapCanvas::handleGestureEvent(QGestureEvent* gesture) {
                     : -static_cast<int>(std::floor(std::log(1.0 / pinchAccum_) / std::log(1.25)));
                 pinchBaseZoom_ = std::clamp(pinchBaseZoom_ + steps, kMinZoom, kMaxZoom);
                 pinchAccum_ = 1.0;
+                // Clamped at a limit: nothing to apply, so bank nothing.
+                if (pinchBaseZoom_ == zoom_) {
+                    updateProbe(pinch->centerPoint());
+                    break;
+                }
+                // One undo entry per pinch, recording the pre-gesture view
+                // on the first applied step (a motionless pinch banks
+                // nothing, mirroring the drag behavior).
+                if (!pinchPushedHistory_) {
+                    pushViewHistory();
+                    pinchPushedHistory_ = true;
+                }
                 setZoomAt(pinchBaseZoom_, pinch->centerPoint());
                 updateProbe(pinch->centerPoint());
             }
@@ -6278,19 +6304,37 @@ bool RadarMapCanvas::handleGestureEvent(QGestureEvent* gesture) {
 
 bool RadarMapCanvas::handleNativeGestureEvent(QNativeGestureEvent* gesture) {
     // Precision-trackpad pinch arrives as a native Zoom gesture (scale in
-    // value()), not as wheel ticks. Same 1.25x-per-step accumulation.
+    // value()), not as wheel ticks. Same 1.25x-per-step accumulation. No
+    // begin/end exists here, so each applied step is its own undo entry
+    // like a classic wheel notch.
     if (gesture->gestureType() != Qt::ZoomNativeGesture || gesture->value() <= 0.0) return false;
     pinchAccum_ *= static_cast<double>(gesture->value());
     if (pinchAccum_ >= 1.25 || pinchAccum_ <= 0.8) {
         const int steps = pinchAccum_ >= 1.0
             ? static_cast<int>(std::floor(std::log(pinchAccum_) / std::log(1.25)))
             : -static_cast<int>(std::floor(std::log(1.0 / pinchAccum_) / std::log(1.25)));
-        setZoomAt(zoom_ + steps, gesture->position());
-        updateProbe(gesture->position());
         pinchAccum_ = 1.0;
+        const auto target = std::clamp(zoom_ + steps, kMinZoom, kMaxZoom);
+        if (target == zoom_) {
+            gesture->accept();
+            return true;
+        }
+        pushViewHistory();
+        setZoomAt(target, gesture->position());
+        updateProbe(gesture->position());
     }
     gesture->accept();
     return true;
+}
+
+void RadarMapCanvas::noteWheelNavigated(const bool discrete) {
+    // One undo entry per wheel/trackpad gesture, recording pre-gesture.
+    // Discrete notches stay single-shot; a continuous gesture shares the
+    // entry opened by its first applied step, and momentum arriving after
+    // ScrollEnd opens a fresh one.
+    if (wheelGestureActive_) return;
+    pushViewHistory();
+    wheelGestureActive_ = !discrete;
 }
 
 void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
@@ -6308,6 +6352,15 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         if (delta == 0.0) return;
         volumeDistance_ = std::clamp(volumeDistance_ * std::pow(1.12, -delta), 60000.0, 1200000.0);
         rebuildVolumeRender();
+        event->accept();
+        return;
+    }
+    // Wheel/trackpad gesture boundary for view history: ScrollEnd closes
+    // the gesture opened by the first applied step, so one continuous
+    // gesture is one undo entry. Classic discrete notches (NoScrollPhase)
+    // never set the flag and stay single-shot via noteWheelNavigated.
+    if (event->phase() == Qt::ScrollEnd) {
+        wheelGestureActive_ = false;
         event->accept();
         return;
     }
@@ -6335,7 +6388,9 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         : static_cast<double>(event->angleDelta().y()) / 8.0;
     if (panX != 0.0 && std::abs(panX) >= std::abs(panY)) {
         // Same sign convention as mouse drag (panBy takes last - pos), so a
-        // swipe moves the map with the fingers like a drag does.
+        // swipe moves the map with the fingers like a drag does. One undo
+        // entry per gesture via the same lazy boundary as zoom.
+        noteWheelNavigated(event->phase() == Qt::NoScrollPhase);
         panBy(QPointF(-panX, 0.0));
         event->accept();
         return;
@@ -6383,6 +6438,9 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
     // it lies beyond the limit just like banked overscroll, so the first
     // inward notch always responds.
     if (target == kMaxZoom || target == kMinZoom) wheelZoomRemainder_ = 0.0;
+    // Gesture-scoped history: the pre-step view is one undo entry per
+    // gesture (classic notches single-shot, trackpad gestures shared).
+    noteWheelNavigated(event->phase() == Qt::NoScrollPhase);
     setZoomAt(target, event->position());
     updateProbe(event->position());
     event->accept();
