@@ -232,6 +232,9 @@ public:
     void setGoesVisible(bool visible);
     [[nodiscard]] bool goesVisible() const { return goesVisible_; }
     [[nodiscard]] bool goesHasFrame() const { return goesFrame_.has_value(); }
+    // Test-only oracle switch (see goesExhaustiveForTest_): full-grid scan
+    // with identical sampling, colors and raster semantics.
+    void setGoesExhaustiveForTest(bool exhaustive) { goesExhaustiveForTest_ = exhaustive; }
     [[nodiscard]] long long goesValidEpoch() const {
         return goesFrame_ ? goesFrame_->validEpochSeconds : 0;
     }
@@ -599,6 +602,10 @@ private:
     std::vector<float> goesLonDeg_;
     std::vector<float> goesLatDeg_;
     bool goesGeoCached_ = false;
+    // Test-only oracle switch: iterate the whole grid with identical
+    // sampling, colors and raster semantics (no subwindow, no early-out)
+    // so bench/tests can prove the viewport optimization paints the same.
+    bool goesExhaustiveForTest_ = false;
     void paintGoes(QPainter& painter);
     // IEM national mosaic: observed context in native NWS colors, same
     // raster idiom and no-click rule as HRRR/GOES.

@@ -4324,6 +4324,44 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                         return 1;
                     }
                 }
+                // Subwindow equivalence on a synthetic disc patch: uniform
+                // cold tops over a uniform-radian grid near (-90, 30) force
+                // the all-samples-succeed path, so the optimized paint must
+                // match the exhaustive oracle pixel for pixel. A clipped
+                // subwindow or a shifted stride lattice fails this.
+                {
+                    GoesFrame synthetic;
+                    synthetic.channel = 13;
+                    synthetic.validEpochSeconds = 1791658800LL;
+                    synthetic.nx = 200;
+                    synthetic.ny = 150;
+                    synthetic.grid.subpointLongitudeDeg = -75.0;
+                    const auto center =
+                        goesFixedForward(synthetic.grid, -90.0, 30.0);
+                    if (!std::isfinite(center.xRadians) || !std::isfinite(center.yRadians)) {
+                        std::cerr << "Synthetic GOES patch missed the disc\n";
+                        return 1;
+                    }
+                    constexpr double step = 56e-6;
+                    synthetic.x0Radians = center.xRadians - 100 * step;
+                    synthetic.y0Radians = center.yRadians - 75 * step;
+                    synthetic.dxRadians = step;
+                    synthetic.dyRadians = step;
+                    synthetic.brightnessCelsius.assign(200 * 150, -60.0F);
+                    map->setGoesVisible(true);
+                    map->setGoesFrame(synthetic);
+                    map->setView({-90.0, 30.0}, 7);
+                    application.processEvents();
+                    const QImage optimized = map->grab().toImage();
+                    map->setGoesExhaustiveForTest(true);
+                    const QImage oracle = map->grab().toImage();
+                    map->setGoesExhaustiveForTest(false);
+                    if (optimized.isNull() || optimized != oracle) {
+                        std::cerr << "GOES subwindow diverged from the exhaustive oracle\n";
+                        return 1;
+                    }
+                    map->setGoesFrame(std::nullopt);
+                }
                 map->setGoesFrame(std::nullopt);
             }
             if (hrrrReaderAvailable()) {

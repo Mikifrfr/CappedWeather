@@ -57,9 +57,13 @@ int main(int argc, char** argv) {
     }
     // Frame kind follows the file: GOES Rad or HRRR REFC. HRRR reuses the
     // same views so raster costs compare directly.
+    // Decode/setup cost, isolated from every paint below.
+    QElapsedTimer decodeClock;
+    decodeClock.start();
     const auto goesFrame = readGoesRad(path);
     const auto hrrrFrame = !goesFrame.has_value() ? readHrrrRefc(path)
                                                   : std::optional<HrrrFrame>{};
+    std::cout << "BENCH: decode_ms=" << (decodeClock.nsecsElapsed() / 1e6) << '\n';
     if (!goesFrame.has_value() && !hrrrFrame.has_value()) {
         std::cerr << "unreadable frame: " << path << '\n';
         return 4;
@@ -77,6 +81,14 @@ int main(int argc, char** argv) {
         {"national", -98.0, 38.0, 4},
         {"regional", -90.0, 35.0, 5},
         {"close", -86.0, 30.0, 7},
+        // Viewport-correctness matrix: wide low-zoom antipode, negative
+        // control, limb, wrap and off-disc cases for the oracle check.
+        {"wide3", 105.0, 0.0, 3},
+        {"antipode", 105.0, 0.0, 4},
+        {"limb-west", -160.0, 20.0, 4},
+        {"antimeridian", 179.0, 0.0, 4},
+        {"atlantic", -30.0, 25.0, 5},
+        {"pacific-north", 180.0, 55.0, 4},
     };
     const QString saveDir = QString::fromLocal8Bit(
         qgetenv("GOES_BENCH_SAVE").constData());
@@ -84,7 +96,6 @@ int main(int argc, char** argv) {
         RadarMapCanvas canvas;
         canvas.resize(1280, 800);
         canvas.show();
-        application.processEvents();
         if (goesFrame.has_value()) {
             canvas.setGoesVisible(true);
             canvas.setGoesFrame(goesFrame);
@@ -93,7 +104,9 @@ int main(int argc, char** argv) {
             canvas.setHrrrFrame(hrrrFrame);
         }
         canvas.setView(QPointF(view.lon, view.lat), view.zoom);
-        application.processEvents();
+        // True cold path: no event pump before the first grab, so the
+        // timer owns the georeference build plus the first rasterization.
+        // (The old code pumped events here and relabeled a warmed grab.)
 
         QElapsedTimer coldClock;
         coldClock.start();
@@ -116,6 +129,28 @@ int main(int argc, char** argv) {
             (void)shot;
             warm.push_back(clock.nsecsElapsed() / 1e6);
         }
+        // Oracle: exhaustive full-grid scan, identical lattice/colors/
+        // raster path. Checksum match proves the viewport optimization;
+        // mismatch names the view that breaks it.
+        quint16 oracleSum = 0;
+        if (goesFrame.has_value()) {
+            canvas.setGoesExhaustiveForTest(true);
+            const QImage oracleImage = canvas.grab().toImage();
+            canvas.setGoesExhaustiveForTest(false);
+            oracleSum = qChecksum(
+                reinterpret_cast<const char*>(oracleImage.constBits()),
+                static_cast<uint>(oracleImage.sizeInBytes()));
+        }
+        // Frame swap: same frame object re-set (cache rebuild) plus view
+        // kept, isolating invalidation cost from decode (decode is timed
+        // once at load, above).
+        QElapsedTimer swapClock;
+        swapClock.start();
+        if (goesFrame.has_value()) canvas.setGoesFrame(goesFrame);
+        else canvas.setHrrrFrame(hrrrFrame);
+        const QPixmap swapped = canvas.grab();
+        const double swapMs = swapClock.nsecsElapsed() / 1e6;
+        (void)swapped;
         // Pan: shift the view one step and time the repaint.
         canvas.setView(QPointF(view.lon + 2.0, view.lat + 1.0), view.zoom);
         application.processEvents();
@@ -130,8 +165,13 @@ int main(int argc, char** argv) {
 
         std::cout << "BENCH: view=" << view.name << " zoom=" << view.zoom
                   << " cold_ms=" << coldMs << " warm_p50_ms=" << percentile(warm, 0.5)
-                  << " warm_p95_ms=" << percentile(warm, 0.95)
-                  << " pan_ms=" << panMs << " checksum=" << coldSum << '\n';
+                  << " warm_p95_ms=" << percentile(warm, 0.95) << " swap_ms=" << swapMs
+                  << " pan_ms=" << panMs << " checksum=" << coldSum;
+        if (goesFrame.has_value()) {
+            std::cout << " oracle=" << oracleSum
+                      << (oracleSum == coldSum ? " MATCH" : " MISMATCH");
+        }
+        std::cout << '\n';
         if (!saveDir.isEmpty()) {
             const QString prefix = goesFrame.has_value() ? QStringLiteral("/goes_")
                                                          : QStringLiteral("/hrrr_");

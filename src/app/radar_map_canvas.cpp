@@ -3171,7 +3171,10 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
     // clipping real coverage. No success means nothing visible: skip.
     std::size_t ixBegin = 0, ixEnd = frame.nx - 1;
     std::size_t iyBegin = 0, iyEnd = frame.ny - 1;
-    {
+    // The oracle switch skips this whole block: same lattice, colors and
+    // raster path below, but the full grid, so any divergence is a real
+    // viewport-optimization bug, never a sampling artifact.
+    if (!goesExhaustiveForTest_) {
         const GeoBounds bounds = visibleLonLatBounds();
         if (bounds.valid) {
             double xMin = std::numeric_limits<double>::infinity();

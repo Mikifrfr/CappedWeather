@@ -44,6 +44,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 ## Recently done
 - NWS zone geometry disk cache (api.weather.gov zone bodies persist under CacheLocation, 7-day reuse without any request, 30-day prune, conditional revalidation after, one write per refresh round; warm starts skip unchanged geometry while alerts/reports stay live; live Dallas County TXC303 fixture plus round-trip/expiry/corrupt/preload hermetic tests).
 - NWS zone GeometryCollection members (census of today's 246 live zone shapes: the 12 standing "no polygon geometry" failures are all coastal FLZ forecast zones grouping mainland plus island MultiPolygons, verified against live FLZ050; parser recurses into members through the existing MultiPolygon path, minimal collection fixture test).
+- GOES viewport oracle (false-empty candidate refuted: 9/9 view matrix MATCH on the real 3.75M-cell C13 frame including zoom-3 antipode, antimeridian wrap, both limbs; test-only exhaustive-scan flag plus committed synthetic-patch subwindow regression, mutation-killed; bench cold path fixed to own the georeference build: decode 123 ms, true cold 334-536 ms once per frame, swap 319-493 ms, warm 7-21 ms whole-canvas).
 - GOES paint
  
 ...[truncated 305 chars]
