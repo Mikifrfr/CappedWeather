@@ -1325,6 +1325,9 @@ void RadarMapCanvas::setHrrrVisible(const bool visible) {
 
 void RadarMapCanvas::setGoesFrame(std::optional<GoesFrame> frame) {
     goesFrame_ = std::move(frame);
+    goesGeoCached_ = false;
+    goesLonDeg_.clear();
+    goesLatDeg_.clear();
     update();
 }
 
@@ -3110,21 +3113,46 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
     std::size_t profileCells = 0;
     const bool profiling = qEnvironmentVariableIsSet("CAPPEDWEATHER_PAINT_PROFILE");
     if (profiling) profileClock.start();
+    // One-time georeference: fixed-grid inverse per cell, NaN off-disc.
+    // Full-disk frames hold ~1.5M cells, so redoing trig every repaint is
+    // what made pans lag with GOES on.
+    if (!goesGeoCached_) {
+        const std::size_t count = frame.nx * frame.ny;
+        goesLonDeg_.assign(count, std::numeric_limits<float>::quiet_NaN());
+        goesLatDeg_.assign(count, std::numeric_limits<float>::quiet_NaN());
+        for (std::size_t iy = 0; iy < frame.ny; ++iy) {
+            for (std::size_t ix = 0; ix < frame.nx; ++ix) {
+                const double xRad = frame.x0Radians + ix * frame.dxRadians;
+                const double yRad = frame.y0Radians + iy * frame.dyRadians;
+                const auto lonLat = goesFixedInverse(frame.grid, xRad, yRad);
+                if (!std::isfinite(lonLat.longitudeDeg) || !std::isfinite(lonLat.latitudeDeg))
+                    continue;
+                const std::size_t i = iy * frame.nx + ix;
+                goesLonDeg_[i] = static_cast<float>(lonLat.longitudeDeg);
+                goesLatDeg_[i] = static_cast<float>(lonLat.latitudeDeg);
+            }
+        }
+        goesGeoCached_ = true;
+    }
+    if (goesLonDeg_.size() != frame.nx * frame.ny ||
+        goesLatDeg_.size() != frame.nx * frame.ny)
+        return;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
     const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
     const double cell = zoom_ >= 6 ? 4.0 : 2.5;
-    for (std::size_t iy = 0; iy < frame.ny; ++iy) {
-        for (std::size_t ix = 0; ix < frame.nx; ++ix) {
-            const float bt = frame.brightnessCelsius[iy * frame.nx + ix];
+    // Zoom stride: zoomed-out cells share screen pixels, so sample every
+    // 4th cell (national) or 2nd (regional) instead of all ~1.5M.
+    const std::size_t stride = zoom_ >= 6 ? 1 : (zoom_ >= 4 ? 2 : 4);
+    for (std::size_t iy = 0; iy < frame.ny; iy += stride) {
+        for (std::size_t ix = 0; ix < frame.nx; ix += stride) {
+            const std::size_t i = iy * frame.nx + ix;
+            const float bt = frame.brightnessCelsius[i];
             if (!std::isfinite(bt) || bt > 10.0F) continue;
-            const double xRad = frame.x0Radians + ix * frame.dxRadians;
-            const double yRad = frame.y0Radians + iy * frame.dyRadians;
-            const auto lonLat = goesFixedInverse(frame.grid, xRad, yRad);
-            if (!std::isfinite(lonLat.longitudeDeg) || !std::isfinite(lonLat.latitudeDeg))
-                continue;
-            const auto point =
-                screenPoint(lonLat.latitudeDeg, lonLat.longitudeDeg);
+            const float lon = goesLonDeg_[i];
+            const float lat = goesLatDeg_[i];
+            if (!std::isfinite(lon) || !std::isfinite(lat)) continue;
+            const auto point = screenPoint(lat, lon);
             if (!viewport.contains(point)) continue;
             // Cold white to warm dark over -90..+10 C.
             const int gray = std::clamp(

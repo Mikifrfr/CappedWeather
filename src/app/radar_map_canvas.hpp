@@ -593,6 +593,12 @@ private:
     // No click branch for either raster: full-view fields would steal every
     // echo probe, so valid times read on the legend chips and badges.
     std::optional<GoesFrame> goesFrame_;
+    // One-time fixed-grid inverse per frame: lat/lon per cell, NaN when
+    // off-disc. Rebuilt on frame set, reused by every repaint so pan/zoom
+    // never redo the trig.
+    std::vector<float> goesLonDeg_;
+    std::vector<float> goesLatDeg_;
+    bool goesGeoCached_ = false;
     void paintGoes(QPainter& painter);
     // IEM national mosaic: observed context in native NWS colors, same
     // raster idiom and no-click rule as HRRR/GOES.
