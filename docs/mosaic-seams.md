@@ -81,3 +81,48 @@ matched-tilt numbers are sensitive to the target string, not just the
 weather. CAPPI mode is immune (it samples every tilt). A pristine-tree
 rerun confirmed the refactor changed nothing: stashed code prints
 bit-identical baseline numbers.
+
+## Second case: Mayfield 2021-12-11 KPAH + KVWX (91 s apart)
+
+Independent outbreak, independent radars. Public archive
+(`unidata-nexrad-level2`, the registry-documented successor of the
+deprecated `noaa-nexrad-level2` bucket; the old bucket now 403s even
+anonymous object GETs):
+
+- `https://unidata-nexrad-level2.s3.amazonaws.com/2021/12/11/KPAH/KPAH20211211_010321_V06`
+  (9,050,376 bytes, sha256 `CA81D61E…98675`)
+- `https://unidata-nexrad-level2.s3.amazonaws.com/2021/12/11/KVWX/KVWX20211211_010452_V06`
+  (10,117,898 bytes, sha256 `D5DDAA8A…BDF4`)
+- Local filenames kept verbatim under gitignored `data/mayfield_replay/`.
+- QC: KPAH 0.45 deg 169 rays 24/72 bins (sector/SAILS), KVWX 0.45 deg
+  2778 rays 72/72 bins (full surveillance). Same box/step/threshold as
+  Moore (4x4 deg at 36.9,-88.3, 0.02 step, 10 dBZ).
+
+Results:
+
+- baseline: both 2487, bias -0.18, RMSE 8.85, p50 5.5, p90 14.5, 51.5%
+  over 5 dB; beam mismatch mean +2370 m
+- CAPPI 1500 m: both 9907, RMSE 7.46; <=1 km subset RMSE 5.10 (n=2993)
+- CAPPI 2500 m: both 10062, RMSE 7.51; <=1 km subset RMSE 5.63 (n=3444)
+
+Same-population paired verdict (identical cells, both methods):
+
+- CAPPI 1500 m: n=2320, base RMSE 8.86 vs CAPPI 8.48, win rate 33.6%
+- CAPPI 2500 m: n=2174, base RMSE 8.84 vs CAPPI 9.15 (worse), win
+  rate 41.8%
+- Moore CAPPI 1500 m: n=832, base 10.78 vs CAPPI 10.44, win rate 20.1%
+
+Reading: altitude matching gives a small pure gain at 1500 m (4% paired
+RMSE both events) and can lose at 2500 m; most of the headline RMSE drop
+comes from a larger, different sample, and beam-matched cells agree at
+5-6 dB either way. The dominant residual is time sync (91 s here moves
+the storm ~1.5-2 km against a 0.02 deg grid), not altitude selection.
+This bounds the claim instead of inflating it: CAPPI matching alone does
+not fix compositing, and the decision above (time sync plus second case
+before any layer) stands, now with two scored cases behind it.
+
+Acquisition footnote: the probe needed offline site coordinates, and the
+fallback map only carried 12 radars (KPAH/KVWX missing: "site not in
+catalog"). Eight outbreak-belt sites were added from the live
+`api.weather.gov/radar/stations` record with a hermetic core test, so
+offline tools work past Moore without a network round.

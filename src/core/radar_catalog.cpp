@@ -252,14 +252,20 @@ TTUL|Tulsa|TDWR|823|36.0710|-95.8270
     }
 
     // Real WSR-88D coordinates retained for a useful offline map while the
-    // authoritative NWS station catalog is being refreshed.
+    // authoritative NWS station catalog is being refreshed. Outbreak-belt
+    // additions (KPAH/KVWX/KOHX/KHPX/KLVX/KDGX plus KHTX/KGSP for the local
+    // replay cases) verified against api.weather.gov/radar/stations.
     static const std::unordered_map<std::string, std::pair<double, double>> kKnownCoordinates{
         {"KABR", {45.4558, -98.4131}}, {"KAMA", {35.2334, -101.7092}},
         {"KATX", {48.1946, -122.4957}}, {"KBUF", {42.9488, -78.7368}},
-        {"KDMX", {41.7312, -93.7229}}, {"KDVN", {41.6115, -90.5809}},
+        {"KDGX", {32.27999, -89.98444}}, {"KDMX", {41.7312, -93.7229}},
+        {"KDVN", {41.6115, -90.5809}}, {"KGSP", {34.8833, -82.21983}},
+        {"KHPX", {36.73666, -87.28499}}, {"KHTX", {34.93055, -86.08361}},
         {"KILX", {40.1505, -89.3368}}, {"KINX", {36.1751, -95.5645}},
-        {"KLSX", {38.6987, -90.6829}}, {"KMPX", {44.8488, -93.5655}},
-        {"KMRX", {36.1686, -83.4018}}, {"KTLX", {35.3331, -97.2778}},
+        {"KLVX", {37.97527, -85.94388}}, {"KLSX", {38.6987, -90.6829}},
+        {"KMPX", {44.8488, -93.5655}}, {"KMRX", {36.1686, -83.4018}},
+        {"KOHX", {36.24722, -86.5625}}, {"KPAH", {37.06833, -88.77194}},
+        {"KTLX", {35.3331, -97.2778}}, {"KVWX", {38.26024, -87.72452}},
     };
     for (auto& site : sites) {
         if (const auto it = kKnownCoordinates.find(site.id); it != kKnownCoordinates.end()) {

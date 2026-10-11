@@ -339,6 +339,12 @@ int main(int argc, char** argv) {
     long long bothN = 0, bigDisagree = 0;
     std::vector<double> absDeltas;
     std::vector<double> beamDeltas;
+    // Paired same-population comparison (CAPPI mode only): on cells where
+    // the matched tilt ALSO sees both echoes, score both methods'
+    // absolute deltas. Same cells, so population shift cannot flatter
+    // either side; win rate is the share with smaller CAPPI error.
+    std::vector<double> pairedBase;
+    std::vector<double> pairedCappi;
     // Seam table: disagreement conditioned on beam-height mismatch, so
     // geometry (different altitudes) separates from calibration (bias at
     // matched beams). Bin edges in meters MSL difference.
@@ -372,6 +378,14 @@ int main(int argc, char** argv) {
                 const double beamDelta = sa.beamMslMeters - sb.beamMslMeters;
                 sumBeamDelta += beamDelta;
                 beamDeltas.push_back(std::abs(beamDelta));
+                if (cappi) {
+                    const auto ba = sampleVolume(a, lat, lon, threshDbz);
+                    const auto bb = sampleVolume(b, lat, lon, threshDbz);
+                    if (ba.hasEcho && bb.hasEcho) {
+                        pairedBase.push_back(std::abs(ba.dbz - bb.dbz));
+                        pairedCappi.push_back(std::abs(delta));
+                    }
+                }
                 for (auto& bin : seamBins) {
                     if (std::abs(beamDelta) <= bin.maxBeamDelta) {
                         ++bin.n;
@@ -413,6 +427,22 @@ int main(int argc, char** argv) {
         } else {
             std::printf("  %s n=0\n", edges[i]);
         }
+    }
+    if (cappi) {
+        // Same-population verdict: paired RMSE on identical cells plus the
+        // share where altitude matching strictly wins. Immune to the
+        // population shift between the baseline and CAPPI both-echo sets.
+        const std::size_t n = std::min(pairedBase.size(), pairedCappi.size());
+        double baseSq = 0.0, cappiSq = 0.0;
+        long long wins = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            baseSq += pairedBase[i] * pairedBase[i];
+            cappiSq += pairedCappi[i] * pairedCappi[i];
+            if (pairedCappi[i] < pairedBase[i]) ++wins;
+        }
+        std::printf("paired same-cell (n=%zu): base rmse %.2f cappi rmse %.2f winrate %.1f%%\n", n,
+                    n > 0 ? std::sqrt(baseSq / n) : 0.0, n > 0 ? std::sqrt(cappiSq / n) : 0.0,
+                    n > 0 ? 100.0 * wins / n : 0.0);
     }
     return EXIT_SUCCESS;
 }

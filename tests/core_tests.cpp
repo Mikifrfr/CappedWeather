@@ -50,6 +50,7 @@
 #include <thread>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace cappedweather;
@@ -352,6 +353,19 @@ void testCatalog() {
     assert(tdwr != sites.end());
     assert(tdwr->owner == "TDWR");
     assert(tdwr->latitude.has_value() && tdwr->longitude.has_value());
+    // Offline outbreak-belt coordinates (api.weather.gov/radar/stations):
+    // the mosaic probe and replay tools need these without a network round.
+    for (const auto& [id, lat, lon] :
+         {std::tuple{"KPAH", 37.06833, -88.77194}, {"KVWX", 38.26024, -87.72452},
+          {"KOHX", 36.24722, -86.5625}, {"KHPX", 36.73666, -87.28499},
+          {"KLVX", 37.97527, -85.94388}, {"KDGX", 32.27999, -89.98444},
+          {"KHTX", 34.93055, -86.08361}, {"KGSP", 34.8833, -82.21983}}) {
+        const auto found =
+            std::find_if(sites.begin(), sites.end(), [&](const RadarSite& site) { return site.id == id; });
+        assert(found != sites.end());
+        assert(found->latitude.has_value() && found->longitude.has_value());
+        assert(std::abs(*found->latitude - lat) < 1e-3 && std::abs(*found->longitude - lon) < 1e-3);
+    }
     assert(RadarCatalog::isValidRadarId("KTLX"));
     assert(RadarCatalog::isValidRadarId("PAHG"));
     assert(RadarCatalog::isValidRadarId("TATL"));

@@ -23,6 +23,7 @@ coverage/
 /data/vad_replay/
 /data/tbss_replay/
 /data/moore_replay/
+/data/mayfield_replay/
 __pycache__/
 *.py[cod]
 /aqtinstall.log
