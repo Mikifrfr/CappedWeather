@@ -33,7 +33,7 @@ Ready to build (data live now, testable hermetically plus replay):
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
 
 Research-gated (confirm open shape first, METAR/ECCC style):
-- [ ] Nearest-radar mosaic. PROTOTYPED 2026-10-10 (`tools/mosaic_probe.cpp`, scored in `docs/mosaic-seams.md`): same-tilt max/nearest compositing fails on Moore 2013 KTLX+KINX (beams differ ~5 km on the headline storm, both-echo RMSE 10.6 dB, only 73/815 cells beam-match to 4 km). Mosaic earns a layer only with lowest-beam-wins or CAPPI matching plus sub-volume time sync and a second scored case.
+- [ ] Nearest-radar mosaic. PROTOTYPED 2026-10-10 (`tools/mosaic_probe.cpp`, scored in `docs/mosaic-seams.md`): same-tilt max/nearest compositing fails on Moore 2013 KTLX+KINX (beams differ ~5 km on the headline storm, both-echo RMSE 10.6 dB, only 73/815 cells beam-match to 4 km). CAPPI matching scored 2026-10-11 on the same pair (`--cappi`: RMSE 9.67, beam-matched cells 5-6 dB, 6.3x more comparable cells; SAILS-duplicate selection caution documented). Mosaic earns a layer only with sub-volume time sync plus a second scored case on top.
 
 ## Non-goals (for now)
 - Full GR-style product scripting language

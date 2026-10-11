@@ -2,6 +2,8 @@
 // one geographic grid, matched-tilt reflectivity from each, and the seam
 // numbers a mosaic commit needs: coverage gain, both-echo disagreement
 // (bias/RMSE/|d|>5 dB share), and beam-height mismatch where both see echo.
+// --cappi HMSL swaps the matched tilt for altitude-matched sampling (each
+// radar's tilt closest to HMSL MSL per cell) to score CAPPI compositing.
 // Same decode + geometry as the live canvas (decodeLevel2Archive,
 // rangeAndBearing, gateIndexForSlantRange, nativeValue), so the numbers
 // describe production sampling, not a toy model. Deterministic: fixed grid,
@@ -21,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -37,6 +40,10 @@ struct VolumeView {
     double tiltElevationDegrees = 0.0;
     // Azimuth-sorted (azimuth, ray index) over the matched tilt only.
     std::vector<std::pair<double, std::size_t>> rayIndex;
+    // CAPPI mode: azimuth-sorted (azimuth, ray index) per tilt elevation,
+    // so each cell can sample the tilt whose beam rides closest to the
+    // target altitude instead of one matched tilt for the whole grid.
+    std::map<double, std::vector<std::pair<double, std::size_t>>> tiltRays;
 };
 
 struct CellSample {
@@ -98,6 +105,28 @@ bool loadVolume(const std::string& path, const std::string& radarId, double targ
     }
     out.tiltElevationDegrees = tiltElev;
     out.chunk = chunk;
+    // Per-tilt azimuth index for CAPPI mode: same 0.05 deg grouping the
+    // matched tilt uses, so both modes sample identical ray sets.
+    for (std::size_t i = 0; i < out.chunk.rays.size(); ++i) {
+        const auto& ray = out.chunk.rays[i];
+        if (!ray.has(cappedweather::ProductKind::Reflectivity)) continue;
+        bool placed = false;
+        for (auto& [elev, index] : out.tiltRays) {
+            if (std::abs(ray.elevationDegrees - elev) <= 0.05) {
+                index.emplace_back(ray.azimuthDegrees, i);
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            out.tiltRays[ray.elevationDegrees].emplace_back(ray.azimuthDegrees, i);
+        }
+    }
+    for (auto& [elev, index] : out.tiltRays) {
+        (void)elev;
+        std::sort(index.begin(), index.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+    }
     long long tiltGates = 0, tiltEcho = 0;
     constexpr std::size_t kRef = static_cast<std::size_t>(cappedweather::ProductKind::Reflectivity);
     for (std::size_t i = 0; i < out.chunk.rays.size(); ++i) {
@@ -145,46 +174,80 @@ bool loadVolume(const std::string& path, const std::string& radarId, double targ
     return true;
 }
 
-CellSample sampleVolume(const VolumeView& view, double lat, double lon, double echoThresholdDbz) {
+bool sampleTiltRays(const VolumeView& view,
+                    const std::vector<std::pair<double, std::size_t>>& index, double lat,
+                    double lon, double& beamMslMeters, double& dbz) {
     using namespace cappedweather;
-    CellSample sample;
+    if (index.empty()) return false;
     const auto location =
         rangeAndBearing({view.siteLat, view.siteLon}, {lat, lon});
     if (!std::isfinite(location.distanceMeters) || location.distanceMeters < 1000.0 ||
         location.distanceMeters > 460000.0)
-        return sample;
+        return false;
     const auto circularDifference = [azimuth = location.bearingDegrees](double candidate) {
         const double direct = std::abs(candidate - azimuth);
         return std::min(direct, 360.0 - direct);
     };
     const auto candidate =
-        std::lower_bound(view.rayIndex.cbegin(), view.rayIndex.cend(), location.bearingDegrees,
+        std::lower_bound(index.cbegin(), index.cend(), location.bearingDegrees,
                          [](const auto& indexed, double target) { return indexed.first < target; });
-    auto nearest = candidate == view.rayIndex.cend() ? view.rayIndex.cbegin() : candidate;
+    auto nearest = candidate == index.cend() ? index.cbegin() : candidate;
     auto nearestDiff = circularDifference(nearest->first);
-    const auto previous = candidate == view.rayIndex.cbegin()
-                              ? std::prev(view.rayIndex.cend())
-                              : std::prev(candidate);
+    const auto previous =
+        candidate == index.cbegin() ? std::prev(index.cend()) : std::prev(candidate);
     if (circularDifference(previous->first) < nearestDiff) {
         nearest = previous;
         nearestDiff = circularDifference(previous->first);
     }
     constexpr std::size_t kProduct = static_cast<std::size_t>(ProductKind::Reflectivity);
     const auto& ray = view.chunk.rays.at(nearest->second);
-    if (nearestDiff > std::max(1.5, ray.azimuthResolutionDegrees * 1.5)) return sample;
+    if (nearestDiff > std::max(1.5, ray.azimuthResolutionDegrees * 1.5)) return false;
     const auto slant =
         slantRangeForSurfaceDistance(location.distanceMeters, ray.elevationDegrees);
     const auto gate = gateIndexForSlantRange(slant, ray.firstGateByProduct.at(kProduct),
                                             ray.gateSpacingByProduct.at(kProduct),
                                             ray.fields.at(kProduct).size());
-    if (!gate) return sample;
+    if (!gate) return false;
     const auto value = nativeValue(ray.fields.at(kProduct).at(*gate),
                                    ray.scaleByProduct.at(kProduct), ray.offsetByProduct.at(kProduct));
-    if (!value.has_value()) return sample;
+    if (!value.has_value()) return false;
     const BeamGeometry beam = standardBeamGeometry(slant, ray.elevationDegrees);
-    sample.beamMslMeters = view.siteMslMeters + beam.heightAboveRadarMeters;
-    sample.dbz = *value;
-    sample.hasEcho = *value >= echoThresholdDbz;
+    beamMslMeters = view.siteMslMeters + beam.heightAboveRadarMeters;
+    dbz = *value;
+    return true;
+}
+
+CellSample sampleVolume(const VolumeView& view, double lat, double lon, double echoThresholdDbz) {
+    CellSample sample;
+    double beamMsl = std::numeric_limits<double>::quiet_NaN();
+    double dbz = std::numeric_limits<double>::quiet_NaN();
+    if (!sampleTiltRays(view, view.rayIndex, lat, lon, beamMsl, dbz)) return sample;
+    sample.beamMslMeters = beamMsl;
+    sample.dbz = dbz;
+    sample.hasEcho = dbz >= echoThresholdDbz;
+    return sample;
+}
+
+// CAPPI sampler: across every tilt, the gate whose beam center rides
+// closest to targetMslMeters. Same azimuth/gate/QC rules as the matched
+// tilt path, so differences come from altitude matching, not sampling.
+CellSample sampleCappi(const VolumeView& view, double lat, double lon, double echoThresholdDbz,
+                       double targetMslMeters) {
+    CellSample sample;
+    double bestMiss = std::numeric_limits<double>::infinity();
+    for (const auto& [elev, index] : view.tiltRays) {
+        (void)elev;
+        double beamMsl = std::numeric_limits<double>::quiet_NaN();
+        double dbz = std::numeric_limits<double>::quiet_NaN();
+        if (!sampleTiltRays(view, index, lat, lon, beamMsl, dbz)) continue;
+        const double miss = std::abs(beamMsl - targetMslMeters);
+        if (miss < bestMiss) {
+            bestMiss = miss;
+            sample.beamMslMeters = beamMsl;
+            sample.dbz = dbz;
+            sample.hasEcho = dbz >= echoThresholdDbz;
+        }
+    }
     return sample;
 }
 
@@ -194,6 +257,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     std::string pathA, pathB, idA, idB;
     double targetElev = 0.5, boxHalfDeg = 2.0, stepDeg = 0.02, threshDbz = 10.0;
+    double cappiMslMeters = std::numeric_limits<double>::quiet_NaN();
     double centerLat = std::numeric_limits<double>::quiet_NaN();
     double centerLon = std::numeric_limits<double>::quiet_NaN();
     for (int i = 1; i < argc;) {
@@ -227,11 +291,12 @@ int main(int argc, char** argv) {
             continue;
         }
         if (flag == "--elev" || flag == "--box" || flag == "--step" || flag == "--thresh" ||
-            flag == "--clat" || flag == "--clon") {
+            flag == "--clat" || flag == "--clon" || flag == "--cappi") {
             double* out = flag == "--elev"    ? &targetElev
                           : flag == "--box"   ? &boxHalfDeg
                           : flag == "--step"  ? &stepDeg
                           : flag == "--thresh" ? &threshDbz
+                          : flag == "--cappi"  ? &cappiMslMeters
                           : flag == "--clat"   ? &centerLat
                                                : &centerLon;
             if (!needDouble(*out)) return EXIT_FAILURE;
@@ -244,7 +309,13 @@ int main(int argc, char** argv) {
         !(boxHalfDeg > 0.0) || !(stepDeg > 0.0) || boxHalfDeg > 10.0) {
         std::fprintf(stderr,
                      "usage: mosaic_probe --a VOL --b VOL [--ida ID --idb ID] "
-                     "--clat LAT --clon LON [--elev 0.5 --box 2 --step 0.02 --thresh 10]\n");
+                     "--clat LAT --clon LON [--elev 0.5 --box 2 --step 0.02 --thresh 10]\n"
+                     "  --cappi HMSL: sample each radar's tilt closest to HMSL MSL instead of one\n"
+                     "  matched tilt (altitude-matched compositing probe)\n");
+        return EXIT_FAILURE;
+    }
+    if (std::isfinite(cappiMslMeters) && cappiMslMeters <= 0.0) {
+        std::fprintf(stderr, "mosaic_probe: --cappi needs a positive MSL altitude in meters\n");
         return EXIT_FAILURE;
     }
 
@@ -260,6 +331,8 @@ int main(int argc, char** argv) {
     }
     std::printf("tilt %s %.2f deg, %s %.2f deg\n", a.radarId.c_str(), a.tiltElevationDegrees,
                 b.radarId.c_str(), b.tiltElevationDegrees);
+    const bool cappi = std::isfinite(cappiMslMeters);
+    if (cappi) std::printf("cappi target %.0f m MSL\n", cappiMslMeters);
 
     long long cells = 0, echoA = 0, echoB = 0, echoBoth = 0, echoEither = 0;
     double sumDelta = 0.0, sumDeltaSq = 0.0, sumBeamDelta = 0.0;
@@ -279,8 +352,10 @@ int main(int argc, char** argv) {
     for (double lat = centerLat - boxHalfDeg; lat <= centerLat + boxHalfDeg + 1e-9; lat += stepDeg) {
         for (double lon = centerLon - boxHalfDeg; lon <= centerLon + boxHalfDeg + 1e-9;
              lon += stepDeg) {
-            const auto sa = sampleVolume(a, lat, lon, threshDbz);
-            const auto sb = sampleVolume(b, lat, lon, threshDbz);
+            const auto sa = cappi ? sampleCappi(a, lat, lon, threshDbz, cappiMslMeters)
+                                  : sampleVolume(a, lat, lon, threshDbz);
+            const auto sb = cappi ? sampleCappi(b, lat, lon, threshDbz, cappiMslMeters)
+                                  : sampleVolume(b, lat, lon, threshDbz);
             // Outside both coverages (no gate from either radar): not data.
             if (std::isnan(sa.dbz) && std::isnan(sb.dbz)) continue;
             ++cells;

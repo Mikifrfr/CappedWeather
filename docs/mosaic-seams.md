@@ -46,3 +46,38 @@ Naive same-tilt max/nearest compositing is not trustworthy: it mixes
 altitudes and misregisters by design. A mosaic earns trust only with
 lowest-beam-wins or CAPPI-level matching plus sub-volume time sync, then a
 second scored case. Until then the mosaic stays a probe, not a layer.
+
+## CAPPI-matched probe (2026-10-11, same Moore pair)
+
+`--cappi HMSL` samples each radar's tilt closest to HMSL MSL per cell
+(identical azimuth/gate/QC rules as the matched path) and scores the same
+seam table. Same volumes, box, step and threshold as the baseline above:
+
+- baseline rerun (`--elev 0.5`): both 857, bias -3.14, RMSE 10.71, p50 7.0,
+  p90 17.0, 60.1% over 5 dB (reproduces the 10-10 headline metrics: 815,
+  -3.58, 10.62, 7.0, 17.0, 59.3%)
+- CAPPI 1500 m: both 5396, bias -2.05, RMSE 9.67, p50 5.0, p90 16.0,
+  48.2% over 5 dB; beam-matched (<=1 km) subset RMSE 5.13 (n=1311)
+- CAPPI 2500 m: both 5470, bias -1.92, RMSE 9.67, p50 5.0, p90 16.0,
+  47.6% over 5 dB; <=1 km subset RMSE 6.13 (n=1839)
+
+Altitude matching cuts overall RMSE 10.71 to 9.67 with 6.3x more
+comparable cells, and beam-matched cells reach 5-6 dB. The residual is
+still time sync (64 s moves the storm ~1.5 km against a 0.02 deg grid)
+plus resolution and partial-beam differences. Caveat: the both-echo
+populations differ (CAPPI sees storm-top echo invisible at 0.5 deg), so
+the RMSE delta mixes better matching with a different sample, not a
+pure paired comparison. Still research-only: needs the second scored
+case from the decision above before any layer.
+
+## SAILS-duplicate caution (found 2026-10-11)
+
+The same volumes match different 0.5 deg sweeps by target: `--elev 0.45`
+lands KTLX 0.44 (256 rays, sector SAILS cut) and KINX 0.40 (152 rays),
+while `--elev 0.5` lands KTLX 0.45 (261 rays) and KINX 0.45 (1220 rays,
+full surveillance). The volumes carry duplicate near-0.5 deg sweeps and
+the lowest-elevation tie-break picks whichever duplicate sorts first, so
+matched-tilt numbers are sensitive to the target string, not just the
+weather. CAPPI mode is immune (it samples every tilt). A pristine-tree
+rerun confirmed the refactor changed nothing: stashed code prints
+bit-identical baseline numbers.
