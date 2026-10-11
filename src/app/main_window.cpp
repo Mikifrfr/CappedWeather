@@ -651,6 +651,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(wpcCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setWpcVisible(visible);
+        if (visible && wpcSource_) wpcSource_->refresh();
         refreshLayerBadges();
     });
     connect(hmsCheck_, &QCheckBox::toggled, this, [this](bool visible) {
@@ -1014,7 +1015,7 @@ MainWindow::MainWindow(QWidget* parent)
     overlaySource_->refresh();
     spcSource_->refresh();
     nhcSource_->refresh();
-    wpcSource_->refresh();
+    if (wpcCheck_ && wpcCheck_->isChecked()) wpcSource_->refresh();
     hmsSource_->refresh();
     datSource_->refresh();
     // Heavy raster context stays opt-in: no fetch on startup when the
@@ -3483,7 +3484,7 @@ void MainWindow::restoreSettings() {
     spcOutlookCheck_->setChecked(settings.value(QStringLiteral("overlays/spcOutlook"), true).toBool());
     spcFireCheck_->setChecked(settings.value(QStringLiteral("overlays/spcFire"), true).toBool());
     nhcCheck_->setChecked(settings.value(QStringLiteral("overlays/nhc"), true).toBool());
-    wpcCheck_->setChecked(settings.value(QStringLiteral("overlays/wpcEro"), true).toBool());
+    wpcCheck_->setChecked(settings.value(QStringLiteral("overlays/wpcEro"), false).toBool());
     hmsCheck_->setChecked(settings.value(QStringLiteral("overlays/hmsSmoke"), true).toBool());
     datCheck_->setChecked(settings.value(QStringLiteral("overlays/datPaths"), true).toBool());
     hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), false).toBool());

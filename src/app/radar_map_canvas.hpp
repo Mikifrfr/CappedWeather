@@ -726,7 +726,7 @@ private:
     bool spcOutlookVisible_ = true;
     bool spcFireVisible_ = true;
     bool nhcVisible_ = true;
-    bool wpcVisible_ = true;
+    bool wpcVisible_ = false;
     bool hmsVisible_ = true;
     bool datVisible_ = true;
     bool hrrrVisible_ = false;
