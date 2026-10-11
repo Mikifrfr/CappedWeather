@@ -81,6 +81,26 @@ public:
 
     static QVector<WeatherWarning> parseAlerts(const QByteArray& data, QString* error = nullptr);
     static QVector<WarningPolygon> parseZone(const QByteArray& data, QString* error = nullptr);
+    // Disk-persisted NWS zone geometry: api.weather.gov zone boundaries are
+    // static admin shapes, so response bodies survive restarts (7-day reuse,
+    // 30-day prune, conditional revalidation after). Bodies only: polygons
+    // reparse through parseZone on load, so a corrupt entry fails closed to
+    // a refetch. Alerts and reports never persist: they must stay live.
+    struct ZoneDiskEntry {
+        QByteArray body;
+        QByteArray etag;
+        QByteArray modified;
+        qint64 fetchedAtSecs = 0;
+    };
+    using ZoneDiskCache = QHash<QString, ZoneDiskEntry>;
+    static QByteArray serializeZoneDiskCache(const ZoneDiskCache& cache, QString* error = nullptr);
+    // Malformed input fails closed to empty, never partial.
+    static ZoneDiskCache parseZoneDiskCache(const QByteArray& data);
+    // Test hook: override the cache file location (default: CacheLocation).
+    // Assigning reloads, so tests can point a fresh source at a fixture.
+    void setZoneDiskCachePath(const QString& path);
+    // Warmed zone geometries (disk preload plus this session's fetches).
+    [[nodiscard]] int zoneCachedCount() const { return zoneCache_.size(); }
     // Environment Canada MSC GeoMet weather-alerts collection (open OGC
     // API, no key): same WeatherWarning row shape as NWS so paint, probe,
     // cards, badges, and alerts treat both countries identically.
@@ -234,10 +254,20 @@ private:
     std::array<QVector<StormReport>, 6> reportSets_;
     QHash<QString, QVector<int>> zoneWarningIndexes_;
     QHash<QString, QVector<WarningPolygon>> zoneCache_;
+    // NWS zone boundaries are static admin shapes: response bodies persist
+    // on disk (see ZoneDiskEntry) and preload here at construction, so warm
+    // starts skip hundreds of zone refetches. fetchedAt tracks 7-day reuse.
+    QHash<QString, qint64> zoneFetchedAt_;
+    QString zoneDiskCacheOverride_;
+    bool zoneCacheDirty_ = false;
+    void loadZoneDiskCache();
+    void saveZoneDiskCache();
+    QString zoneDiskCachePath() const;
+    bool zoneGeometryFresh(const QString& zoneUrl, qint64 nowSecs) const;
     // Offline/304 cache: responseBodies_ holds the last good body per URL so
     // a 304 revalidation can republish without network bytes; responseEtags_/
     // responseLastModified_ feed the conditional headers set in request().
-    // Zone geometry is excluded from revalidation and cached separately above.
+    // Zone geometry joins the same revalidation (not a separate cache).
     QHash<QUrl, QByteArray> responseBodies_;
     QHash<QUrl, QByteArray> responseEtags_;
     QHash<QUrl, QByteArray> responseLastModified_;

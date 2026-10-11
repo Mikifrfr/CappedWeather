@@ -18,7 +18,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
 - [ ] Flatpak. Artifacts already ship, discovery is the gap. (Windows update discovery is done: Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only.)
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
-- [ ] Cold-start staging for the NWS zone fan-out (yesterday's launch fired ~276 zone requests behind one alerts response). Needs per-source counts/timing plus time-to-first-radar-render first; then prioritize viewport zones and defer the rest. Alerts stay complete: staging only, no filtering.
+- [ ] Live request-count check for the zone disk cache (hermetic round-trip/expiry/preload tests are green; still to read the status-bar request totals across two real launches with active alerts and confirm the second one drops to uncached-only).
 
 ### Research (explicitly not next)
 - [ ] GPU volume rendering of live Level II. Design in `docs/gpu-volume-rendering.md` (shared VolumeBrick, GL raymarcher plus CPU twin). Not started.
@@ -41,6 +41,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- NWS zone geometry disk cache (api.weather.gov zone bodies persist under CacheLocation, 7-day reuse without any request, 30-day prune, conditional revalidation after, one write per refresh round; warm starts skip unchanged geometry while alerts/reports stay live; live Dallas County TXC303 fixture plus round-trip/expiry/corrupt/preload hermetic tests).
 - GOES paint
  
 ...[truncated 305 chars]

@@ -5,7 +5,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QNetworkReply>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QTimeZone>
 #include <QUrl>
@@ -382,6 +386,150 @@ WeatherOverlaySource::WeatherOverlaySource(QObject* parent)
     publishTimer_->setSingleShot(true);
     publishTimer_->setInterval(100);
     connect(publishTimer_, &QTimer::timeout, this, &WeatherOverlaySource::publishOverlaySnapshot);
+    // Warm-start fast path: static zone boundaries preload from disk, so a
+    // restart with active alerts skips refetching unchanged geometry.
+    loadZoneDiskCache();
+}
+
+namespace {
+
+// Zone disk cache bounds: reuse bodies under 7 days old without any
+// request, prune entries older than 30 days, cap the file at 3000 zones
+// (CONUS has ~3k county zones; fire-weather zones ride the same file).
+constexpr qint64 kZoneReuseSecs = 7 * 86400;
+constexpr qint64 kZonePruneSecs = 30 * 86400;
+constexpr int kZoneDiskCap = 3000;
+constexpr int kZoneDiskVersion = 1;
+
+}  // namespace
+
+QByteArray WeatherOverlaySource::serializeZoneDiskCache(const ZoneDiskCache& cache, QString* error) {
+    if (error) error->clear();
+    QJsonObject zones;
+    for (auto it = cache.cbegin(); it != cache.cend(); ++it) {
+        const auto& entry = it.value();
+        if (it.key().isEmpty() || entry.body.isEmpty() || entry.fetchedAtSecs <= 0) {
+            if (error) *error = QStringLiteral("zone cache entry is incomplete");
+            return {};
+        }
+        QJsonObject record;
+        record.insert(QStringLiteral("body"), QString::fromLatin1(entry.body.toBase64()));
+        record.insert(QStringLiteral("etag"), QString::fromUtf8(entry.etag));
+        record.insert(QStringLiteral("modified"), QString::fromUtf8(entry.modified));
+        record.insert(QStringLiteral("fetchedAt"), entry.fetchedAtSecs);
+        zones.insert(it.key(), record);
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), kZoneDiskVersion);
+    root.insert(QStringLiteral("zones"), zones);
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
+WeatherOverlaySource::ZoneDiskCache WeatherOverlaySource::parseZoneDiskCache(const QByteArray& data) {
+    ZoneDiskCache cache;
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) return cache;
+    const auto root = document.object();
+    if (root.value(QStringLiteral("version")).toInt(-1) != kZoneDiskVersion) return cache;
+    const auto zones = root.value(QStringLiteral("zones"));
+    if (!zones.isObject()) return cache;
+    const auto objects = zones.toObject();
+    for (auto it = objects.begin(); it != objects.end(); ++it) {
+        if (!it.value().isObject()) return ZoneDiskCache{};
+        const auto record = it.value().toObject();
+        const auto body = QByteArray::fromBase64(record.value(QStringLiteral("body")).toString().toLatin1());
+        const auto fetchedAt = record.value(QStringLiteral("fetchedAt")).toVariant().toLongLong();
+        if (it.key().isEmpty() || body.isEmpty() || fetchedAt <= 0) return ZoneDiskCache{};
+        ZoneDiskEntry entry;
+        entry.body = body;
+        entry.etag = record.value(QStringLiteral("etag")).toString().toUtf8();
+        entry.modified = record.value(QStringLiteral("modified")).toString().toUtf8();
+        entry.fetchedAtSecs = fetchedAt;
+        cache.insert(it.key(), entry);
+    }
+    return cache;
+}
+
+void WeatherOverlaySource::setZoneDiskCachePath(const QString& path) {
+    zoneDiskCacheOverride_ = path;
+    loadZoneDiskCache();
+}
+
+QString WeatherOverlaySource::zoneDiskCachePath() const {
+    if (!zoneDiskCacheOverride_.isEmpty()) return zoneDiskCacheOverride_;
+    const auto dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (dir.isEmpty()) return {};
+    return dir + QStringLiteral("/overlay_zone_cache.json");
+}
+
+bool WeatherOverlaySource::zoneGeometryFresh(const QString& zoneUrl, const qint64 nowSecs) const {
+    const auto fetchedAt = zoneFetchedAt_.value(zoneUrl, 0);
+    return fetchedAt > 0 && nowSecs >= fetchedAt && nowSecs - fetchedAt <= kZoneReuseSecs;
+}
+
+void WeatherOverlaySource::loadZoneDiskCache() {
+    const auto path = zoneDiskCachePath();
+    if (path.isEmpty()) return;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return;
+    const auto cache = parseZoneDiskCache(file.readAll());
+    file.close();
+    if (cache.isEmpty()) return;
+    // Replace semantics: the file is the whole warmed set, so a re-pointed
+    // source (and every fresh construction) matches it exactly instead of
+    // accumulating live arrivals across loads.
+    zoneCache_.clear();
+    zoneFetchedAt_.clear();
+    const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
+    // Newest first so the cap drops stale entries, not fresh ones.
+    auto urls = cache.keys();
+    std::sort(urls.begin(), urls.end(), [&](const QString& a, const QString& b) {
+        return cache.value(a).fetchedAtSecs > cache.value(b).fetchedAtSecs;
+    });
+    int kept = 0;
+    for (const auto& url : urls) {
+        const auto& entry = cache[url];
+        if (nowSecs - entry.fetchedAtSecs > kZonePruneSecs) continue;
+        if (kept >= kZoneDiskCap) break;
+        QString error;
+        const auto polygons = parseZone(entry.body, &error);
+        if (!error.isEmpty() || polygons.isEmpty()) continue;
+        zoneCache_.insert(url, polygons);
+        zoneFetchedAt_.insert(url, entry.fetchedAtSecs);
+        const QUrl key(url);
+        responseBodies_.insert(key, entry.body);
+        if (!entry.etag.isEmpty()) responseEtags_.insert(key, entry.etag);
+        if (!entry.modified.isEmpty()) responseLastModified_.insert(key, entry.modified);
+        ++kept;
+    }
+}
+
+void WeatherOverlaySource::saveZoneDiskCache() {
+    const auto path = zoneDiskCachePath();
+    if (path.isEmpty()) return;
+    ZoneDiskCache cache;
+    const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
+    for (auto it = zoneCache_.cbegin(); it != zoneCache_.cend(); ++it) {
+        const QUrl key(it.key());
+        const auto body = responseBodies_.value(key);
+        if (body.isEmpty()) continue;
+        ZoneDiskEntry entry;
+        entry.body = body;
+        entry.etag = responseEtags_.value(key);
+        entry.modified = responseLastModified_.value(key);
+        entry.fetchedAtSecs = zoneFetchedAt_.value(it.key(), nowSecs);
+        cache.insert(it.key(), entry);
+    }
+    if (cache.isEmpty()) return;
+    QString error;
+    const auto data = serializeZoneDiskCache(cache, &error);
+    if (!error.isEmpty() || data.isEmpty()) return;
+    QFile file(path);
+    const auto dir = QFileInfo(path).dir();
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) return;
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    file.write(data);
 }
 
 QString warningCountdownText(const QDateTime& expires, const QDateTime& now) {
@@ -1087,12 +1235,12 @@ void WeatherOverlaySource::requestMeteoFollowUps() {
 
 void WeatherOverlaySource::request(const QUrl& url, RequestContext context, const QByteArray& accept) {
     auto request = makeRequest(url, QString::fromUtf8(accept));
-    if (context.kind != RequestKind::Zone) {
-        if (const auto etag = responseEtags_.value(url); !etag.isEmpty())
-            request.setRawHeader(QByteArrayLiteral("If-None-Match"), etag);
-        if (const auto modified = responseLastModified_.value(url); !modified.isEmpty())
-            request.setRawHeader(QByteArrayLiteral("If-Modified-Since"), modified);
-    }
+    // Conditional revalidation for every cached kind including zones: a
+    // 304 serves the cached body with zero bytes (see requestFinished()).
+    if (const auto etag = responseEtags_.value(url); !etag.isEmpty())
+        request.setRawHeader(QByteArrayLiteral("If-None-Match"), etag);
+    if (const auto modified = responseLastModified_.value(url); !modified.isEmpty())
+        request.setRawHeader(QByteArrayLiteral("If-Modified-Since"), modified);
     auto* reply = network_.get(request);
     requests_.insert(reply, std::move(context));
 }
@@ -1103,19 +1251,20 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
     const auto statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     QByteArray data;
     bool responseAvailable = false;
-    if (statusCode == 304 && context.kind != RequestKind::Zone && responseBodies_.contains(url)) {
+    if (statusCode == 304 && responseBodies_.contains(url)) {
         data = responseBodies_.value(url);
         responseAvailable = true;
+        // A revalidation confirms the cached geometry: fresh again.
+        if (context.kind == RequestKind::Zone && !context.zoneUrl.isEmpty())
+            zoneFetchedAt_.insert(context.zoneUrl, QDateTime::currentSecsSinceEpoch());
     } else if (reply->error() == QNetworkReply::NoError) {
         data = reply->readAll();
         responseAvailable = true;
-        if (context.kind != RequestKind::Zone) {
-            responseBodies_.insert(url, data);
-            if (const auto etag = reply->rawHeader(QByteArrayLiteral("ETag")); !etag.isEmpty())
-                responseEtags_.insert(url, etag);
-            if (const auto modified = reply->rawHeader(QByteArrayLiteral("Last-Modified")); !modified.isEmpty())
-                responseLastModified_.insert(url, modified);
-        }
+        responseBodies_.insert(url, data);
+        if (const auto etag = reply->rawHeader(QByteArrayLiteral("ETag")); !etag.isEmpty())
+            responseEtags_.insert(url, etag);
+        if (const auto modified = reply->rawHeader(QByteArrayLiteral("Last-Modified")); !modified.isEmpty())
+            responseLastModified_.insert(url, modified);
     }
     if (!responseAvailable) {
         ++failures_;
@@ -1130,10 +1279,14 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
             auto parsed = parseAlerts(data, &error);
             if (error.isEmpty()) {
                 warnings_ = std::move(parsed);
+                const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
                 for (int warningIndex = 0; warningIndex < warnings_.size(); ++warningIndex) {
                     if (!warnings_.at(warningIndex).polygons.isEmpty()) continue;
                     for (const auto& zoneUrl : warnings_.at(warningIndex).affectedZones) {
-                        if (zoneCache_.contains(zoneUrl)) {
+                        // Disk-warmed geometry under 7 days old skips its
+                        // request entirely; stale entries revalidate with
+                        // conditional headers instead of a full download.
+                        if (zoneCache_.contains(zoneUrl) && zoneGeometryFresh(zoneUrl, nowSecs)) {
                             warnings_[warningIndex].polygons.append(zoneCache_.value(zoneUrl));
                         } else {
                             zoneWarningIndexes_[zoneUrl].push_back(warningIndex);
@@ -1268,6 +1421,8 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
             auto polygons = parseZone(data, &error);
             if (error.isEmpty()) {
                 zoneCache_.insert(context.zoneUrl, polygons);
+                zoneFetchedAt_.insert(context.zoneUrl, QDateTime::currentSecsSinceEpoch());
+                zoneCacheDirty_ = true;
                 for (const auto index : zoneWarningIndexes_.value(context.zoneUrl)) {
                     if (index >= 0 && index < warnings_.size()) warnings_[index].polygons.append(polygons);
                 }
@@ -1281,6 +1436,11 @@ void WeatherOverlaySource::requestFinished(QNetworkReply* reply) {
     }
     reply->deleteLater();
     --pending_;
+    // One disk write per refresh round, only when zone geometry changed.
+    if (pending_ == 0 && zoneCacheDirty_) {
+        zoneCacheDirty_ = false;
+        saveZoneDiskCache();
+    }
     publishIfComplete();
 }
 

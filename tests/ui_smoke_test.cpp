@@ -568,6 +568,130 @@ static bool testHodographPaint(QString* error) {
     return true;
 }
 
+static bool testZoneDiskCache(QString* error) {
+    // NWS zone disk cache: live Dallas County zone body (api.weather.gov
+    // zones/county/TXC303, fetched 2026-10-11, Polygon with 36 ring points)
+    // must parse, round-trip through the disk format, and preload a fresh
+    // source. Garbage fails closed to empty so a corrupt file only costs a
+    // refetch, never a dropped warning.
+    const std::string roots[] = {
+        "tests/fixtures/",
+        "../tests/fixtures/",
+        "../../tests/fixtures/",
+    };
+    QString fixturePath;
+    for (const auto& root : roots) {
+        const std::string path = root + "zone_ok.json";
+        std::ifstream file(path, std::ios::binary);
+        if (file) {
+            fixturePath = QString::fromStdString(path);
+            break;
+        }
+    }
+    if (fixturePath.isEmpty()) {
+        *error = QStringLiteral("zone fixture missing");
+        return false;
+    }
+    QFile fixture(fixturePath);
+    if (!fixture.open(QIODevice::ReadOnly)) {
+        *error = QStringLiteral("zone fixture unreadable");
+        return false;
+    }
+    const QByteArray body = fixture.readAll();
+    QString parseError;
+    const auto polygons = WeatherOverlaySource::parseZone(body, &parseError);
+    if (!parseError.isEmpty() || polygons.size() != 1 || polygons.front().exterior.size() != 36) {
+        *error = QStringLiteral("live zone fixture should parse to one 36-point polygon");
+        return false;
+    }
+    const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
+    const QString zoneUrl = QStringLiteral("https://api.weather.gov/zones/county/TXC303");
+    WeatherOverlaySource::ZoneDiskCache cache;
+    WeatherOverlaySource::ZoneDiskEntry entry;
+    entry.body = body;
+    entry.etag = QByteArrayLiteral("\"abc123\"");
+    entry.modified = QByteArrayLiteral("Sat, 11 Oct 2026 10:00:00 GMT");
+    entry.fetchedAtSecs = nowSecs;
+    cache.insert(zoneUrl, entry);
+    QString serializeError;
+    const auto data = WeatherOverlaySource::serializeZoneDiskCache(cache, &serializeError);
+    if (!serializeError.isEmpty() || data.isEmpty()) {
+        *error = QStringLiteral("zone cache should serialize");
+        return false;
+    }
+    const auto roundTripped = WeatherOverlaySource::parseZoneDiskCache(data);
+    const auto back = roundTripped.value(zoneUrl);
+    if (roundTripped.size() != 1 || back.body != body || back.etag != entry.etag ||
+        back.modified != entry.modified || back.fetchedAtSecs != nowSecs) {
+        *error = QStringLiteral("zone cache round trip lost data");
+        return false;
+    }
+    // Fail-closed inputs: garbage, wrong version, incomplete entry.
+    if (!WeatherOverlaySource::parseZoneDiskCache(QByteArrayLiteral("not json")).isEmpty() ||
+        !WeatherOverlaySource::parseZoneDiskCache(QByteArrayLiteral("{}")).isEmpty() ||
+        !WeatherOverlaySource::parseZoneDiskCache(
+             QByteArrayLiteral("{\"version\":2,\"zones\":{}}"))
+             .isEmpty() ||
+        !WeatherOverlaySource::parseZoneDiskCache(
+             QByteArrayLiteral("{\"version\":1,\"zones\":{\"u\":{\"body\":\"\",\"fetchedAt\":5}}}"))
+             .isEmpty()) {
+        *error = QStringLiteral("malformed zone cache should parse to empty");
+        return false;
+    }
+    WeatherOverlaySource::ZoneDiskCache incomplete;
+    WeatherOverlaySource::ZoneDiskEntry bad;
+    bad.fetchedAtSecs = nowSecs;
+    incomplete.insert(zoneUrl, bad);
+    if (!WeatherOverlaySource::serializeZoneDiskCache(incomplete, &serializeError).isEmpty() ||
+        serializeError.isEmpty()) {
+        *error = QStringLiteral("incomplete zone entry should fail serialization");
+        return false;
+    }
+    // Preload plus prune: a fresh source pointed at the cache file warms
+    // one zone; a 31-day-old entry is dropped.
+    QTemporaryDir staging;
+    if (!staging.isValid()) {
+        *error = QStringLiteral("no temp space for the zone cache test");
+        return false;
+    }
+    const QString cachePath = staging.filePath(QStringLiteral("zones.json"));
+    QFile cacheFile(cachePath);
+    if (!cacheFile.open(QIODevice::WriteOnly) || cacheFile.write(data) != data.size()) {
+        *error = QStringLiteral("could not stage the zone cache");
+        return false;
+    }
+    cacheFile.close();
+    WeatherOverlaySource warmed;
+    warmed.setZoneDiskCachePath(cachePath);
+    if (warmed.zoneCachedCount() != 1) {
+        *error = QStringLiteral("fresh source should preload one cached zone");
+        return false;
+    }
+    WeatherOverlaySource::ZoneDiskCache stale;
+    WeatherOverlaySource::ZoneDiskEntry old = entry;
+    old.fetchedAtSecs = nowSecs - 31 * 86400;
+    stale.insert(zoneUrl, old);
+    const auto staleData = WeatherOverlaySource::serializeZoneDiskCache(stale, &serializeError);
+    if (!serializeError.isEmpty()) {
+        *error = QStringLiteral("stale zone entry should still serialize");
+        return false;
+    }
+    const QString stalePath = staging.filePath(QStringLiteral("zones_stale.json"));
+    QFile staleFile(stalePath);
+    if (!staleFile.open(QIODevice::WriteOnly) || staleFile.write(staleData) != staleData.size()) {
+        *error = QStringLiteral("could not stage the stale zone cache");
+        return false;
+    }
+    staleFile.close();
+    WeatherOverlaySource cold;
+    cold.setZoneDiskCachePath(stalePath);
+    if (cold.zoneCachedCount() != 0) {
+        *error = QStringLiteral("31-day-old zone entry should prune on load");
+        return false;
+    }
+    return true;
+}
+
 static bool testOptOutSourcesSilent(QString* error) {
     // Opt-out contract: a disabled raster/context source must not touch
     // the network on refresh (no status emissions, no timers tripped).
@@ -3935,6 +4059,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testHodographPaint(&failure)) {
             std::cerr << "Hodograph paint failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testZoneDiskCache(&failure)) {
+            std::cerr << "Zone disk cache failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testOptOutSourcesSilent(&failure)) {
