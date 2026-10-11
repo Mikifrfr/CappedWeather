@@ -367,6 +367,14 @@ if(CAPPEDWEATHER_BUILD_APP)
                 cappedweather_ui
                 Qt6::Test
             )
+
+            qt_add_executable(goes_paint_bench
+                tools/goes_paint_bench.cpp
+            )
+            target_link_libraries(goes_paint_bench PRIVATE
+                cappedweather_ui
+                Qt6::Test
+            )
         endif()
 
         set_target_properties(CappedWeather PROPERTIES

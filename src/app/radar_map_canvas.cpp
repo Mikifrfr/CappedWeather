@@ -3139,29 +3139,146 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
         return;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
-    const QRectF viewport(rect().adjusted(-40, -40, 40, 40));
-    const double cell = zoom_ >= 6 ? 4.0 : 2.5;
-    // Zoom stride: zoomed-out cells share screen pixels, so sample every
-    // 4th cell (national) or 2nd (regional) instead of all ~1.5M.
-    const std::size_t stride = zoom_ >= 6 ? 1 : (zoom_ >= 4 ? 2 : 4);
-    for (std::size_t iy = 0; iy < frame.ny; iy += stride) {
-        for (std::size_t ix = 0; ix < frame.nx; ix += stride) {
+    // Screen-space raster: one direct-pixel pass plus a single drawImage,
+    // instead of a QPainter fillRect per cell. Same sampled cells, same
+    // gray ramp and alpha; dense overlaps resolve last-wins instead of
+    // double-blending, which reads marginally lighter and is the more
+    // honest composite.
+    const int imgW = width();
+    const int imgH = height();
+    if (imgW <= 0 || imgH <= 0) {
+        painter.restore();
+        return;
+    }
+    QImage image(imgW, imgH, QImage::Format_ARGB32);
+    image.fill(Qt::transparent);
+    const double worldSize = static_cast<double>(kTileSize * (1 << zoom_));
+    const QPointF centerWorld = mapCenterWorld();
+    const double halfW = imgW / 2.0;
+    const double halfH = imgH / 2.0;
+    // Block matches the old rect size (2.5 px zoomed out, 4 px close).
+    // Zoom 5 uses 3 px blocks so stride-3 sampling stays continuous.
+    const int block = zoom_ >= 6 ? 4 : (zoom_ == 5 ? 3 : 2);
+    // Zoom stride: zoomed-out cells share screen pixels, so sample coarsely
+    // instead of all ~3.75M. At zoom 4+ the source oversamples the screen
+    // even at stride 4, so coverage is preserved.
+    const std::size_t stride = zoom_ >= 6 ? 1 : (zoom_ == 5 ? 3 : (zoom_ == 4 ? 4 : 6));
+    // Viewport-limited subwindow: forward-project viewport edge samples to
+    // fixed-grid radians and iterate only that index range. The mapping is
+    // smooth over small on-disc areas, so edge samples bound the interior
+    // (plus a 2-cell margin). Mixed success means the disc only partly
+    // covers the view, so fall back to the full scan rather than risk
+    // clipping real coverage. No success means nothing visible: skip.
+    std::size_t ixBegin = 0, ixEnd = frame.nx - 1;
+    std::size_t iyBegin = 0, iyEnd = frame.ny - 1;
+    {
+        const GeoBounds bounds = visibleLonLatBounds();
+        if (bounds.valid) {
+            double xMin = std::numeric_limits<double>::infinity();
+            double xMax = -std::numeric_limits<double>::infinity();
+            double yMin = std::numeric_limits<double>::infinity();
+            double yMax = -std::numeric_limits<double>::infinity();
+            std::size_t ok = 0;
+            constexpr int kEdge = 5;
+            for (int e = 0; e < kEdge; ++e) {
+                const double f = static_cast<double>(e) / (kEdge - 1);
+                const double lons[4] = {
+                    bounds.west + f * (bounds.east - bounds.west),
+                    bounds.west + f * (bounds.east - bounds.west),
+                    bounds.west, bounds.east,
+                };
+                const double lats[4] = {
+                    bounds.north, bounds.south,
+                    bounds.south + f * (bounds.north - bounds.south),
+                    bounds.south + f * (bounds.north - bounds.south),
+                };
+                for (int s = 0; s < 4; ++s) {
+                    const auto angles = goesFixedForward(frame.grid, lons[s], lats[s]);
+                    if (!std::isfinite(angles.xRadians) || !std::isfinite(angles.yRadians))
+                        continue;
+                    ++ok;
+                    xMin = std::min(xMin, angles.xRadians);
+                    xMax = std::max(xMax, angles.xRadians);
+                    yMin = std::min(yMin, angles.yRadians);
+                    yMax = std::max(yMax, angles.yRadians);
+                }
+            }
+            if (ok == 0) {
+                if (profiling) {
+                    std::fprintf(stderr, "paintGoes: %lld ms, 0 cells (off-disc)\n",
+                                 static_cast<long long>(profileClock.elapsed()));
+                }
+                painter.restore();
+                return;
+            }
+            if (ok == 4 * kEdge) {
+                const double marginX = 2.0 * std::abs(frame.dxRadians);
+                const double marginY = 2.0 * std::abs(frame.dyRadians);
+                const double ax0 = (xMin - marginX - frame.x0Radians) / frame.dxRadians;
+                const double ax1 = (xMax + marginX - frame.x0Radians) / frame.dxRadians;
+                const double ay0 = (yMin - marginY - frame.y0Radians) / frame.dyRadians;
+                const double ay1 = (yMax + marginY - frame.y0Radians) / frame.dyRadians;
+                ixBegin = static_cast<std::size_t>(std::clamp(
+                    std::floor(std::min(ax0, ax1)), 0.0,
+                    static_cast<double>(frame.nx - 1)));
+                ixEnd = static_cast<std::size_t>(std::clamp(
+                    std::ceil(std::max(ax0, ax1)), 0.0,
+                    static_cast<double>(frame.nx - 1)));
+                iyBegin = static_cast<std::size_t>(std::clamp(
+                    std::floor(std::min(ay0, ay1)), 0.0,
+                    static_cast<double>(frame.ny - 1)));
+                iyEnd = static_cast<std::size_t>(std::clamp(
+                    std::ceil(std::max(ay0, ay1)), 0.0,
+                    static_cast<double>(frame.ny - 1)));
+                // Stride-align the starts down so the sampled lattice is
+                // identical to a full scan: same cells, same picture.
+                ixBegin = (ixBegin / stride) * stride;
+                iyBegin = (iyBegin / stride) * stride;
+            }
+        }
+    }
+    for (std::size_t iy = iyBegin; iy <= iyEnd; iy += stride) {
+        for (std::size_t ix = ixBegin; ix <= ixEnd; ix += stride) {
             const std::size_t i = iy * frame.nx + ix;
             const float bt = frame.brightnessCelsius[i];
             if (!std::isfinite(bt) || bt > 10.0F) continue;
             const float lon = goesLonDeg_[i];
             const float lat = goesLatDeg_[i];
             if (!std::isfinite(lon) || !std::isfinite(lat)) continue;
-            const auto point = screenPoint(lat, lon);
-            if (!viewport.contains(point)) continue;
-            // Cold white to warm dark over -90..+10 C.
+            // Inline worldPoint + screenPointFromWorld: one sin/log pair,
+            // no QPointF temporaries, integer screen pixels for the raster.
+            const double latRad = qDegreesToRadians(
+                std::clamp(static_cast<double>(lat), -85.0511, 85.0511));
+            const double sinLat = std::sin(latRad);
+            const double wx =
+                (static_cast<double>(lon) + 180.0) / 360.0 * worldSize;
+            const double wy =
+                (0.5 - std::log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * kPi)) * worldSize;
+            double dx = wx - centerWorld.x();
+            if (dx > worldSize / 2.0) dx -= worldSize;
+            if (dx < -worldSize / 2.0) dx += worldSize;
+            const int px = static_cast<int>(halfW + dx);
+            const int py = static_cast<int>(halfH + wy - centerWorld.y());
+            if (px < -block || py < -block || px >= imgW + block || py >= imgH + block)
+                continue;
+            // Cold white to warm dark over -90..+10 C, same ramp as before.
             const int gray = std::clamp(
                 static_cast<int>(255.0F * (10.0F - bt) / 100.0F), 0, 255);
-            painter.fillRect(QRectF(point.x() - cell / 2.0, point.y() - cell / 2.0, cell, cell),
-                             QColor(gray, gray, gray, 110));
+            const QRgb pixel = qRgba(gray, gray, gray, 110);
+            for (int by = 0; by < block; ++by) {
+                const int yy = py + by;
+                if (yy < 0 || yy >= imgH) continue;
+                QRgb* line = reinterpret_cast<QRgb*>(image.scanLine(yy));
+                for (int bx = 0; bx < block; ++bx) {
+                    const int xx = px + bx;
+                    if (xx < 0 || xx >= imgW) continue;
+                    line[xx] = pixel;
+                }
+            }
             ++profileCells;
         }
     }
+    painter.drawImage(0, 0, image);
     if (profiling) {
         std::fprintf(stderr, "paintGoes: %lld ms, %zu cells\n",
                      static_cast<long long>(profileClock.elapsed()),

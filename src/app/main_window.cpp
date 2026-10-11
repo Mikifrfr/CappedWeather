@@ -651,6 +651,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(wpcCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setWpcVisible(visible);
+        if (wpcSource_) wpcSource_->setEnabled(visible);
         if (visible && wpcSource_) wpcSource_->refresh();
         refreshLayerBadges();
     });
@@ -660,16 +661,19 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(hrrrCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setHrrrVisible(visible);
+        if (hrrrSource_) hrrrSource_->setEnabled(visible);
         if (visible && hrrrSource_) hrrrSource_->refresh();
         refreshLayerBadges();
     });
     connect(goesCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setGoesVisible(visible);
+        if (goesSource_) goesSource_->setEnabled(visible);
         if (visible && goesSource_) goesSource_->refresh();
         refreshLayerBadges();
     });
     connect(mosaicCheck_, &QCheckBox::toggled, this, [this](bool visible) {
         for (auto* panel : maps_) panel->setMosaicVisible(visible);
+        if (mosaicSource_) mosaicSource_->setEnabled(visible);
         if (visible && mosaicSource_) mosaicSource_->refresh();
         refreshLayerBadges();
     });
@@ -1020,6 +1024,12 @@ MainWindow::MainWindow(QWidget* parent)
     datSource_->refresh();
     // Heavy raster context stays opt-in: no fetch on startup when the
     // layer is off. Toggling the checkbox refreshes on demand.
+    // setEnabled mirrors visibility so periodic timers never refetch a
+    // hidden layer; refresh() itself no-ops while disabled.
+    if (hrrrSource_) hrrrSource_->setEnabled(hrrrCheck_ && hrrrCheck_->isChecked());
+    if (goesSource_) goesSource_->setEnabled(goesCheck_ && goesCheck_->isChecked());
+    if (mosaicSource_) mosaicSource_->setEnabled(mosaicCheck_ && mosaicCheck_->isChecked());
+    if (wpcSource_) wpcSource_->setEnabled(wpcCheck_ && wpcCheck_->isChecked());
     if (hrrrCheck_ && hrrrCheck_->isChecked()) hrrrSource_->refresh();
     if (goesCheck_ && goesCheck_->isChecked()) goesSource_->refresh();
     if (mosaicCheck_ && mosaicCheck_->isChecked()) mosaicSource_->refresh();

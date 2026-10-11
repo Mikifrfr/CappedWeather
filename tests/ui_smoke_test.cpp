@@ -4005,6 +4005,109 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                     std::cerr << "GOES frame paint produced nothing\n";
                     return 1;
                 }
+                // Cache invariants: re-setting the same frame must repaint
+                // identically (deterministic georeference cache), and an
+                // off-disc view must paint exactly as if no frame were set
+                // (viewport early-out paints nothing). Every other map layer
+                // hides first so live arrivals cannot flake the pixels.
+                map->setWarningsVisible(false);
+                map->setStormReportsVisible(false);
+                map->setMetarVisible(false);
+                map->setLightningVisible(false);
+                map->setLightningFusionVisible(false);
+                map->setPlacefilesVisible(false);
+                map->setShearVisible(false);
+                map->setTvsVisible(false);
+                map->setHailVisible(false);
+                map->setZdrVisible(false);
+                map->setTbssVisible(false);
+                map->setTdsVisible(false);
+                map->setStormTrailVisible(false);
+                map->setSpcOutlookVisible(false);
+                map->setSpcFireVisible(false);
+                map->setNhcVisible(false);
+                map->setWpcVisible(false);
+                map->setHmsVisible(false);
+                map->setDatVisible(false);
+                map->setMcdVisible(false);
+                map->setHrrrVisible(false);
+                map->setMosaicVisible(false);
+                map->setGoesFrame(frame);
+                map->setView({-137.0, 30.0}, 4);
+                application.processEvents();
+                // Back-to-back grabs with no event pump between them: no
+                // tile or live arrival can land mid-comparison, so equality
+                // proves the repaint (including the georeference cache) is
+                // deterministic.
+                const QImage goesFirst = map->grab().toImage();
+                const QImage goesSecond = map->grab().toImage();
+                if (goesFirst.isNull() || goesSecond.isNull()) {
+                    std::cerr << "GOES frame paint produced nothing\n";
+                    return 1;
+                }
+                if (goesFirst != goesSecond) {
+                    std::cerr << "GOES repaint is not deterministic\n";
+                    return 1;
+                }
+                // Antipode of the GOES-East disc (subpoint 75 W): no limb
+                // cell can project here, so this exercises the off-disc
+                // early-out exactly.
+                map->setView({105.0, 0.0}, 4);
+                application.processEvents();
+                // Settle check first: two back-to-back grabs must agree once
+                // tiles for this view have landed, so any later difference
+                // belongs to the frame swap, not the network.
+                if (map->grab().toImage() != map->grab().toImage()) {
+                    std::cerr << "GOES off-disc view is not settled\n";
+                    return 1;
+                }
+                const QImage offDiscWithFrame = map->grab().toImage();
+                map->setGoesFrame(std::nullopt);
+                application.processEvents();
+                // Chrome-free crop: the context chip rows live at x 12-270
+                // (GOES row at y 250-270) and legitimately read the frame
+                // state, so the raster check starts right of the column.
+                // The chip stack skips itself below 274 px wide, so assert a
+                // real panel before comparing.
+                const auto rasterOnly = [](const QImage& image) {
+                    const int top = std::min(70, image.height() / 8);
+                    const int bottom = std::min(40, image.height() / 8);
+                    return image.copy(282, top, image.width() - 282,
+                                      image.height() - top - bottom);
+                };
+                if (offDiscWithFrame.width() <= 320) {
+                    std::cerr << "GOES panel too narrow for a raster check\n";
+                    return 1;
+                }
+                {
+                    const QImage after = rasterOnly(map->grab().toImage());
+                    const QImage before = rasterOnly(offDiscWithFrame);
+                    if (after != before) {
+                        std::size_t diff = 0;
+                        int x0 = before.width(), y0 = before.height(), x1 = 0, y1 = 0;
+                        for (int y = 0; y < before.height(); ++y) {
+                            const QRgb* a = reinterpret_cast<const QRgb*>(
+                                before.constScanLine(y));
+                            const QRgb* b = reinterpret_cast<const QRgb*>(
+                                after.constScanLine(y));
+                            for (int x = 0; x < before.width(); ++x) {
+                                if (a[x] != b[x]) {
+                                    ++diff;
+                                    x0 = std::min(x0, x);
+                                    y0 = std::min(y0, y);
+                                    x1 = std::max(x1, x);
+                                    y1 = std::max(y1, y);
+                                }
+                            }
+                        }
+                        std::cerr << "GOES off-disc view should paint nothing: diff="
+                                  << diff << " of "
+                                  << (static_cast<std::size_t>(before.width()) *
+                                      static_cast<std::size_t>(before.height()))
+                                  << " bbox=(" << x0 << "," << y0 << ")-(" << x1 << "," << y1 << ")\n";
+                        return 1;
+                    }
+                }
                 map->setGoesFrame(std::nullopt);
             }
             if (hrrrReaderAvailable()) {
