@@ -1466,6 +1466,64 @@ static bool testWheelSubStepZoom(QString* error) {
                      .arg(canvas.viewZoom());
         return false;
     }
+    // Bound overscroll never banks: sub-notch pushes against max leave no
+    // remainder, so a following full inward notch always zooms. Fails on
+    // code that only clears when a whole step is owed.
+    canvas.setView(QPointF(-97.0, 35.0), 19);
+    for (int i = 0; i < 7; ++i) sendWheel(15, 0);
+    if (canvas.viewZoom() != 19) {
+        *error = QStringLiteral("sub-notch pushes at max should hold 19, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    sendWheel(-120, 0);
+    if (canvas.viewZoom() != 18) {
+        *error = QStringLiteral("first inward notch from max should reach 18, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // Mirror case at min zoom.
+    canvas.setView(QPointF(-97.0, 35.0), 3);
+    for (int i = 0; i < 7; ++i) sendWheel(-15, 0);
+    if (canvas.viewZoom() != 3) {
+        *error = QStringLiteral("sub-notch pushes at min should hold 3, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    sendWheel(120, 0);
+    if (canvas.viewZoom() != 4) {
+        *error = QStringLiteral("first inward notch from min should reach 4, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // Arriving at a bound on a fractional step consumes the leftover, so
+    // the next inward notch still responds at once.
+    canvas.setView(QPointF(-97.0, 35.0), 18);
+    sendWheel(150, 0);
+    if (canvas.viewZoom() != 19) {
+        *error = QStringLiteral("+150 wheel should arrive at max 19, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    sendWheel(-120, 0);
+    if (canvas.viewZoom() != 18) {
+        *error = QStringLiteral("inward notch after fractional arrival should reach 18, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    canvas.setView(QPointF(-97.0, 35.0), 4);
+    sendWheel(-150, 0);
+    if (canvas.viewZoom() != 3) {
+        *error = QStringLiteral("-150 wheel should arrive at min 3, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    sendWheel(120, 0);
+    if (canvas.viewZoom() != 4) {
+        *error = QStringLiteral("inward notch after fractional arrival should reach 4, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
     // Cursor anchoring at an off-center point: the ground under the cursor
     // must not move across the zoom step.
     canvas.setView(QPointF(-97.0, 35.0), 8);

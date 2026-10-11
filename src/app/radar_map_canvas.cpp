@@ -6355,6 +6355,15 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         steps = pixelDelta / 40.0;
     }
     wheelZoomRemainder_ += std::clamp(steps, -4.0, 4.0);
+    // Bound overscroll can never apply, so drop it at once: at max zoom
+    // keep only inward (negative) remainder, at min only outward. Without
+    // this, fractions banked against a bound swallow the reversing
+    // gesture (e.g. seven +15s at max then a full -120 notch zooms
+    // nowhere). Ordinary accumulation away from bounds is untouched.
+    if (zoom_ == kMaxZoom)
+        wheelZoomRemainder_ = std::min(wheelZoomRemainder_, 0.0);
+    else if (zoom_ == kMinZoom)
+        wheelZoomRemainder_ = std::max(wheelZoomRemainder_, 0.0);
     const auto whole = static_cast<int>(std::trunc(wheelZoomRemainder_));
     if (whole == 0) {
         updateProbe(event->position());
@@ -6370,6 +6379,10 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         return;
     }
     wheelZoomRemainder_ -= whole;
+    // Landing exactly on a bound consumes the leftover fraction with it:
+    // it lies beyond the limit just like banked overscroll, so the first
+    // inward notch always responds.
+    if (target == kMaxZoom || target == kMinZoom) wheelZoomRemainder_ = 0.0;
     setZoomAt(target, event->position());
     updateProbe(event->position());
     event->accept();
