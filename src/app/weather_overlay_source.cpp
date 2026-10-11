@@ -257,6 +257,14 @@ void appendGeometry(const QJsonObject& geometry, QVector<WarningPolygon>& polygo
             const auto rings = polygonValue.toArray();
             appendPolygon(rings, polygons);
         }
+    } else if (type == QStringLiteral("GeometryCollection")) {
+        // NWS forecast zones (e.g. coastal FLZ counties) group mainland
+        // plus island MultiPolygons: recurse into members with the same
+        // polygon handling. Anything else stays ignored and fail-closed.
+        for (const auto& memberValue :
+             geometry.value(QStringLiteral("geometries")).toArray()) {
+            if (memberValue.isObject()) appendGeometry(memberValue.toObject(), polygons);
+        }
     }
 }
 

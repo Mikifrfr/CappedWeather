@@ -604,6 +604,37 @@ static bool testZoneDiskCache(QString* error) {
         *error = QStringLiteral("live zone fixture should parse to one 36-point polygon");
         return false;
     }
+    // GeometryCollection members (live FLZ forecast zones group mainland
+    // plus island MultiPolygons, verified against FLZ050 on 2026-10-11)
+    // must recurse into drawable polygons instead of failing the zone.
+    QString collectionPath;
+    for (const auto& root : roots) {
+        const std::string path = root + "zone_collection_ok.json";
+        std::ifstream file(path, std::ios::binary);
+        if (file) {
+            collectionPath = QString::fromStdString(path);
+            break;
+        }
+    }
+    if (collectionPath.isEmpty()) {
+        *error = QStringLiteral("zone collection fixture missing");
+        return false;
+    }
+    QFile collectionFile(collectionPath);
+    if (!collectionFile.open(QIODevice::ReadOnly)) {
+        *error = QStringLiteral("zone collection fixture unreadable");
+        return false;
+    }
+    const auto collectionPolygons =
+        WeatherOverlaySource::parseZone(collectionFile.readAll(), &parseError);
+    if (!parseError.isEmpty() || collectionPolygons.size() != 3 ||
+        collectionPolygons.at(0).exterior.size() != 4 ||
+        collectionPolygons.at(1).exterior.size() != 5 ||
+        collectionPolygons.at(2).exterior.size() != 4 ||
+        collectionPolygons.at(2).holes.size() != 1) {
+        *error = QStringLiteral("zone GeometryCollection should yield its three member polygons");
+        return false;
+    }
     const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
     const QString zoneUrl = QStringLiteral("https://api.weather.gov/zones/county/TXC303");
     WeatherOverlaySource::ZoneDiskCache cache;
