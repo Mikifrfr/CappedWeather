@@ -1396,6 +1396,113 @@ static bool testPresets(MainWindow* window, QString* error) {
     return true;
 }
 
+static bool testWheelSubStepZoom(QString* error) {
+    // Synthetic Qt wheel events through the real canvas path (this proves
+    // the Qt event handling, not a physical trackpad): fractional angle
+    // and pixel-only deltas must accumulate to whole zoom steps instead of
+    // truncating every event to zero. Zoom levels and the cursor anchor
+    // are asserted, never pixels, so tile arrivals cannot flake it.
+    RadarMapCanvas canvas;
+    canvas.resize(800, 600);
+    canvas.show();
+    QCoreApplication::processEvents();
+    const auto sendWheel = [&](int angleY, int pixelY, double posX = 400.0, double posY = 300.0) {
+        QWheelEvent event(QPointF(posX, posY), QPointF(posX, posY), QPoint(0, pixelY),
+                          QPoint(0, angleY), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase,
+                          false);
+        QCoreApplication::sendEvent(&canvas, &event);
+        QCoreApplication::processEvents();
+    };
+    canvas.setView(QPointF(-97.0, 35.0), 8);
+    // Eight 15-angle sub-steps make one 120 notch: old code zoomed nowhere.
+    for (int i = 0; i < 8; ++i) sendWheel(15, 0);
+    if (canvas.viewZoom() != 9) {
+        *error = QStringLiteral("8x15-angle wheel should zoom 8 to 9, stayed at %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // Pixel-only precision deltas: 4x10px make the 40px step.
+    for (int i = 0; i < 4; ++i) sendWheel(0, 10);
+    if (canvas.viewZoom() != 10) {
+        *error = QStringLiteral("4x10px wheel should zoom 9 to 10, stayed at %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // A full notch still zooms exactly one level (behavior preserved).
+    sendWheel(120, 0);
+    if (canvas.viewZoom() != 11) {
+        *error = QStringLiteral("full-notch wheel should zoom 10 to 11, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // Reversing: banked +0.5 then -1.0 nets -0.5 (no step), the next -1.0
+    // nets -1.5 (one step down). Old code stepped down on the first -120.
+    canvas.setView(QPointF(-97.0, 35.0), 8);
+    for (int i = 0; i < 4; ++i) sendWheel(15, 0);
+    sendWheel(-120, 0);
+    if (canvas.viewZoom() != 8) {
+        *error = QStringLiteral("reversed wheel should hold zoom 8, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    sendWheel(-120, 0);
+    if (canvas.viewZoom() != 7) {
+        *error = QStringLiteral("reversed wheel should reach zoom 7, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // Limits: pushing past max banks no overscroll, so the first reverse
+    // step responds immediately (a naive accumulator sticks at 19 here).
+    canvas.setView(QPointF(-97.0, 35.0), 19);
+    sendWheel(240, 0);
+    if (canvas.viewZoom() != 19) {
+        *error = QStringLiteral("wheel past max zoom should clamp at 19, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    sendWheel(-120, 0);
+    if (canvas.viewZoom() != 18) {
+        *error = QStringLiteral("reversed wheel from max should reach 18 at once, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    // Cursor anchoring at an off-center point: the ground under the cursor
+    // must not move across the zoom step.
+    canvas.setView(QPointF(-97.0, 35.0), 8);
+    const QPointF cursor(600.0, 150.0);
+    const auto before = canvas.geographicPoint(cursor);
+    for (int i = 0; i < 8; ++i) sendWheel(15, 0, 600.0, 150.0);
+    if (canvas.viewZoom() != 9) {
+        *error = QStringLiteral("anchored wheel should zoom 8 to 9, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    const auto after = canvas.geographicPoint(cursor);
+    if (std::abs(after.x() - before.x()) > 1e-6 || std::abs(after.y() - before.y()) > 1e-6) {
+        *error = QStringLiteral("cursor anchor drifted across the zoom step");
+        return false;
+    }
+    // Dominant-horizontal input still pans with zoom untouched.
+    const auto panBefore = canvas.viewCenter();
+    {
+        QWheelEvent event(QPointF(400.0, 300.0), QPointF(400.0, 300.0), QPoint(0, 0),
+                          QPoint(120, 5), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase,
+                          false);
+        QCoreApplication::sendEvent(&canvas, &event);
+        QCoreApplication::processEvents();
+    }
+    if (canvas.viewZoom() != 9) {
+        *error = QStringLiteral("horizontal wheel must not change zoom, got %1")
+                     .arg(canvas.viewZoom());
+        return false;
+    }
+    if (canvas.viewCenter() == panBefore) {
+        *error = QStringLiteral("dominant-horizontal wheel should pan the map");
+        return false;
+    }
+    return true;
+}
+
 static bool testViewHistory(QString* error) {
     RadarMapCanvas canvas;
     canvas.resize(800, 600);
@@ -4154,6 +4261,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testViewHistory(&failure)) {
             std::cerr << "View history failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testWheelSubStepZoom(&failure)) {
+            std::cerr << "Wheel sub-step zoom failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testPinnedLock(&failure)) {

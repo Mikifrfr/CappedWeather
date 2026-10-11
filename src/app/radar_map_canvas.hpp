@@ -337,6 +337,9 @@ public:
     static void clearSharedTileCache();
     QPointF viewCenter() const;
     int viewZoom() const;
+    // Screen point back to lon/lat under the current view. Public alongside
+    // the other view queries: tests pin cursor-anchored zoom with it.
+    QPointF geographicPoint(const QPointF& screen) const;
     // Visible geographic bounds for GIS export: current georeferencing,
     // no reprojection. Invalid when the panel has no size yet or the view
     // wraps the antimeridian (callers fail closed instead of writing a
@@ -487,7 +490,6 @@ private:
     QPointF mapCenterWorld() const;
     QPointF screenPointFromWorld(const QPointF& world) const;
     QPointF screenPoint(double latitude, double longitude) const;
-    QPointF geographicPoint(const QPointF& screen) const;
     void rebuildOverlay();
     void invalidateOverlay(bool preserveForZoomTransition = false);
     void paintRadarOverlay(QPainter& painter);
@@ -740,6 +742,15 @@ private:
     // the same cursor-anchored path as the wheel.
     int pinchBaseZoom_ = 0;
     double pinchAccum_ = 1.0;
+    // Mouse-wheel/trackpad zoom remainder. High-resolution wheels deliver
+    // fractional angleDelta (15/20/40) and precision trackpads deliver
+    // pixelDelta-only events, so sub-notch input accumulates here until a
+    // whole integer zoom step is owed. Cleared on programmatic view jumps
+    // (setView) and whenever the zoom clamps at a limit, so stale fractions
+    // can never stick later gestures or make reversing unresponsive.
+    // Direction changes simply add (opposite signs cancel); sources mix
+    // freely because both normalize to the same 120-angle notch unit.
+    double wheelZoomRemainder_ = 0.0;
     bool loading_ = false;
     bool warningsVisible_ = true;
     bool stormReportsVisible_ = true;

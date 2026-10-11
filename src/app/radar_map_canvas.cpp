@@ -1834,6 +1834,7 @@ void RadarMapCanvas::setView(const QPointF& center, const int zoom) {
     const auto previousZoom = zoom_;
     center_ = {std::clamp(center.x(), -180.0, 180.0), std::clamp(center.y(), -85.0, 85.0)};
     zoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
+    wheelZoomRemainder_ = 0.0;
     invalidateWorldCaches(zoom_ != previousZoom);
     if (zoom_ != previousZoom) invalidateOverlay(true);
     update();
@@ -6339,21 +6340,37 @@ void RadarMapCanvas::wheelEvent(QWheelEvent* event) {
         event->accept();
         return;
     }
-    // High-resolution wheels and precision trackpads deliver fractional
-    // angleDelta values (15, 20, 40). The old integer `angleDelta/120` gave 0
-    // for all of them, so map zoom was completely dead on those devices and the
-    // un-accepted event even bubbled up to the parent layout. Normalize to a
-    // float step and honour pixelDelta when the platform supplies it.
+    // Sub-notch wheel/trackpad input accumulates until a whole zoom step
+    // is owed; truncating each event (the old behavior) dropped every
+    // fractional gesture to zero. Remainder clears at the zoom limits so
+    // reversing direction always responds on the next gesture.
     const auto angleDelta = static_cast<double>(event->angleDelta().y());
     const auto pixelDelta = static_cast<double>(event->pixelDelta().y());
     double steps = angleDelta / 120.0;
     if (steps == 0.0) {
-        if (pixelDelta == 0.0) return;
+        if (pixelDelta == 0.0) {
+            event->accept();
+            return;
+        }
         steps = pixelDelta / 40.0;
     }
-    const auto delta = std::clamp(steps, -4.0, 4.0);
-    if (delta == 0.0) return;
-    setZoomAt(zoom_ + static_cast<int>(std::trunc(delta)), event->position());
+    wheelZoomRemainder_ += std::clamp(steps, -4.0, 4.0);
+    const auto whole = static_cast<int>(std::trunc(wheelZoomRemainder_));
+    if (whole == 0) {
+        updateProbe(event->position());
+        event->accept();
+        return;
+    }
+    const auto target = std::clamp(zoom_ + whole, kMinZoom, kMaxZoom);
+    if (target == zoom_) {
+        // Pushing past a limit: drop the overscroll instead of banking it.
+        wheelZoomRemainder_ = 0.0;
+        updateProbe(event->position());
+        event->accept();
+        return;
+    }
+    wheelZoomRemainder_ -= whole;
+    setZoomAt(target, event->position());
     updateProbe(event->position());
     event->accept();
 }
