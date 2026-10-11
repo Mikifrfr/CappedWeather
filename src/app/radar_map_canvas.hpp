@@ -723,9 +723,9 @@ private:
     bool wpcVisible_ = true;
     bool hmsVisible_ = true;
     bool datVisible_ = true;
-    bool hrrrVisible_ = true;
-    bool goesVisible_ = true;
-    bool mosaicVisible_ = true;
+    bool hrrrVisible_ = false;
+    bool goesVisible_ = false;
+    bool mosaicVisible_ = false;
     bool mcdVisible_ = true;
     bool metarVisible_ = true;
     bool placefilesVisible_ = true;

@@ -1017,9 +1017,11 @@ MainWindow::MainWindow(QWidget* parent)
     wpcSource_->refresh();
     hmsSource_->refresh();
     datSource_->refresh();
-    hrrrSource_->refresh();
-    goesSource_->refresh();
-    mosaicSource_->refresh();
+    // Heavy raster context stays opt-in: no fetch on startup when the
+    // layer is off. Toggling the checkbox refreshes on demand.
+    if (hrrrCheck_ && hrrrCheck_->isChecked()) hrrrSource_->refresh();
+    if (goesCheck_ && goesCheck_->isChecked()) goesSource_->refresh();
+    if (mosaicCheck_ && mosaicCheck_->isChecked()) mosaicSource_->refresh();
     metarSource_->refresh();
     overlayRefreshTimer_->start(std::clamp(settings.value(QStringLiteral("network/overlayRefreshSeconds"), 60).toInt(),
                                            30, 600) * 1000);
@@ -3484,7 +3486,7 @@ void MainWindow::restoreSettings() {
     wpcCheck_->setChecked(settings.value(QStringLiteral("overlays/wpcEro"), true).toBool());
     hmsCheck_->setChecked(settings.value(QStringLiteral("overlays/hmsSmoke"), true).toBool());
     datCheck_->setChecked(settings.value(QStringLiteral("overlays/datPaths"), true).toBool());
-    hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), true).toBool());
+    hrrrCheck_->setChecked(settings.value(QStringLiteral("overlays/hrrr"), false).toBool());
     {
         // Lead hours persist; unknown stored values fall back to analysis.
         const int lead = settings.value(QStringLiteral("overlays/hrrrLeadHours"), 0).toInt();
@@ -3492,8 +3494,8 @@ void MainWindow::restoreSettings() {
         hrrrLeadCombo_->setCurrentIndex(std::max(0, leadIndex));
         if (hrrrSource_) hrrrSource_->setLeadHours(hrrrLeadCombo_->currentData().toInt());
     }
-    goesCheck_->setChecked(settings.value(QStringLiteral("overlays/goes"), true).toBool());
-    mosaicCheck_->setChecked(settings.value(QStringLiteral("overlays/mosaic"), true).toBool());
+    goesCheck_->setChecked(settings.value(QStringLiteral("overlays/goes"), false).toBool());
+    mosaicCheck_->setChecked(settings.value(QStringLiteral("overlays/mosaic"), false).toBool());
     {
         const int channel = settings.value(QStringLiteral("overlays/goesChannel"), 13).toInt();
         const int index = goesChannelCombo_->findData(goesChannelSupported(channel) ? channel : 13);
