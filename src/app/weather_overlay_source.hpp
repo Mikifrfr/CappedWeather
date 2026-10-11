@@ -96,6 +96,9 @@ public:
     static QByteArray serializeZoneDiskCache(const ZoneDiskCache& cache, QString* error = nullptr);
     // Malformed input fails closed to empty, never partial.
     static ZoneDiskCache parseZoneDiskCache(const QByteArray& data);
+    // Newest-first URL selection under a body-byte budget (coastal zones
+    // run near 1 MB each, so an entry cap alone cannot bound disk use).
+    static QStringList selectZoneDiskUrls(const ZoneDiskCache& cache, qint64 maxBytes);
     // Test hook: override the cache file location (default: CacheLocation).
     // Assigning reloads, so tests can point a fresh source at a fixture.
     void setZoneDiskCachePath(const QString& path);

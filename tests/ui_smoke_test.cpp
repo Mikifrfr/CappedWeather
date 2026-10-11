@@ -720,6 +720,30 @@ static bool testZoneDiskCache(QString* error) {
         *error = QStringLiteral("31-day-old zone entry should prune on load");
         return false;
     }
+    // Byte budget: newest-first, always keeps the single newest entry.
+    WeatherOverlaySource::ZoneDiskCache sized;
+    for (int i = 0; i < 3; ++i) {
+        WeatherOverlaySource::ZoneDiskEntry sizedEntry;
+        sizedEntry.body = QByteArray(10, 'x');
+        sizedEntry.fetchedAtSecs = nowSecs - i * 86400;
+        sized.insert(QStringLiteral("url-%1").arg(i), sizedEntry);
+    }
+    const auto tight = WeatherOverlaySource::selectZoneDiskUrls(sized, 15);
+    if (tight.size() != 1 || tight.front() != QStringLiteral("url-0")) {
+        *error = QStringLiteral("tight byte budget should keep only the newest zone");
+        return false;
+    }
+    const auto roomy = WeatherOverlaySource::selectZoneDiskUrls(sized, 30);
+    if (roomy.size() != 3 || roomy.at(0) != QStringLiteral("url-0") ||
+        roomy.at(2) != QStringLiteral("url-2")) {
+        *error = QStringLiteral("roomy byte budget should keep all zones newest-first");
+        return false;
+    }
+    const auto zero = WeatherOverlaySource::selectZoneDiskUrls(sized, 0);
+    if (zero.size() != 1 || zero.front() != QStringLiteral("url-0")) {
+        *error = QStringLiteral("zero byte budget should still keep the newest zone");
+        return false;
+    }
     return true;
 }
 

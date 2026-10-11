@@ -403,10 +403,13 @@ namespace {
 
 // Zone disk cache bounds: reuse bodies under 7 days old without any
 // request, prune entries older than 30 days, cap the file at 3000 zones
-// (CONUS has ~3k county zones; fire-weather zones ride the same file).
+// (CONUS has ~3k county zones; fire-weather zones ride the same file)
+// and 64 MB of bodies (coastal zones run near 1 MB each, so the entry
+// cap alone cannot bound disk use).
 constexpr qint64 kZoneReuseSecs = 7 * 86400;
 constexpr qint64 kZonePruneSecs = 30 * 86400;
 constexpr int kZoneDiskCap = 3000;
+constexpr qint64 kZoneDiskBytes = 64 * 1024 * 1024;
 constexpr int kZoneDiskVersion = 1;
 
 }  // namespace
@@ -464,6 +467,22 @@ void WeatherOverlaySource::setZoneDiskCachePath(const QString& path) {
     loadZoneDiskCache();
 }
 
+QStringList WeatherOverlaySource::selectZoneDiskUrls(const ZoneDiskCache& cache, const qint64 maxBytes) {
+    auto urls = cache.keys();
+    std::sort(urls.begin(), urls.end(), [&](const QString& a, const QString& b) {
+        return cache.value(a).fetchedAtSecs > cache.value(b).fetchedAtSecs;
+    });
+    QStringList kept;
+    qint64 bytes = 0;
+    for (const auto& url : urls) {
+        const qint64 size = cache.value(url).body.size();
+        if (!kept.isEmpty() && bytes + size > maxBytes) break;
+        kept.push_back(url);
+        bytes += size;
+    }
+    return kept;
+}
+
 QString WeatherOverlaySource::zoneDiskCachePath() const {
     if (!zoneDiskCacheOverride_.isEmpty()) return zoneDiskCacheOverride_;
     const auto dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
@@ -490,15 +509,16 @@ void WeatherOverlaySource::loadZoneDiskCache() {
     zoneCache_.clear();
     zoneFetchedAt_.clear();
     const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
-    // Newest first so the cap drops stale entries, not fresh ones.
-    auto urls = cache.keys();
-    std::sort(urls.begin(), urls.end(), [&](const QString& a, const QString& b) {
-        return cache.value(a).fetchedAtSecs > cache.value(b).fetchedAtSecs;
-    });
+    // Prune before budgeting so ancient entries cannot crowd fresh ones
+    // out of the byte allowance; survivors are newest-first under both
+    // caps (see saveZoneDiskCache).
+    ZoneDiskCache fresh;
+    for (auto it = cache.cbegin(); it != cache.cend(); ++it) {
+        if (nowSecs - it.value().fetchedAtSecs <= kZonePruneSecs) fresh.insert(it.key(), it.value());
+    }
     int kept = 0;
-    for (const auto& url : urls) {
-        const auto& entry = cache[url];
-        if (nowSecs - entry.fetchedAtSecs > kZonePruneSecs) continue;
+    for (const auto& url : selectZoneDiskUrls(fresh, kZoneDiskBytes)) {
+        const auto& entry = fresh[url];
         if (kept >= kZoneDiskCap) break;
         QString error;
         const auto polygons = parseZone(entry.body, &error);
@@ -530,8 +550,18 @@ void WeatherOverlaySource::saveZoneDiskCache() {
         cache.insert(it.key(), entry);
     }
     if (cache.isEmpty()) return;
+    // Newest-first under both caps so one stormy week cannot grow the file
+    // without bound; dropped entries simply refetch next launch.
+    ZoneDiskCache budgeted;
+    int kept = 0;
+    for (const auto& url : selectZoneDiskUrls(cache, kZoneDiskBytes)) {
+        if (kept >= kZoneDiskCap) break;
+        budgeted.insert(url, cache.value(url));
+        ++kept;
+    }
+    if (budgeted.isEmpty()) return;
     QString error;
-    const auto data = serializeZoneDiskCache(cache, &error);
+    const auto data = serializeZoneDiskCache(budgeted, &error);
     if (!error.isEmpty() || data.isEmpty()) return;
     QFile file(path);
     const auto dir = QFileInfo(path).dir();
