@@ -380,6 +380,11 @@ if(CAPPEDWEATHER_BUILD_APP)
                 tools/overlay_probe.cpp
             )
             target_link_libraries(overlay_probe PRIVATE cappedweather_ui)
+
+            qt_add_executable(volume_timing_probe
+                tools/volume_timing_probe.cpp
+            )
+            target_link_libraries(volume_timing_probe PRIVATE cappedweather_ui)
         endif()
 
         set_target_properties(CappedWeather PROPERTIES

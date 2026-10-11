@@ -19,6 +19,7 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] Flatpak. Artifacts already ship, discovery is the gap. (Windows update discovery is done: Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only.)
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
 - [x] Zone disk cache live check (`tools/overlay_probe.cpp`, 2026-10-11, 306+ active alerts: cold launch 284 requests, warm launch 83 (same 12 unparseable zones refetch by design, rest is new-alert churn plus base feeds), warnings complete both runs (412/413). ~3.4x fewer requests.
+- [x] Cold-start time to first echo (`tools/volume_timing_probe.cpp`, 2026-10-11: KGSP first complete live volume 5.8 s after launch with opt-out defaults, overlays still fetching in background. Radar never waits on context layers.
 
 ### Research (explicitly not next)
 - [ ] GPU volume rendering of live Level II. Design in `docs/gpu-volume-rendering.md` (shared VolumeBrick, GL raymarcher plus CPU twin). Not started.
