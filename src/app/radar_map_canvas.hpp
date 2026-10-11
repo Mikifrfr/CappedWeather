@@ -15,6 +15,7 @@
 #include "app/dat_paths.hpp"
 #include "app/hrrr_source.hpp"
 #include "app/goes_source.hpp"
+#include "app/goes_geo_cache.hpp"
 #include "app/mosaic_source.hpp"
 #include "app/metar_source.hpp"
 #include "core/level2_decoder.hpp"
@@ -46,6 +47,9 @@
 #include <memory>
 #include <utility>
 #include <vector>
+
+#include <QList>
+#include <QMutex>
 
 class QMouseEvent;
 class QKeyEvent;
@@ -238,6 +242,9 @@ public:
     [[nodiscard]] long long goesValidEpoch() const {
         return goesFrame_ ? goesFrame_->validEpochSeconds : 0;
     }
+    // Georeference readiness for tests/bench: true once the shared grid
+    // for the current frame is attached (or no frame is set).
+    [[nodiscard]] bool goesGeoReady() const;
     void setMosaicFrame(std::optional<MosaicFrame> frame);
     void setMosaicVisible(bool visible);
     [[nodiscard]] bool mosaicVisible() const { return mosaicVisible_; }
@@ -596,12 +603,18 @@ private:
     // No click branch for either raster: full-view fields would steal every
     // echo probe, so valid times read on the legend chips and badges.
     std::optional<GoesFrame> goesFrame_;
-    // One-time fixed-grid inverse per frame: lat/lon per cell, NaN when
-    // off-disc. Rebuilt on frame set, reused by every repaint so pan/zoom
-    // never redo the trig.
-    std::vector<float> goesLonDeg_;
-    std::vector<float> goesLatDeg_;
-    bool goesGeoCached_ = false;
+    // Shared immutable georeference (see GoesGeoCache): one grid per exact
+    // grid identity across all canvases, built once off the GUI thread.
+    // Null while a build is in flight: paintGoes holds raster (waiting
+    // state) until delivery attaches the ready grid.
+    std::shared_ptr<const GoesGeoData> goesGeo_;
+    void requestGoesGeo();
+    void attachGoesGeo(std::shared_ptr<const GoesGeoData> data, GoesGeoIdentity identity);
+    // In-flight build waiters per identity (see requestGoesGeo): GUI
+    // thread only, so QPointer use is safe by construction.
+    using GoesGeoWaiters = QList<QPointer<RadarMapCanvas>>;
+    static QMutex& goesGeoPendingMutex();
+    static QHash<GoesGeoIdentity, GoesGeoWaiters>& goesGeoPending();
     // Test-only oracle switch: iterate the whole grid with identical
     // sampling, colors and raster semantics (no subwindow, no early-out)
     // so bench/tests can prove the viewport optimization paints the same.

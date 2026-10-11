@@ -235,6 +235,8 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/hrrr_source.hpp
             src/app/goes_source.cpp
             src/app/goes_source.hpp
+            src/app/goes_geo_cache.cpp
+            src/app/goes_geo_cache.hpp
             src/app/mosaic_source.cpp
             src/app/mosaic_source.hpp
             src/app/palette_import.cpp

@@ -1325,16 +1325,87 @@ void RadarMapCanvas::setHrrrVisible(const bool visible) {
 
 void RadarMapCanvas::setGoesFrame(std::optional<GoesFrame> frame) {
     goesFrame_ = std::move(frame);
-    goesGeoCached_ = false;
-    goesLonDeg_.clear();
-    goesLatDeg_.clear();
+    goesGeo_.reset();
+    if (goesFrame_.has_value()) requestGoesGeo();
     update();
 }
 
 void RadarMapCanvas::setGoesVisible(const bool visible) {
     if (goesVisible_ == visible) return;
     goesVisible_ = visible;
+    // Opt-out guard: enabling with a frame but no grid kicks the shared
+    // build; a hidden layer never starts projection work.
+    if (visible && goesFrame_.has_value() && !goesGeo_) requestGoesGeo();
     update();
+}
+
+bool RadarMapCanvas::goesGeoReady() const {
+    return !goesFrame_.has_value() || goesGeo_ != nullptr;
+}
+
+void RadarMapCanvas::requestGoesGeo() {
+    if (!goesFrame_.has_value() || goesGeo_) return;
+    const GoesGeoIdentity identity = GoesGeoIdentity::from(*goesFrame_);
+    if (auto hit = GoesGeoCache::find(identity)) {
+        attachGoesGeo(std::move(hit), identity);
+        return;
+    }
+    // Disabled layers never queue projection work; enabling later hits the
+    // shared entry (or queues then) through setGoesVisible.
+    if (!goesVisible_) return;
+    // Coalesced off-thread build: one worker per identity no matter how
+    // many panels request it; every waiter attaches only if its canvas
+    // still shows that identity (rapid swaps, disable, close and nullopt
+    // all fail safe). QPointer is touched on the GUI thread only: the
+    // worker sees just the identity, delivery runs as an app-thread
+    // functor where posted events die with their receiver.
+    {
+        QMutexLocker lock(&goesGeoPendingMutex());
+        auto& waiters = goesGeoPending()[identity];
+        waiters.push_back(QPointer<RadarMapCanvas>(this));
+        if (waiters.size() > 1) return;
+    }
+    QThreadPool::globalInstance()->start([identity] {
+        auto data = GoesGeoCache::build(identity);
+        GoesGeoCache::insert(identity, data);
+        QObject* app = QCoreApplication::instance();
+        if (!app) return;
+        QMetaObject::invokeMethod(
+            app,
+            [identity, data = std::move(data)] {
+                QMutexLocker lock(&goesGeoPendingMutex());
+                // NOTE: operate on the live map, never a copy: erasing a
+                // copy leaves a stale entry that dead-ends every later
+                // same-identity request (no worker ever spawns again).
+                auto pendingIt = goesGeoPending().find(identity);
+                if (pendingIt == goesGeoPending().end()) return;
+                const auto waiters = *pendingIt;
+                goesGeoPending().erase(pendingIt);
+                lock.unlock();
+                for (QPointer<RadarMapCanvas> target : waiters) {
+                    if (target) target->attachGoesGeo(data, identity);
+                }
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void RadarMapCanvas::attachGoesGeo(std::shared_ptr<const GoesGeoData> data,
+                                   GoesGeoIdentity identity) {    // Identity, not generation: a stale task for a re-selected frame still
+    // matches (same grid), while a swapped frame/channel/grid never does.
+    if (!goesFrame_.has_value() || !(GoesGeoIdentity::from(*goesFrame_) == identity)) return;
+    goesGeo_ = std::move(data);
+    update();
+}
+
+QMutex& RadarMapCanvas::goesGeoPendingMutex() {
+    static QMutex mutex;
+    return mutex;
+}
+
+QHash<GoesGeoIdentity, RadarMapCanvas::GoesGeoWaiters>& RadarMapCanvas::goesGeoPending() {
+    static QHash<GoesGeoIdentity, GoesGeoWaiters> pending;
+    return pending;
 }
 
 void RadarMapCanvas::setMosaicFrame(std::optional<MosaicFrame> frame) {
@@ -3113,29 +3184,13 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
     std::size_t profileCells = 0;
     const bool profiling = qEnvironmentVariableIsSet("CAPPEDWEATHER_PAINT_PROFILE");
     if (profiling) profileClock.start();
-    // One-time georeference: fixed-grid inverse per cell, NaN off-disc.
-    // Full-disk frames hold ~1.5M cells, so redoing trig every repaint is
-    // what made pans lag with GOES on.
-    if (!goesGeoCached_) {
-        const std::size_t count = frame.nx * frame.ny;
-        goesLonDeg_.assign(count, std::numeric_limits<float>::quiet_NaN());
-        goesLatDeg_.assign(count, std::numeric_limits<float>::quiet_NaN());
-        for (std::size_t iy = 0; iy < frame.ny; ++iy) {
-            for (std::size_t ix = 0; ix < frame.nx; ++ix) {
-                const double xRad = frame.x0Radians + ix * frame.dxRadians;
-                const double yRad = frame.y0Radians + iy * frame.dyRadians;
-                const auto lonLat = goesFixedInverse(frame.grid, xRad, yRad);
-                if (!std::isfinite(lonLat.longitudeDeg) || !std::isfinite(lonLat.latitudeDeg))
-                    continue;
-                const std::size_t i = iy * frame.nx + ix;
-                goesLonDeg_[i] = static_cast<float>(lonLat.longitudeDeg);
-                goesLatDeg_[i] = static_cast<float>(lonLat.latitudeDeg);
-            }
-        }
-        goesGeoCached_ = true;
-    }
-    if (goesLonDeg_.size() != frame.nx * frame.ny ||
-        goesLatDeg_.size() != frame.nx * frame.ny)
+    // Shared grid (see requestGoesGeo): null while the off-thread build
+    // is in flight, which is the honest waiting state. The legend chip
+    // already reads the new frame time; raster pops in on delivery.
+    const std::shared_ptr<const GoesGeoData> geo = goesGeo_;
+    if (!geo) return;
+    if (geo->lonDeg.size() != frame.nx * frame.ny ||
+        geo->latDeg.size() != frame.nx * frame.ny)
         return;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
@@ -3245,8 +3300,8 @@ void RadarMapCanvas::paintGoes(QPainter& painter) {
             const std::size_t i = iy * frame.nx + ix;
             const float bt = frame.brightnessCelsius[i];
             if (!std::isfinite(bt) || bt > 10.0F) continue;
-            const float lon = goesLonDeg_[i];
-            const float lat = goesLatDeg_[i];
+            const float lon = geo->lonDeg[i];
+            const float lat = geo->latDeg[i];
             if (!std::isfinite(lon) || !std::isfinite(lat)) continue;
             // Inline worldPoint + screenPointFromWorld: one sin/log pair,
             // no QPointF temporaries, integer screen pixels for the raster.

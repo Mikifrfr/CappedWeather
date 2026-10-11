@@ -12,6 +12,7 @@
 #include <QElapsedTimer>
 #include <QPixmap>
 #include <QStandardPaths>
+#include <QThread>
 
 #include <algorithm>
 #include <iostream>
@@ -36,15 +37,30 @@ double percentile(std::vector<double> samples, const double q) {
     return samples[i];
 }
 
+// Shared-geo readiness: GOES rasterizes only after the off-thread grid
+// delivery, so cold timing starts at first VISIBLE paint, not at an
+// empty waiting-state grab. HRRR has no async stage.
+bool waitGoesReady(QApplication& application, RadarMapCanvas& canvas, bool isGoes) {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (elapsed.elapsed() < 30000) {
+        if (!isGoes || canvas.goesGeoReady()) return true;
+        application.processEvents(QEventLoop::AllEvents, 25);
+        QThread::msleep(25);
+    }
+    return !isGoes || canvas.goesGeoReady();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: goes_paint_bench <goes_rad.nc> [grabs]\n";
+        std::cerr << "usage: goes_paint_bench <rad.nc|refc.nc> [grabs] [panels]\n";
         return 2;
     }
     const std::string path = argv[1];
     const int grabs = argc > 2 ? std::max(3, atoi(argv[2])) : 15;
+    const int panels = argc > 3 ? std::clamp(atoi(argv[3]), 1, 4) : 1;
 
     QApplication application(argc, argv);
     application.setOrganizationName(QStringLiteral("CappedWeatherTests"));
@@ -104,9 +120,17 @@ int main(int argc, char** argv) {
             canvas.setHrrrFrame(hrrrFrame);
         }
         canvas.setView(QPointF(view.lon, view.lat), view.zoom);
-        // True cold path: no event pump before the first grab, so the
-        // timer owns the georeference build plus the first rasterization.
-        // (The old code pumped events here and relabeled a warmed grab.)
+        // True cold path: the first grab owns everything the GUI thread
+        // does, but the shared grid builds off-thread, so wait for first
+        // VISIBLE paint and report set-to-ready separately from it.
+        const bool isGoes = goesFrame.has_value();
+        QElapsedTimer setupClock;
+        setupClock.start();
+        if (!waitGoesReady(application, canvas, isGoes)) {
+            std::cerr << "geo readiness timeout at " << view.name << '\n';
+            return 7;
+        }
+        const double setupMs = setupClock.nsecsElapsed() / 1e6;
 
         QElapsedTimer coldClock;
         coldClock.start();
@@ -164,7 +188,8 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "BENCH: view=" << view.name << " zoom=" << view.zoom
-                  << " cold_ms=" << coldMs << " warm_p50_ms=" << percentile(warm, 0.5)
+                  << " setup_ms=" << setupMs << " cold_ms=" << coldMs
+                  << " warm_p50_ms=" << percentile(warm, 0.5)
                   << " warm_p95_ms=" << percentile(warm, 0.95) << " swap_ms=" << swapMs
                   << " pan_ms=" << panMs << " checksum=" << coldSum;
         if (goesFrame.has_value()) {
@@ -180,5 +205,59 @@ int main(int argc, char** argv) {
         }
     }
     std::cout << "BENCH: done\n";
+    // Multi-panel cold path: N canvases take the same frame by value like
+    // MainWindow's per-panel fan-out, then paint. Geo-build lines on stderr
+    // count the repeated full-grid projections; wall time shows the stall.
+    if (panels > 1 && goesFrame.has_value()) {
+        std::vector<std::unique_ptr<RadarMapCanvas>> maps;
+        for (int i = 0; i < panels; ++i) {
+            auto canvas = std::make_unique<RadarMapCanvas>();
+            canvas->resize(1280, 800);
+            canvas->show();
+            canvas->setGoesVisible(true);
+            canvas->setGoesFrame(goesFrame);
+            canvas->setView(QPointF(-98.0, 38.0), 4);
+            maps.push_back(std::move(canvas));
+        }
+        // Shared-grid proof: one off-thread build serves all panels; the
+        // paintGoesGeo stderr lines count the builds independently.
+        QElapsedTimer setupClock;
+        setupClock.start();
+        bool ready = false;
+        {
+            QElapsedTimer elapsed;
+            elapsed.start();
+            while (elapsed.elapsed() < 30000) {
+                ready = true;
+                for (const auto& canvas : maps) {
+                    if (!canvas->goesGeoReady()) {
+                        ready = false;
+                        break;
+                    }
+                }
+                if (ready) break;
+                application.processEvents(QEventLoop::AllEvents, 25);
+                QThread::msleep(25);
+            }
+        }
+        if (!ready) {
+            std::cerr << "panel geo readiness timeout\n";
+            return 8;
+        }
+        std::cout << "BENCH: panels=" << panels
+                  << " setup_ms=" << (setupClock.nsecsElapsed() / 1e6) << '\n';
+        QElapsedTimer wallClock;
+        wallClock.start();
+        for (int i = 0; i < panels; ++i) {
+            QElapsedTimer clock;
+            clock.start();
+            const QPixmap shot = maps[static_cast<std::size_t>(i)]->grab();
+            (void)shot;
+            std::cout << "BENCH: panel=" << i
+                      << " cold_ms=" << (clock.nsecsElapsed() / 1e6) << '\n';
+        }
+        std::cout << "BENCH: panels=" << panels
+                  << " wall_ms=" << (wallClock.nsecsElapsed() / 1e6) << '\n';
+    }
     return 0;
 }

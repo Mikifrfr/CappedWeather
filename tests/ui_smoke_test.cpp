@@ -4362,6 +4362,133 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                     }
                     map->setGoesFrame(std::nullopt);
                 }
+                // Shared-geo lifecycle on the two live panels: one build
+                // serves both, rapid swaps keep the newest frame, and
+                // disable/destroy during preparation cannot crash or stick
+                // a stale grid. Build counting makes sharing observable
+                // without depending on thread timing.
+                {
+                    auto* second =
+                        window.findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
+                    if (!second) {
+                        std::cerr << "second GOES panel missing\n";
+                        return 1;
+                    }
+                    const auto waitReady = [&](RadarMapCanvas* canvas) {
+                        QElapsedTimer wait;
+                        wait.start();
+                        while (wait.elapsed() < 30000) {
+                            if (canvas->goesGeoReady()) return true;
+                            application.processEvents(QEventLoop::AllEvents, 25);
+                            QTest::qWait(25);
+                        }
+                        return canvas->goesGeoReady();
+                    };
+                    const auto settledGrab = [&](RadarMapCanvas* canvas, QImage* out) {
+                        for (int attempt = 0; attempt < 5; ++attempt) {
+                            application.processEvents();
+                            const QImage first = canvas->grab().toImage();
+                            const QImage next = canvas->grab().toImage();
+                            if (!first.isNull() && first == next) {
+                                if (out) *out = first;
+                                return true;
+                            }
+                            QTest::qWait(500);
+                        }
+                        return false;
+                    };
+                    GoesGeoCache::clearForTest();
+                    GoesGeoCache::resetBuildsForTest();
+                    map->setGoesVisible(true);
+                    second->setGoesVisible(true);
+                    map->setView({-137.0, 30.0}, 4);
+                    second->setView({-137.0, 30.0}, 4);
+                    map->setGoesFrame(frame);
+                    second->setGoesFrame(frame);
+                    if (!waitReady(map) || !waitReady(second)) {
+                        std::cerr << "shared GOES grid never attached\n";
+                        return 1;
+                    }
+                    if (GoesGeoCache::buildsForTest() != 1) {
+                        std::cerr << "two panels sharing one frame must build once\n";
+                        return 1;
+                    }
+                    // Rapid swap to a fresh identity and back with no pump
+                    // between: whichever task finishes last, the final
+                    // raster must show the fixture, and exactly one more
+                    // build may exist (coalesced duplicates share it).
+                    // Fresh identity by construction (coarser step than the
+                    // subwindow fixture above), independent of its scope.
+                    GoesFrame syntheticB;
+                    syntheticB.channel = 13;
+                    syntheticB.validEpochSeconds = 1791658800LL;
+                    syntheticB.nx = 200;
+                    syntheticB.ny = 150;
+                    syntheticB.grid.subpointLongitudeDeg = -75.0;
+                    {
+                        const auto centerB =
+                            goesFixedForward(syntheticB.grid, -90.0, 30.0);
+                        if (!std::isfinite(centerB.xRadians) ||
+                            !std::isfinite(centerB.yRadians)) {
+                            std::cerr << "Second synthetic GOES patch missed the disc\n";
+                            return 1;
+                        }
+                        constexpr double stepB = 112e-6;
+                        syntheticB.x0Radians = centerB.xRadians - 100 * stepB;
+                        syntheticB.y0Radians = centerB.yRadians - 75 * stepB;
+                        syntheticB.dxRadians = stepB;
+                        syntheticB.dyRadians = stepB;
+                    }
+                    syntheticB.brightnessCelsius.assign(200 * 150, -60.0F);
+                    const int buildsBefore = GoesGeoCache::buildsForTest();
+                    map->setGoesFrame(syntheticB);
+                    map->setGoesFrame(frame);
+                    if (!waitReady(map)) {
+                        std::cerr << "GOES grid missing after rapid swap\n";
+                        return 1;
+                    }
+                    if (GoesGeoCache::buildsForTest() - buildsBefore > 1) {
+                        std::cerr << "rapid swap built the same grid twice\n";
+                        return 1;
+                    }
+                    QImage swapped;
+                    if (!settledGrab(map, &swapped)) {
+                        std::cerr << "GOES view never settled after swap\n";
+                        return 1;
+                    }
+                    map->setGoesFrame(frame);
+                    if (!waitReady(map)) {
+                        std::cerr << "GOES grid missing on re-set\n";
+                        return 1;
+                    }
+                    QImage reference;
+                    if (!settledGrab(map, &reference) || reference != swapped) {
+                        std::cerr << "rapid swap left a stale GOES raster\n";
+                        return 1;
+                    }
+                    // Disable mid-preparation, then destroy a preparing
+                    // canvas: both must survive the in-flight worker.
+                    GoesGeoCache::clearForTest();
+                    map->setGoesFrame(syntheticB);
+                    map->setGoesVisible(false);
+                    QTest::qWait(500);
+                    application.processEvents();
+                    map->setGoesVisible(true);
+                    if (!waitReady(map)) {
+                        std::cerr << "GOES grid missing after re-enable\n";
+                        return 1;
+                    }
+                    {
+                        RadarMapCanvas doomed;
+                        doomed.resize(800, 600);
+                        doomed.setGoesVisible(true);
+                        doomed.setGoesFrame(frame);
+                    }
+                    QTest::qWait(500);
+                    application.processEvents();
+                    map->setGoesFrame(std::nullopt);
+                    second->setGoesFrame(std::nullopt);
+                }
                 map->setGoesFrame(std::nullopt);
             }
             if (hrrrReaderAvailable()) {
