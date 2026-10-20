@@ -43,6 +43,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QGridLayout>
 #include <QImage>
@@ -3083,7 +3084,25 @@ int main(int argc, char** argv) {
     application.setOrganizationName(QStringLiteral("CappedWeatherTests"));
     application.setApplicationName(QStringLiteral("CappedWeatherUiSmoke"));
     QStandardPaths::setTestModeEnabled(true);
+    // Settings must belong to this process. Every ui_smoke process used to
+    // share HKCU\Software\CappedWeatherTests\CappedWeatherUiSmoke and run
+    // QSettings().clear() at startup, so a second suite on the same machine
+    // (another worktree, another process) can clear or overwrite the keys this
+    // run just wrote, and this machine routinely runs several at once — during
+    // one measurement the shared key was recreated mid-run by a neighbour.
+    // Use a private ini store in a per-process temp dir instead: nothing
+    // outside this process can see or clear it, and QTemporaryDir removes it
+    // on exit. The cache dir stays shared on purpose (warm basemap tiles and
+    // radar chunks); only settings are isolated.
+    QTemporaryDir settingsDir;
+    if (!settingsDir.isValid()) {
+        std::cerr << "Could not create a private settings directory\n";
+        return 1;
+    }
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
     QSettings().clear();
+    std::cout << "Settings store: " << QSettings().fileName().toStdString() << '\n';
     MainWindow window;
     window.show();
     application.processEvents();
@@ -3383,7 +3402,19 @@ UnsupportedThing: ignored safely
     if (map->product() != ProductKind::EchoTop || tiltCombo->isEnabled() ||
         tiltCombo->currentText() != QStringLiteral("All tilts (volume derived)") ||
         crossSectionButton->isEnabled()) {
-        std::cerr << "Derived product controls did not switch to all-tilt 2D mode\n";
+        // Name every value: this check fired once in the manager's runs and the
+        // bare message could not say whether the combo refused the selection
+        // (derived product disabled by updateProductAvailability for the shown
+        // frame) or the active panel was not the panel this test manipulates.
+        std::cerr << "Derived product controls did not switch to all-tilt 2D mode: product="
+                  << static_cast<int>(map->product())
+                  << " combo=" << products->currentIndex()
+                  << " echoTopIndex=" << products->findData(static_cast<int>(ProductKind::EchoTop))
+                  << " comboText=" << products->currentText().toStdString()
+                  << " tiltEnabled=" << tiltCombo->isEnabled()
+                  << " tiltText=" << tiltCombo->currentText().toStdString()
+                  << " crossSectionEnabled=" << crossSectionButton->isEnabled()
+                  << " window=" << window.width() << 'x' << window.height() << '\n';
         return 1;
     }
     products->setCurrentIndex(products->findData(static_cast<int>(ProductKind::Reflectivity)));
@@ -5920,23 +5951,104 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         std::cout << "P1 hermetic UI checks passed\n";
     }
 
-    window.resizeDocks({controlDock}, {386}, Qt::Horizontal);
+    // Sidebar width round-trip. The old form resized the dock, closed the
+    // window, built a second MainWindow, pumped events once and compared the
+    // two widths. Dock geometry is applied by a layout pass that lands
+    // ~90-150 ms after show on this build (settleMs in the line this check
+    // prints), so 5 of 10 runs on unmodified code read the dock at its 300 px
+    // minimum and reported saved=386 restored=300 — the same numbers a real
+    // regression would produce. Assert the whole chain instead, in order: the
+    // resize took effect here, saveSettings() persisted it, the restored window
+    // reaches it after the layout runs, holds it, and does not rewrite it.
+    constexpr int requestedDockWidth = 386;
+    constexpr int kDockWidthTolerance = 12;
+    window.resizeDocks({controlDock}, {requestedDockWidth}, Qt::Horizontal);
     application.processEvents();
     const auto savedDockWidth = controlDock->width();
+    if (std::abs(savedDockWidth - requestedDockWidth) > kDockWidthTolerance) {
+        std::cerr << "Sidebar resize did not take effect, round-trip would prove nothing: requested="
+                  << requestedDockWidth << " dock=" << savedDockWidth << 'x' << controlDock->height()
+                  << " window=" << window.width() << 'x' << window.height() << '\n';
+        return 1;
+    }
+    if (!controlDock->isVisible()) {
+        // saveSettings() persists window/controlDockWidth only for a visible
+        // dock. That precondition is part of the contract under test; report it
+        // instead of letting the missing key read as a restore failure.
+        std::cerr << "Sidebar round-trip precondition failed: controlDock is not visible at close,"
+                     " so saveSettings() cannot persist its width\n";
+        return 1;
+    }
     window.close();
     application.processEvents();
+
+    const auto persistedDockWidth = [] {
+        QSettings settings;
+        settings.sync();
+        return settings.value(QStringLiteral("window/controlDockWidth"), -1).toInt();
+    };
+    const auto storedDockWidth = persistedDockWidth();
+    if (std::abs(storedDockWidth - savedDockWidth) > kDockWidthTolerance) {
+        std::cerr << "Sidebar width was not persisted by saveSettings(): dock=" << savedDockWidth
+                  << " window/controlDockWidth=" << storedDockWidth << '\n';
+        return 1;
+    }
+
     MainWindow restoredWindow;
     restoredWindow.show();
-    application.processEvents();
     const auto* restoredDock = restoredWindow.findChild<QDockWidget*>(QStringLiteral("controlDock"));
-    if (!restoredDock || std::abs(restoredDock->width() - savedDockWidth) > 12) {
-        std::cerr << "Radar sidebar width was not restored: saved=" << savedDockWidth
-                  << " restored=" << (restoredDock ? restoredDock->width() : -1)
+    const auto dockWidthSettled = [&] {
+        return restoredDock != nullptr &&
+               std::abs(restoredDock->width() - storedDockWidth) <= kDockWidthTolerance;
+    };
+    // Pump before reading: dock geometry is applied by a layout pass, so a read
+    // taken before the first pass sees the pre-layout width. (The old form's
+    // single processEvents() pump raced exactly that pass — and reading before
+    // the pass would pass this check without the restore ever landing, which is
+    // how a "fixed" version could still lie.) The bound only governs how long
+    // the settle may take; the assertion after it is strict.
+    QElapsedTimer settle;
+    settle.start();
+    do {
+        application.processEvents(QEventLoop::AllEvents, 25);
+        QTest::qWait(10);
+    } while (!dockWidthSettled() && settle.elapsed() < 3000);
+    const auto restoredDockWidth = restoredDock ? restoredDock->width() : -1;
+    const auto settleMs = settle.elapsed();
+    if (!dockWidthSettled()) {
+        std::cerr << "Radar sidebar width was not restored: persisted=" << storedDockWidth
+                  << " restored=" << restoredDockWidth
+                  << " dockMin=" << (restoredDock ? restoredDock->minimumWidth() : -1)
+                  << " dockVisible=" << (restoredDock ? restoredDock->isVisible() : -1)
                   << " window=" << restoredWindow.width() << 'x' << restoredWindow.height()
-                  << '\n';
+                  << " settleMs=" << settleMs << '\n';
+        return 1;
+    }
+    // A width that lands and is then clamped away by a later layout pass is not
+    // a restore. Pump once more and require it to hold.
+    for (int tick = 0; tick < 10; ++tick) {
+        application.processEvents(QEventLoop::AllEvents, 25);
+        QTest::qWait(25);
+    }
+    if (!dockWidthSettled()) {
+        std::cerr << "Radar sidebar width did not hold after restore: persisted=" << storedDockWidth
+                  << " now=" << (restoredDock ? restoredDock->width() : -1)
+                  << " dockMin=" << (restoredDock ? restoredDock->minimumWidth() : -1)
+                  << " window=" << restoredWindow.width() << 'x' << restoredWindow.height() << '\n';
+        return 1;
+    }
+    // A restore that persists the unsettled value would corrupt the next
+    // launch. The round-trip must not rewrite the width it just restored.
+    if (const auto afterRestore = persistedDockWidth();
+        std::abs(afterRestore - storedDockWidth) > kDockWidthTolerance) {
+        std::cerr << "Restored window rewrote the saved sidebar width: persisted=" << storedDockWidth
+                  << " after=" << afterRestore << " restoredDock=" << restoredDockWidth << '\n';
         return 1;
     }
     restoredWindow.close();
+    std::cout << "Sidebar width round-trip: requested=" << requestedDockWidth
+              << " dock=" << savedDockWidth << " persisted=" << storedDockWidth
+              << " restored=" << restoredDockWidth << " settleMs=" << settleMs << '\n';
 
     ShortcutHelpDialog helpDialog;
     if (helpDialog.windowTitle() != QStringLiteral("Keyboard shortcuts — CappedWeather")) {
