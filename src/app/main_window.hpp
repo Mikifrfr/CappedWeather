@@ -119,6 +119,25 @@ public:
     // renders as an em-dash (spilled volume whose disk copy is unreadable).
     static QString scanAgeLabelText(const QDateTime& scanTimeUtc, int rayCount, qint64 ageSeconds,
                                     int volumeCoveragePattern = 0);
+    // SCAN age block contents for one history frame: what the console actually
+    // shows. Built from the frame's scan time/id and the chunk rendered for it,
+    // so the frame -> VCP -> label wiring has one pure, testable source. The
+    // 30 s age tick re-renders this same state; it holds no chunk reference
+    // (a retained shared_ptr would keep a spilled volume resident).
+    struct ScanAgeState {
+        QDateTime scanTimeUtc;
+        QString volumeId;
+        int rayCount = -1;              // <0 = chunk not resident ("— rays")
+        int volumeCoveragePattern = 0;  // 0 = no vouchable pattern (no VCP token)
+        static ScanAgeState fromFrame(const cappedweather::RadarFrame& frame,
+                                      const DecodedChunk* shownChunk);
+    };
+    // Renders ScanAgeState into the SCAN label: text plus the stale tint.
+    // showFrame() snapshots through fromFrame() and refreshScanAgeLabel()
+    // re-renders through here, so this is the one path the console renders.
+    // Public and static so the UI harness can assert frame -> label against
+    // the real widget (no session, no archive lane, no network).
+    static void renderScanAgeBlock(QLabel* label, const ScanAgeState& state, qint64 ageSeconds);
     // Whole-minute age at which the SCAN block turns amber. Matches the
     // radar-health Online bound (data older than 5 min is stale, not live).
     static constexpr qint64 kScanStaleSeconds = 300;
@@ -338,16 +357,11 @@ private:
     QLabel* statusLabel_ = nullptr;
     QLabel* stationSummaryLabel_ = nullptr;
     QLabel* frameLabel_ = nullptr;
-    // SCAN age block cache: showFrame() snapshots the shown volume's scan
-    // time, ray count, and id; refreshScanAgeLabel() re-renders the
+    // SCAN age block cache: showFrame() snapshots the shown frame through
+    // ScanAgeState::fromFrame(); refreshScanAgeLabel() re-renders the
     // whole-minute age from the snapshot so the 30 s health tick counts
     // without faulting spilled volumes back from disk.
-    QDateTime scanAgeTime_;
-    int scanAgeRays_ = -1;
-    // Volume Coverage Pattern shown in the SCAN block; 0 = no vouchable
-    // pattern for the shown volume, which renders no VCP token at all.
-    int scanAgeVcp_ = 0;
-    QString scanAgeVolumeId_;
+    ScanAgeState scanAgeState_;
     QLabel* overlayStatusLabel_ = nullptr;
     QLabel* unifiedStatusLabel_ = nullptr;
     QString unifiedStatusFullText_;

@@ -3222,25 +3222,47 @@ QString MainWindow::scanAgeLabelText(const QDateTime& scanTimeUtc, const int ray
         .arg(timeText, QString::number(age / 60), raysText);
 }
 
+MainWindow::ScanAgeState MainWindow::ScanAgeState::fromFrame(const cappedweather::RadarFrame& frame,
+                                                             const DecodedChunk* const shownChunk) {
+    ScanAgeState state;
+    state.scanTimeUtc = frame.dataTime;
+    state.volumeId = frame.volumeId;
+    // The caller passes the chunk it actually paints: a resident frame's own
+    // chunk, or the one frameChunk() faulted back from a spill. Null means the
+    // volume is on disk and unreadable, so the ray count stays unknown and the
+    // pattern must not be resurrected from the frame's metadata.
+    state.rayCount = shownChunk ? static_cast<int>(shownChunk->rays.size()) : -1;
+    state.volumeCoveragePattern =
+        shownChunk ? static_cast<int>(shownChunk->volumeCoveragePattern) : 0;
+    return state;
+}
+
+void MainWindow::renderScanAgeBlock(QLabel* const label, const ScanAgeState& state,
+                                    const qint64 ageSeconds) {
+    if (!label) return;
+    label->setText(scanAgeLabelText(state.scanTimeUtc, state.rayCount, ageSeconds,
+                                    state.volumeCoveragePattern));
+    // Amber when stale, default palette otherwise. Never green: the block
+    // reports scan age, not liveness.
+    label->setStyleSheet(ageSeconds >= kScanStaleSeconds ? QStringLiteral("color: #e0c14a;")
+                                                         : QString{});
+}
+
 void MainWindow::refreshScanAgeLabel() {
-    if (!frameLabel_ || !scanAgeTime_.isValid()) return;
+    if (!frameLabel_ || !scanAgeState_.scanTimeUtc.isValid()) return;
     const auto session = activeSession();
     if (!session || session->history.empty()) return;
     const auto ageSeconds =
-        std::max<qint64>(0, scanAgeTime_.secsTo(QDateTime::currentDateTimeUtc()));
-    frameLabel_->setText(scanAgeLabelText(scanAgeTime_, scanAgeRays_, ageSeconds, scanAgeVcp_));
-    // Amber when stale, default palette otherwise. Never green: the block
-    // reports scan age, not liveness.
-    frameLabel_->setStyleSheet(ageSeconds >= kScanStaleSeconds
-                                   ? QStringLiteral("color: #e0c14a;")
-                                   : QString{});
+        std::max<qint64>(0, scanAgeState_.scanTimeUtc.secsTo(QDateTime::currentDateTimeUtc()));
+    renderScanAgeBlock(frameLabel_, scanAgeState_, ageSeconds);
     const auto isLatest = session->frameIndex == static_cast<int>(session->history.size()) - 1;
     frameLabel_->setToolTip(
         QStringLiteral("Volume %1 · frame %2 of %3\n%4\n%5")
-            .arg(scanAgeVolumeId_.isEmpty() ? QStringLiteral("—") : scanAgeVolumeId_)
+            .arg(scanAgeState_.volumeId.isEmpty() ? QStringLiteral("—") : scanAgeState_.volumeId)
             .arg(session->frameIndex + 1)
             .arg(session->history.size())
-            .arg(scanAgeTime_.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t")))
+            .arg(scanAgeState_.scanTimeUtc.toLocalTime().toString(
+                QStringLiteral("yyyy-MM-dd HH:mm:ss t")))
             .arg(session->followLatest && isLatest
                      ? QStringLiteral("Following the newest volume (L)")
                      : QStringLiteral("Not following — press L for the newest volume")));
@@ -3341,11 +3363,8 @@ void MainWindow::showFrame(const int index) {
     // comes from the pattern the decoder parsed out of RVOL blocks; a volume
     // without a vouchable pattern leaves it 0 and renders no token. The age
     // counts whole minutes from the honest UTC scan time.
-    scanAgeTime_ = frame.dataTime;
-    scanAgeVolumeId_ = frame.volumeId;
     const auto shownChunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
-    scanAgeRays_ = shownChunk ? static_cast<int>(shownChunk->rays.size()) : -1;
-    scanAgeVcp_ = shownChunk ? static_cast<int>(shownChunk->volumeCoveragePattern) : 0;
+    scanAgeState_ = ScanAgeState::fromFrame(frame, shownChunk.get());
     refreshScanAgeLabel();
     frameSlider_->setToolTip(QStringLiteral("Frame %1 of %2\n%3\n%4\n%5")
                                  .arg(session->frameIndex + 1).arg(session->history.size())
@@ -3440,10 +3459,7 @@ void MainWindow::updatePlaybackControls() {
         frameLabel_->setText(QStringLiteral("Waiting for latest scan"));
         frameLabel_->setStyleSheet(QString{});
         frameLabel_->setToolTip(QStringLiteral("Pick a station to load the latest scan"));
-        scanAgeTime_ = {};
-        scanAgeRays_ = -1;
-        scanAgeVcp_ = 0;
-        scanAgeVolumeId_.clear();
+        scanAgeState_ = {};
     } else if (!canAnimate && session && !session->historyRequested) {
         frameSlider_->setToolTip(QStringLiteral("Click to load historical volumes"));
     }

@@ -136,8 +136,13 @@ and prints it only when it is greater than zero:
   is dropped entirely — `SCAN 01:03:21Z · 3 min old · 11160 rays` — so a volume
   that carries no pattern can never print a bare `VCP` again.
 
-`refreshScanAgeLabel` re-renders from `scanAgeVcp_`, which `showFrame` snapshots
-from the shown frame's chunk (spilled frames included, via the v2 spill format).
+`showFrame` snapshots the shown frame and the chunk it renders into
+`MainWindow::ScanAgeState` (`fromFrame`), and `refreshScanAgeLabel` re-renders
+that snapshot through `renderScanAgeBlock` — the same static renderer the UI
+harness can call, so the frame -> VCP -> label wiring is testable against the
+real `frameLabel` without a session, an archive lane, or the network. Spilled
+frames contribute the chunk `frameChunk` faults back from disk (v2 spill
+format); an unreadable spill leaves the pattern at 0 and the ray count at "—".
 The live feed keeps the pattern through `acceptDecodedChunk`, which folds each
 decoded chunk with the same `mergeVolumeCoveragePattern` rule the archive decoder
 uses; a two-chunk volume whose chunks disagree renders no token at all.
