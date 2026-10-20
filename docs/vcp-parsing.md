@@ -126,6 +126,32 @@ every radial added three or four phantom rejections to the parser-rejected
 badge: 24,840 for one 2013 KTLX volume, 3 per radial for the 2013 layout and 4
 where the clutter-filter power block is present).
 
+## Console rendering (SCAN age block)
+
+`MainWindow::scanAgeLabelText` takes the pattern as a defaulted fourth argument
+and prints it only when it is greater than zero:
+
+- with a pattern: `SCAN 01:03:21Z · VCP 212 · 3 min old · 11160 rays`
+- without one (no `RVOL`, unreadable pattern, or conflicting radials): the token
+  is dropped entirely — `SCAN 01:03:21Z · 3 min old · 11160 rays` — so a volume
+  that carries no pattern can never print a bare `VCP` again.
+
+`refreshScanAgeLabel` re-renders from `scanAgeVcp_`, which `showFrame` snapshots
+from the shown frame's chunk (spilled frames included, via the v2 spill format).
+The live feed keeps the pattern through `acceptDecodedChunk`, which folds each
+decoded chunk with the same `mergeVolumeCoveragePattern` rule the archive decoder
+uses; a two-chunk volume whose chunks disagree renders no token at all.
+
+Measured through the console itself (real KPAH 2021-12-11 01:03:21Z volume,
+11,160 rays, driven through the window's archive lane and then the live chunk
+fold by a throwaway probe on the offscreen platform):
+
+```
+label after archive replay:        [SCAN 01:03:21Z · VCP 212 · … min old · 11160 rays]
+label after conflicting live fold: [SCAN 17:05:49Z · 0 min old · 22320 rays]      (no VCP)
+label after pattern-less volume:   [SCAN 17:07:49Z · 0 min old · 100 rays]        (no VCP)
+```
+
 ## Fixtures
 
 Three radials are committed verbatim from the archive volumes above — the exact
