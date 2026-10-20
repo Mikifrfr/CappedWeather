@@ -42,9 +42,11 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDir>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QGridLayout>
 #include <QImage>
 #include <QLabel>
@@ -77,12 +79,15 @@
 #include <iostream>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <optional>
 #include <vector>
 
@@ -5004,6 +5009,147 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                     return 1;
                 }
             }
+        }
+    }
+    {
+        QTemporaryDir spillRaceDir;
+        if (!spillRaceDir.isValid()) {
+            std::cerr << "Temporary dir for the spill race test failed\n";
+            return 1;
+        }
+        const auto makeVolume = [](int rays, int gates, std::uint16_t firstGate) {
+            DecodedChunk chunk;
+            chunk.radarId = "KTLX";
+            for (int ray = 0; ray < rays; ++ray) {
+                DecodedRay decoded;
+                decoded.azimuthDegrees = static_cast<float>(ray);
+                decoded.elevationNumber = 1;
+                decoded.elevationDegrees = 0.5F;
+                decoded.gateCount = gates;
+                const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+                decoded.fields.at(index).assign(static_cast<std::size_t>(gates),
+                                                static_cast<std::uint16_t>(firstGate + ray % 40));
+                decoded.firstGateByProduct.at(index) = 0;
+                decoded.gateSpacingByProduct.at(index) = 250;
+                decoded.scaleByProduct.at(index) = 2.0F;
+                decoded.offsetByProduct.at(index) = 66.0F;
+                chunk.rays.push_back(std::move(decoded));
+            }
+            return chunk;
+        };
+        const auto wideVolume = makeVolume(300, 2000, 100);
+        const auto narrowVolume = makeVolume(150, 2000, 200);
+        const QString packSource = spillRaceDir.filePath(QStringLiteral("pack/vol.cwdv"));
+        const QString volumesDir = spillRaceDir.filePath(QStringLiteral("cache/volumes/KTLX"));
+        const QString stableDest = volumesDir + QStringLiteral("/stable.cwdv");
+        const QString rewriteDest = volumesDir + QStringLiteral("/rewrite.cwdv");
+        if (!spillVolumeAtomically(wideVolume, packSource) ||
+            !stageFileAtomically(packSource, stableDest) ||
+            !spillVolumeAtomically(narrowVolume, rewriteDest)) {
+            std::cerr << "Spill race test could not seed its files\n";
+            return 1;
+        }
+        std::atomic<int> raceFailures{0};
+        std::atomic<int> blockedRewrites{0};
+        std::atomic<int> stalledReads{0};
+        std::atomic<bool> raceGo{false};
+        for (int round = 0; round < 6; ++round) {
+            const QString dest = volumesDir + QStringLiteral("/round-%1.cwdv").arg(round);
+            std::vector<std::thread> racers;
+            for (int writer = 0; writer < 6; ++writer) {
+                racers.emplace_back([&, dest] {
+                    while (!raceGo.load()) std::this_thread::yield();
+                    if (!stageFileAtomically(packSource, dest)) {
+                        std::cerr << "Concurrent stage to a fresh spill path failed\n";
+                        ++raceFailures;
+                    }
+                });
+            }
+            raceGo.store(true);
+            for (auto& racer : racers) racer.join();
+            raceGo.store(false);
+            if (raceFailures.load() != 0) return 1;
+            const auto staged = loadSpilledVolume(dest.toStdString());
+            if (!staged || staged->rays.size() != 300U) {
+                std::cerr << "Concurrent stage left an incomplete volume at a fresh path\n";
+                return 1;
+            }
+        }
+        std::vector<std::thread> workers;
+        for (int writer = 0; writer < 4; ++writer) {
+            workers.emplace_back([&, writer] {
+                while (!raceGo.load()) std::this_thread::yield();
+                for (int step = 0; step < 12; ++step) {
+                    if (!stageFileAtomically(packSource, stableDest) ||
+                        !spillVolumeAtomically(wideVolume, stableDest)) {
+                        std::cerr << "Concurrent write-once spill failed: writer " << writer << '\n';
+                        ++raceFailures;
+                        return;
+                    }
+                    if (!spillVolumeAtomically(step % 2 == 0 ? wideVolume : narrowVolume,
+                                               rewriteDest, true))
+                        ++blockedRewrites;
+                }
+            });
+        }
+        workers.emplace_back([&] {
+            while (!raceGo.load()) std::this_thread::yield();
+            for (int step = 0; step < 400; ++step) {
+                const auto staged = loadSpilledVolume(stableDest.toStdString());
+                if (!staged) {
+                    std::cerr << "Concurrent read of a write-once spill failed\n";
+                    ++raceFailures;
+                    return;
+                }
+                if (staged->rays.size() != 300U) {
+                    std::cerr << "Concurrent read of a write-once spill was not complete\n";
+                    ++raceFailures;
+                    return;
+                }
+                bool rewriteRead = false;
+                for (int attempt = 0; attempt < 20 && !rewriteRead; ++attempt) {
+                    const auto loaded = loadSpilledVolume(rewriteDest.toStdString());
+                    if (!loaded) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        continue;
+                    }
+                    if (loaded->rays.size() != 150U && loaded->rays.size() != 300U) {
+                        std::cerr << "Concurrent read of a rewritten spill was torn: rays="
+                                  << loaded->rays.size() << '\n';
+                        ++raceFailures;
+                        return;
+                    }
+                    rewriteRead = true;
+                }
+                if (!rewriteRead) ++stalledReads;
+            }
+        });
+        raceGo.store(true);
+        for (auto& worker : workers) worker.join();
+        if (raceFailures.load() != 0) return 1;
+        std::cout << "spill race: 36 fresh-path stages, 48 write-once spills, 24 rewrites, "
+                  << blockedRewrites.load() << " rewrites blocked, " << stalledReads.load()
+                  << " reads stalled by a rewrite" << std::endl;
+        bool rewriteStable = false;
+        for (int attempt = 0; attempt < 50 && !rewriteStable; ++attempt) {
+            const auto loaded = loadSpilledVolume(rewriteDest.toStdString());
+            rewriteStable =
+                loaded && (loaded->rays.size() == 150U || loaded->rays.size() == 300U);
+            if (!rewriteStable) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!rewriteStable) {
+            std::cerr << "Rewritten spill was not readable after the writers stopped\n";
+            return 1;
+        }
+        const auto leftovers = QDir(volumesDir).entryList({QStringLiteral("*.tmp-*")}, QDir::Files);
+        if (!leftovers.isEmpty()) {
+            std::cerr << "Spill staging left " << leftovers.size() << " temp files behind\n";
+            return 1;
+        }
+        const auto finalStaged = loadSpilledVolume(stableDest.toStdString());
+        if (!finalStaged || finalStaged->rays.size() != 300U) {
+            std::cerr << "Final write-once spill read is not complete\n";
+            return 1;
         }
     }
     // Offline pack plan: pure tile math, fail-closed on bad regions.

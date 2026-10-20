@@ -466,17 +466,19 @@ bool populateImportedSession(RadarSession& session, const CaseManifest& manifest
             return fail(QStringLiteral("Packed volume %1 is missing or unstashable")
                             .arg(frame.volumeId));
         }
-        QDir().mkpath(QFileInfo(dest).absolutePath());
-        QFile::remove(dest);
-        if (!QFile::copy(staged, dest)) {
-            for (const auto& staged : stagedDests) QFile::remove(staged);
-            return fail(QStringLiteral("Could not stage %1").arg(frame.volumeId));
+        bool stagedOk = stageFileAtomically(staged, dest);
+        bool decoded = stagedOk && loadSpilledVolume(dest.toStdString()) != nullptr;
+        if (!decoded) {
+            QFile::remove(dest);
+            stagedOk = stageFileAtomically(staged, dest);
+            decoded = stagedOk && loadSpilledVolume(dest.toStdString()) != nullptr;
+        }
+        if (!stagedOk || !decoded) {
+            for (const auto& done : stagedDests) QFile::remove(done);
+            return fail(stagedOk ? QStringLiteral("Packed volume %1 does not decode").arg(frame.volumeId)
+                                 : QStringLiteral("Could not stage %1").arg(frame.volumeId));
         }
         stagedDests.push_back(dest);
-        if (!loadSpilledVolume(dest.toStdString())) {
-            for (const auto& staged : stagedDests) QFile::remove(staged);
-            return fail(QStringLiteral("Packed volume %1 does not decode").arg(frame.volumeId));
-        }
         RadarFrame loaded;
         loaded.volumeId = frame.volumeId;
         loaded.dataTime = frame.dataTime;

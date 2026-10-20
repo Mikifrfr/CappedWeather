@@ -2,12 +2,25 @@
 
 #include "core/volume_spill.hpp"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QThread>
 
 #include <algorithm>
+#include <atomic>
+
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace cappedweather {
 
@@ -34,6 +47,70 @@ QString spillFilePath(const QString& radarId, const QString& volumeId) {
     if (base.isEmpty()) return {};
     return base + QStringLiteral("/volumes/") + safeRadar + QLatin1Char('/') + safe +
            QStringLiteral(".cwdv");
+}
+
+namespace {
+
+QString stageTempPath(const QString& destPath) {
+    static std::atomic<quint64> sequence{0};
+    return destPath + QStringLiteral(".tmp-") +
+           QString::number(QCoreApplication::applicationPid()) + QLatin1Char('-') +
+           QString::number(sequence.fetch_add(1, std::memory_order_relaxed));
+}
+
+bool commitStagedFile(const QString& stagedPath, const QString& destPath, bool replaceExisting) {
+#ifdef Q_OS_WIN
+    const auto source = QDir::toNativeSeparators(stagedPath);
+    const auto dest = QDir::toNativeSeparators(destPath);
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (::MoveFileExW(reinterpret_cast<LPCWSTR>(source.utf16()),
+                          reinterpret_cast<LPCWSTR>(dest.utf16()),
+                          replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0) != 0)
+            return true;
+        const auto error = ::GetLastError();
+        if (!replaceExisting && error == ERROR_ALREADY_EXISTS) return false;
+        if (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) return false;
+        QThread::msleep(10);
+    }
+    return false;
+#else
+    Q_UNUSED(replaceExisting);
+    return std::rename(QFile::encodeName(stagedPath).constData(),
+                       QFile::encodeName(destPath).constData()) == 0;
+#endif
+}
+
+bool spillFileExists(const QString& destPath) {
+    const QFileInfo info(destPath);
+    return info.isFile() && info.size() > 0;
+}
+
+}
+
+bool spillVolumeAtomically(const DecodedChunk& chunk, const QString& destPath, bool replaceExisting) {
+    if (destPath.isEmpty() || !QDir().mkpath(QFileInfo(destPath).absolutePath())) return false;
+    if (!replaceExisting && spillFileExists(destPath)) return true;
+    const auto staged = stageTempPath(destPath);
+    if (!spillVolume(chunk, staged.toStdString())) {
+        QFile::remove(staged);
+        return false;
+    }
+    if (commitStagedFile(staged, destPath, replaceExisting)) return true;
+    QFile::remove(staged);
+    return !replaceExisting && spillFileExists(destPath);
+}
+
+bool stageFileAtomically(const QString& sourcePath, const QString& destPath) {
+    if (sourcePath.isEmpty() || destPath.isEmpty() ||
+        !QDir().mkpath(QFileInfo(destPath).absolutePath()))
+        return false;
+    if (spillFileExists(destPath)) return true;
+    const auto staged = stageTempPath(destPath);
+    QFile::remove(staged);
+    if (!QFile::copy(sourcePath, staged)) return false;
+    if (commitStagedFile(staged, destPath, false)) return true;
+    QFile::remove(staged);
+    return spillFileExists(destPath);
 }
 
 std::uint16_t availableProductMask(const DecodedChunk& chunk) {
@@ -83,10 +160,9 @@ void enforceSessionSpillBudget(RadarSession& session, int maximumHistoryFrames, 
         auto& frame = session.history[static_cast<std::size_t>(oldestResident)];
         const auto path = spillFilePath(session.radarId, frame.volumeId);
         if (path.isEmpty()) break;  // no cache location: keep resident
-        QDir().mkpath(QFileInfo(path).absolutePath());
         // A failed spill (disk full) keeps the frame resident and stops:
         // growing RAM beats losing the volume.
-        if (!spillVolume(*frame.chunk, path.toStdString())) break;
+        if (!spillVolumeAtomically(*frame.chunk, path)) break;
         frame.chunk.reset();
         frame.spilledPath = path;
     }
