@@ -253,6 +253,28 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/weather_overlay_source.hpp
         )
 
+        # Qt-Core+Gui-only policy library for hermetically tested UI helpers.
+        #
+        # Modules extracted from src/app/main_window.cpp land here, each with
+        # its own check in tests/ui_logic_tests.cpp. Two hard properties:
+        #   * it links Qt6::Core + Qt6::Gui and nothing else -- never Widgets
+        #     and never cappedweather_ui, or every module would need a QWidget
+        #     to be tested and this target would become a second UI suite;
+        #   * it has no dependency on main_window.cpp or any UI source, so it
+        #     keeps building while the spine is mid-edit by another card.
+        add_library(cappedweather_ui_logic STATIC
+            src/app/ui_logic/anchor.cpp
+            src/app/ui_logic/anchor.hpp
+        )
+        target_include_directories(cappedweather_ui_logic
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_link_libraries(cappedweather_ui_logic PUBLIC
+            Qt6::Core
+            Qt6::Gui
+        )
+
         add_library(cappedweather_ui STATIC ${CAPPEDWEATHER_UI_SOURCES})
 
         target_link_libraries(cappedweather_ui PUBLIC
@@ -264,6 +286,31 @@ if(CAPPEDWEATHER_BUILD_APP)
             Qt6::Xml
             BZip2::BZip2
         )
+        # Extracted UI policy lives in its own Qt-Core+Gui-only library.
+        target_link_libraries(cappedweather_ui PRIVATE cappedweather_ui_logic)
+
+        if(BUILD_TESTING)
+            # Hermetic home for the extracted policy: QGuiApplication, offscreen,
+            # no QWidget and no cappedweather_ui on the link line. Deliberately
+            # not Qt6::Test -- the seed is a plain main() so the suite cannot
+            # grow a widget dependency through the test framework either.
+            qt_add_executable(cappedweather_ui_logic_tests
+                tests/ui_logic_tests.cpp
+            )
+            target_include_directories(cappedweather_ui_logic_tests
+                PRIVATE
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src
+            )
+            target_link_libraries(cappedweather_ui_logic_tests PRIVATE
+                cappedweather_ui_logic
+            )
+            add_test(NAME cappedweather_ui_logic_tests COMMAND cappedweather_ui_logic_tests -platform offscreen)
+            set_tests_properties(cappedweather_ui_logic_tests PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CAPPEDWEATHER_QT_ROOT}/plugins"
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CAPPEDWEATHER_QT_ROOT}/bin"
+            )
+        endif()
+
         if(CAPPEDWEATHER_QT_MULTIMEDIA)
             target_link_libraries(cappedweather_ui PUBLIC Qt6::Multimedia)
             target_compile_definitions(cappedweather_ui PUBLIC CAPPEDWEATHER_HAS_MULTIMEDIA=1)
