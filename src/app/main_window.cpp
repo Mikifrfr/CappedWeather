@@ -188,6 +188,8 @@ QColor productChipColor(const ProductKind kind) {
             return QColor(QStringLiteral("#4ade80"));
         case ProductKind::Cappi:
             return QColor(QStringLiteral("#a3e635"));
+        case ProductKind::SpecificDifferentialPhase:
+            return QColor(QStringLiteral("#e879f9"));
     }
     return QColor(QStringLiteral("#8b94a5"));
 }
@@ -260,6 +262,8 @@ QString productShortBlurb(const ProductKind kind) {
             return QStringLiteral("Strongest echo in the column, all tilts");
         case ProductKind::Cappi:
             return QStringLiteral("Reflectivity at one constant altitude");
+        case ProductKind::SpecificDifferentialPhase:
+            return QStringLiteral("Rain rate from how fast phase grows downrange");
     }
     return {};
 }
@@ -323,6 +327,15 @@ QString productExplainer(const ProductKind kind) {
                 "below): compares storms without tilt geometry getting in the "
                 "way. Below the lowest beam it shows the lowest tilt; above "
                 "the scan top there is no data. Derived, not measured directly.");
+        case ProductKind::SpecificDifferentialPhase:
+            return QStringLiteral(
+                "Specific differential phase: the downrange gradient of differential "
+                "phase, in degrees per kilometre. Because it is a rate, it isolates rain "
+                "water content from phase that is merely accumulated: 0.1-0.5 deg/km is "
+                "drizzle to light rain, 1-3 moderate, 3-7 heavy rain, and negative values "
+                "appear in hail and near the melting layer. It is a measured moment in "
+                "OPERA ODIM volumes (KDP/UKDP); US NEXRAD Message 31 does not carry it, "
+                "so the chip stays grey on US sites.");
     }
     return {};
 }
@@ -3400,9 +3413,11 @@ void MainWindow::updateProductAvailability() {
         if (!currentItem || !currentItem->isEnabled()) productCombo_->setCurrentIndex(firstAvailable);
     }
     // The chips are the primary product UI (two-column grid); they mirror the
-    // combo model but only refresh on currentIndexChanged. Without this, going
-    // OPERA (dual-pol disabled) -> NEXRAD leaves VEL/ZDR/etc chips disabled
-    // when the index itself doesn't change (e.g. stays on REF).
+    // combo model but only refresh on currentIndexChanged. Without this,
+    // switching to a volume with different moment coverage leaves the chips
+    // stale when the index itself doesn't change (e.g. stays on REF): OPERA
+    // ODIM carries KDP/UKDP, a NEXRAD Message 31 volume has no KDP source, so
+    // only that chip must grey out across the switch.
     syncProductChips();
 }
 
