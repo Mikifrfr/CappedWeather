@@ -666,6 +666,7 @@ void testVolumeSpillRoundTrip() {
     chunk.messageCount = 7;
     chunk.rejectedMessages = 1;
     chunk.rejectedBlocks = 2;
+    chunk.volumeCoveragePattern = 212;
     chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
     chunk.rays.push_back(syntheticDerivedRay(180.0F, 2, 5.0F, 10.0));
     const auto path =
@@ -677,6 +678,7 @@ void testVolumeSpillRoundTrip() {
     assert(loaded->messageCount == 7);
     assert(loaded->rejectedMessages == 1);
     assert(loaded->rejectedBlocks == 2);
+    assert(loaded->volumeCoveragePattern == 212);
     assert(loaded->rays.size() == 2);
     const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
     for (std::size_t i = 0; i < 2; ++i) {
@@ -2224,6 +2226,124 @@ std::vector<std::byte> readFixtureBytes(const char* name) {
     return {};
 }
 
+void testLevel2VolumeCoveragePattern() {
+    // Real Message 31 radials sliced verbatim out of archive volumes under
+    // data/ (provenance: docs/vcp-parsing.md). Byte 40 of each radial's RVOL
+    // volume constant block is the Volume Coverage Pattern — ICD 2620001
+    // Table XVII-E, confirmed by the published elevation table each pattern
+    // scans (VCP 12/212: 14 cuts to 19.5 deg, VCP 35: 9 cuts to 6.4 deg).
+    struct RealRadial {
+        const char* fixture;
+        const char* radarId;
+        std::uint16_t pattern;
+        float elevationDegrees;
+        float azimuthDegrees;
+    };
+    const RealRadial radials[] = {
+        // KTLX 2013-05-20 20:12:29Z (Moore tornado), 44-byte v1.0 RVOL block.
+        {"level2_radial_ktlx_20130520_vcp12.bin", "KTLX", 12, 0.68F, 245.25F},
+        // KPAH 2021-12-11 01:03:21Z (Mayfield supercell), 52-byte v3.0 block.
+        {"level2_radial_kpah_20211211_vcp212.bin", "KPAH", 212, 0.57F, 252.22F},
+        // KTLX 2026-10-09 16:37:06Z (clear air), 52-byte v3.0 block.
+        {"level2_radial_ktlx_20261009_vcp35.bin", "KTLX", 35, 0.60F, 171.25F},
+    };
+    for (const auto& radial : radials) {
+        const auto bytes = readFixtureBytes(radial.fixture);
+        assert(!bytes.empty());
+        const auto decoded = decodeMessage31Chunk(bytes, radial.radarId);
+        assert(decoded.messageCount == 1);
+        assert(decoded.rays.size() == 1);
+        assert(!decoded.volumeCoveragePatternConflicting);
+        assert(decoded.volumeCoveragePattern == radial.pattern);
+        assert(std::abs(decoded.rays.front().elevationDegrees - radial.elevationDegrees) < 0.01F);
+        assert(std::abs(decoded.rays.front().azimuthDegrees - radial.azimuthDegrees) < 0.01F);
+        assert(decoded.rays.front().has(ProductKind::Reflectivity));
+        // RVOL/RELV/RRAD are constant blocks every radial carries; a clean
+        // radial must not report them as rejected blocks.
+        assert(decoded.rejectedBlocks == 0);
+    }
+}
+
+void testLevel2VolumeCoveragePatternSyntheticBytesOnly() {
+    // Only the byte layout the Message 31 spec requires: a data header, a block
+    // pointer and one volume constant block. The real radials above cover the
+    // positive cases; these cover the fail-closed paths they cannot show.
+    constexpr std::size_t kBlockOffset = 64;
+    const auto buildRadial = [](const std::uint16_t pattern, const std::uint16_t declaredSize,
+                                const bool includeBlock) {
+        const std::size_t length = kBlockOffset + 44;
+        std::vector<std::byte> raw(length);
+        for (std::size_t index = 0; index < 4; ++index)
+            raw[index] = static_cast<std::byte>(static_cast<unsigned char>("KTLX"[index]));
+        writeBigEndian16(raw, 18, static_cast<std::uint16_t>(length));
+        raw[20] = static_cast<std::byte>(1);
+        raw[22] = static_cast<std::byte>(1);
+        writeBigEndian32(raw, 24, std::bit_cast<std::uint32_t>(0.5F));
+        writeBigEndian16(raw, 30, 1);
+        writeBigEndian32(raw, 32, static_cast<std::uint32_t>(kBlockOffset));
+        const char* tag = includeBlock ? "RVOL" : "XXXX";
+        for (std::size_t index = 0; index < 4; ++index)
+            raw[kBlockOffset + index] =
+                static_cast<std::byte>(static_cast<unsigned char>(tag[index]));
+        writeBigEndian16(raw, kBlockOffset + 4, declaredSize);
+        writeBigEndian16(raw, kBlockOffset + 40, pattern);
+        return raw;
+    };
+
+    // The pattern is volume-level: it decodes even when no moment block follows.
+    const auto parsed = decodeMessage31Chunk(buildRadial(212, 44, true), "KTLX");
+    assert(parsed.volumeCoveragePattern == 212);
+    assert(!parsed.volumeCoveragePatternConflicting);
+    assert(parsed.rejectedBlocks == 0);
+
+    // Missing block, a block declaring less than the 44 spec bytes, a zero
+    // pattern and an out-of-range pattern all report "no pattern" instead of a
+    // number that would land on the console.
+    assert(decodeMessage31Chunk(buildRadial(212, 44, false), "KTLX").volumeCoveragePattern == 0);
+    const auto shortBlock = decodeMessage31Chunk(buildRadial(212, 40, true), "KTLX");
+    assert(shortBlock.volumeCoveragePattern == 0);
+    assert(shortBlock.rejectedBlocks == 1); // a malformed constant block is a real defect
+    assert(decodeMessage31Chunk(buildRadial(0, 44, true), "KTLX").volumeCoveragePattern == 0);
+    assert(decodeMessage31Chunk(buildRadial(1000, 44, true), "KTLX").volumeCoveragePattern == 0);
+
+    // Two radials of one volume disagreeing: no single number describes the
+    // volume, so nothing is reported. The 28-byte transfer gap is the stride
+    // decodeMessage31Chunk expects between messages.
+    auto mixed = buildRadial(212, 44, true);
+    const auto second = buildRadial(35, 44, true);
+    mixed.insert(mixed.end(), 28, std::byte{0});
+    mixed.insert(mixed.end(), second.begin(), second.end());
+    const auto conflicting = decodeMessage31Chunk(mixed, "KTLX");
+    assert(conflicting.volumeCoveragePattern == 0);
+    assert(conflicting.volumeCoveragePatternConflicting);
+
+    // The record-by-record merge (archive: one volume split into bzip records;
+    // live: one volume split into chunks) keeps a pattern only while every
+    // piece agrees, and a conflict is sticky: a later agreeing piece must not
+    // resurrect a number that describes only part of the volume.
+    DecodedChunk accumulated;
+    DecodedChunk first;
+    first.volumeCoveragePattern = 212;
+    mergeVolumeCoveragePattern(accumulated, first);
+    assert(accumulated.volumeCoveragePattern == 212);
+    assert(!accumulated.volumeCoveragePatternConflicting);
+    DecodedChunk agreeing;
+    agreeing.volumeCoveragePattern = 212;
+    mergeVolumeCoveragePattern(accumulated, agreeing);
+    assert(accumulated.volumeCoveragePattern == 212);
+    DecodedChunk patternless; // a piece with no RVOL block must not clear the number
+    mergeVolumeCoveragePattern(accumulated, patternless);
+    assert(accumulated.volumeCoveragePattern == 212);
+    DecodedChunk different;
+    different.volumeCoveragePattern = 35;
+    mergeVolumeCoveragePattern(accumulated, different);
+    assert(accumulated.volumeCoveragePattern == 0);
+    assert(accumulated.volumeCoveragePatternConflicting);
+    mergeVolumeCoveragePattern(accumulated, first);
+    assert(accumulated.volumeCoveragePattern == 0);
+    assert(accumulated.volumeCoveragePatternConflicting);
+}
+
 void testOdimReader() {
     if (!odimReaderAvailable()) {
         // Stubbed build: everything fails closed with a message.
@@ -3420,6 +3540,8 @@ int main() {
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();
     testMessage31MalformedInputs();
+    testLevel2VolumeCoveragePattern();
+    testLevel2VolumeCoveragePatternSyntheticBytesOnly();
     testOptionalRealChunk();
     testLightningJumpDetection();
     testLightningJumpNoiseFloor();

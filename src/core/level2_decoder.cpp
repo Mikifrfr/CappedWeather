@@ -16,6 +16,16 @@ constexpr std::size_t kDataHeaderSize = 28;
 constexpr std::size_t kMaximumDataBlocks = 10;
 constexpr std::size_t kMaximumGatesPerMoment = 4096;
 
+// Volume data constant block ("RVOL"): ICD 2620001 Table XVII-E. Real archives
+// carry the version 1.0 block (44 bytes) and the version 3.0 block (52 bytes);
+// both place the Volume Coverage Pattern at block byte 40 as a big-endian u16,
+// after lat/lon, site height, feedhorn height, calibration and initial phase.
+// Verified against real KTLX 2013 (44-byte, VCP 12), KVWX 2021 (44-byte, VCP
+// 212) and KPAH 2021 / KTLX 2026 (52-byte, VCP 212 / 35) volumes.
+constexpr std::size_t kVolumeDataBlockMinimumSize = 44;
+constexpr std::size_t kVolumeCoveragePatternOffset = 40;
+constexpr std::uint16_t kMaximumVolumeCoveragePattern = 999;
+
 constexpr std::size_t productIndex(const ProductKind kind) {
     return static_cast<std::size_t>(kind);
 }
@@ -60,6 +70,38 @@ bool stationAt(const std::span<const std::byte> bytes, const std::size_t offset,
     }
     return true;
 }
+
+bool blockTagAt(const std::span<const std::byte> bytes, const std::size_t offset, const char* tag) {
+    if (offset > bytes.size() || bytes.size() - offset < 4) {
+        return false;
+    }
+    for (std::size_t index = 0; index < 4; ++index) {
+        if (std::to_integer<unsigned char>(bytes[offset + index]) !=
+            static_cast<unsigned char>(tag[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Returns the absolute offset of the Volume Coverage Pattern inside a volume
+// data constant block, or nullopt when the block is not a well-formed RVOL
+// record that fits inside this radial. The block size is self-declared, so a
+// radial truncated mid-block is rejected rather than read past the message.
+std::optional<std::size_t> volumeCoveragePatternOffset(const std::span<const std::byte> bytes,
+                                                       const std::size_t blockOffset,
+                                                       const std::size_t radialEnd) {
+    if (blockOffset > radialEnd ||
+        radialEnd - blockOffset < kVolumeDataBlockMinimumSize) {
+        return std::nullopt;
+    }
+    const auto declaredSize = readBigEndian16(bytes, blockOffset + 4);
+    if (!declaredSize.has_value() || *declaredSize < kVolumeDataBlockMinimumSize ||
+        *declaredSize > radialEnd - blockOffset) {
+        return std::nullopt;
+    }
+    return blockOffset + kVolumeCoveragePatternOffset;
+}
 }
 
 bool DecodedRay::has(const ProductKind kind) const {
@@ -102,6 +144,11 @@ std::optional<double> nativeValue(const std::uint16_t encoded, const float scale
 DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::string radarId) {
     DecodedChunk result;
     result.radarId = std::move(radarId);
+
+    // Volume-level pattern: every radial's RVOL block repeats it, so a volume
+    // assembled from several records (or several radials) reports one number
+    // only when all of them agree.
+    std::optional<std::uint16_t> volumeCoveragePattern;
 
     // A real-time decompressed chunk contains a short transfer header before
     // a sequence of 28-byte transfer records and Message 31 radial messages.
@@ -147,6 +194,38 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
                 continue;
             }
             const auto blockOffset = pos + *pointer;
+
+            // Constant blocks appear in every radial and are not moment data:
+            // RVOL is the volume constant record (the only one consumed here,
+            // for the Volume Coverage Pattern), RELV and RRAD are the
+            // elevation and radial constants this decoder does not use, and
+            // DCFP is the clutter-filter power block that maps to no product.
+            // They are expected records, not parse failures — counting them as
+            // "rejected blocks" lit the parser-rejected badge on every clean
+            // volume. A tag this decoder does not recognise still counts.
+            if (blockTagAt(bytes, blockOffset, "RVOL")) {
+                const auto patternOffset =
+                    volumeCoveragePatternOffset(bytes, blockOffset, radialEnd);
+                if (!patternOffset.has_value()) {
+                    ++result.rejectedBlocks;
+                    continue;
+                }
+                const auto pattern = readBigEndian16(bytes, *patternOffset);
+                if (pattern.has_value() && *pattern != 0 &&
+                    *pattern <= kMaximumVolumeCoveragePattern) {
+                    if (!volumeCoveragePattern.has_value()) {
+                        volumeCoveragePattern = *pattern;
+                    } else if (*volumeCoveragePattern != *pattern) {
+                        result.volumeCoveragePatternConflicting = true;
+                    }
+                }
+                continue;
+            }
+            if (blockTagAt(bytes, blockOffset, "RELV") || blockTagAt(bytes, blockOffset, "RRAD") ||
+                blockTagAt(bytes, blockOffset, "DCFP")) {
+                continue;
+            }
+
             const auto kind = kindForBlock(bytes, blockOffset);
             if (!kind.has_value() || blockOffset > radialEnd ||
                 radialEnd - blockOffset < kDataHeaderSize) {
@@ -206,7 +285,27 @@ DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::s
         }
         pos += static_cast<std::size_t>(*radialLength) + kTransferHeaderSize;
     }
+    // Conflicting radials leave the number at 0: the flag says the volume had
+    // patterns this decoder cannot reduce to one, so nothing is displayed.
+    if (volumeCoveragePattern.has_value() && !result.volumeCoveragePatternConflicting) {
+        result.volumeCoveragePattern = *volumeCoveragePattern;
+    }
     return result;
+}
+
+void mergeVolumeCoveragePattern(DecodedChunk& destination, const DecodedChunk& source) {
+    if (destination.volumeCoveragePatternConflicting || source.volumeCoveragePatternConflicting) {
+        destination.volumeCoveragePattern = 0;
+        destination.volumeCoveragePatternConflicting = true;
+        return;
+    }
+    if (source.volumeCoveragePattern == 0) return;
+    if (destination.volumeCoveragePattern == 0) {
+        destination.volumeCoveragePattern = source.volumeCoveragePattern;
+    } else if (destination.volumeCoveragePattern != source.volumeCoveragePattern) {
+        destination.volumeCoveragePattern = 0;
+        destination.volumeCoveragePatternConflicting = true;
+    }
 }
 
 } // namespace cappedweather
