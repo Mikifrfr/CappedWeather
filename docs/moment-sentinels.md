@@ -93,10 +93,15 @@ were not touched.
 
 ## Open follow-ups
 
-- science: `accumulateRainfall` must use `momentGateState` on
-  `samples[i].chunk->momentEncoding` so only `Missing` gates set
-  `RainfallGateIncomplete`; `BelowThreshold` stays zero depth with no flag.
-  `Undetermined` (legacy spill) keeps today's behaviour: zero depth, no flag,
-  because the gap cannot be claimed. Also strike limitation 8 in
-  `docs/rainfall-validation.md`.
-- manager: copy `momentEncoding` in `MainWindow::acceptDecodedChunk`.
+- ~~science: `accumulateRainfall` must use `momentGateState`~~ **landed
+  2026-10-20 (card `t_965bd7e5`)**: `accumulateRainfall` classifies every gate
+  with `momentGateState(samples[i].chunk->momentEncoding, raw)`. `Missing` sets
+  `RainfallGateIncomplete`, `BelowThreshold` stays zero depth with no flag,
+  `Undetermined` (legacy spill) keeps the old reading. Limitation 8 of
+  `docs/rainfall-validation.md` is struck; the closed-form coverage is
+  `testRainfallSentinelConvention` in `core_tests` (same gate missing in one
+  volume and below threshold in the next, ODIM's swapped codes, `Unknown`).
+- ~~manager: copy `momentEncoding` in `MainWindow::acceptDecodedChunk`~~
+  **landed 2026-10-20 (card `t_f84c4bc9`)**: the assembled live volume carries
+  the decoder's convention into `appendDerivedProducts`/`accumulateRainfall`,
+  covered by `tests/ui_smoke_test.cpp::testMomentEncodingMerge`.
