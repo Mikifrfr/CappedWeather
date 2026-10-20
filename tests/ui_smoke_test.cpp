@@ -2542,6 +2542,87 @@ static bool testScanAgeBlock(MainWindow* window, QString* error) {
     return true;
 }
 
+static bool testMomentEncodingMerge(MainWindow* window, QString* error) {
+    // acceptDecodedChunk merges every decoded chunk into
+    // session->pendingVolume. It used to drop DecodedChunk::momentEncoding, so
+    // an assembled volume reached appendDerivedProducts/accumulateRainfall as
+    // Unknown and a coverage gap could read as a dry gate. Drive the real
+    // pipeline through ArchiveSource's public signals (wired to
+    // volumeStarted/chunkDecoded/volumeReady exactly like the live feeds) and
+    // read back the frame the window published to a panel.
+    auto* archive = window->findChild<ArchiveSource*>();
+    auto* panel = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
+    if (!archive || !panel) {
+        *error = QStringLiteral("moment-encoding probe needs the archive source and the main panel");
+        return false;
+    }
+    const auto previousRadar = panel->radarId();
+    panel->setSelectedRadar(QStringLiteral("TMERGE"));
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto makeChunk = [](const MomentEncoding encoding, const std::size_t messages,
+                              const std::size_t rejectedMessages, const std::size_t rejectedBlocks,
+                              const std::size_t rays) {
+        auto chunk = std::make_shared<DecodedChunk>();
+        chunk->radarId = "TMERGE";
+        chunk->momentEncoding = encoding;
+        chunk->messageCount = messages;
+        chunk->rejectedMessages = rejectedMessages;
+        chunk->rejectedBlocks = rejectedBlocks;
+        chunk->rays.resize(rays);
+        return chunk;
+    };
+
+    archive->volumeStarted(QStringLiteral("TMERGE"), QStringLiteral("volume-odim"), 2);
+    archive->chunkDecoded(QStringLiteral("TMERGE"), QStringLiteral("volume-odim"),
+                          QStringLiteral("chunk-1"),
+                          makeChunk(MomentEncoding::Odim, 3, 1, 2, 2), now);
+    archive->chunkDecoded(QStringLiteral("TMERGE"), QStringLiteral("volume-odim"),
+                          QStringLiteral("chunk-2"),
+                          makeChunk(MomentEncoding::Odim, 4, 2, 0, 3), now);
+    archive->volumeReady(QStringLiteral("TMERGE"), QStringLiteral("volume-odim"), 2, 0, now);
+
+    const auto published = panel->decodedChunk();
+    if (!published) {
+        *error = QStringLiteral("merged volume published no frame");
+        panel->setSelectedRadar(previousRadar);
+        return false;
+    }
+    if (published->momentEncoding != MomentEncoding::Odim) {
+        *error = QStringLiteral("momentEncoding did not survive the chunk merge (got %1)")
+                     .arg(static_cast<int>(published->momentEncoding));
+        panel->setSelectedRadar(previousRadar);
+        return false;
+    }
+    // The rest of the merge contract, so a future rewrite cannot trade the
+    // encoding for a counter regression.
+    if (published->messageCount != 7 || published->rejectedMessages != 3 ||
+        published->rejectedBlocks != 2 || published->rays.size() != 5) {
+        *error = QStringLiteral("chunk merge totals wrong: messages=%1 rejected=%2 blocks=%3 rays=%4")
+                     .arg(published->messageCount)
+                     .arg(published->rejectedMessages)
+                     .arg(published->rejectedBlocks)
+                     .arg(published->rays.size());
+        panel->setSelectedRadar(previousRadar);
+        return false;
+    }
+
+    // Today's only case: a volume whose chunks record no convention keeps
+    // reading as Unknown, which consumers treat as "<= 1 means no data".
+    archive->volumeStarted(QStringLiteral("TMERGE"), QStringLiteral("volume-unknown"), 1);
+    archive->chunkDecoded(QStringLiteral("TMERGE"), QStringLiteral("volume-unknown"),
+                          QStringLiteral("chunk-3"),
+                          makeChunk(MomentEncoding::Unknown, 1, 0, 0, 1), now);
+    archive->volumeReady(QStringLiteral("TMERGE"), QStringLiteral("volume-unknown"), 1, 0, now);
+    const auto unknown = panel->decodedChunk();
+    if (!unknown || unknown->momentEncoding != MomentEncoding::Unknown) {
+        *error = QStringLiteral("Unencoded volume should stay MomentEncoding::Unknown");
+        panel->setSelectedRadar(previousRadar);
+        return false;
+    }
+    panel->setSelectedRadar(previousRadar);
+    return true;
+}
+
 static bool testContextMenuToolModes(QString* error) {
     RadarMapCanvas canvas;
     canvas.resize(800, 600);
@@ -5458,6 +5539,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testScanAgeBlock(&window, &failure)) {
             std::cerr << "SCAN age block failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testMomentEncodingMerge(&window, &failure)) {
+            std::cerr << "Moment encoding merge failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testContextMenuToolModes(&failure)) {

@@ -516,6 +516,93 @@ void testRainfallIncompleteCoverage() {
     assert(grid.summary.quality == RainfallQuality::Marginal);
 }
 
+void testRainfallSentinelConvention() {
+    // qa file, touched deliberately (card t_965bd7e5, science): the
+    // accumulator now consumes DecodedChunk::momentEncoding. Same 16-gate
+    // 40 dBZ volume as the closed-form case above; only gate 5 carries a
+    // sentinel code. NEXRAD Message 31 packs 0 = below threshold and
+    // 1 = range folded / missing; ODIM packs 0 = missing and 1 = below
+    // threshold. A missing gate is a coverage gap and must be flagged; a
+    // below-threshold gate was measured and stayed dry; a chunk that records no
+    // convention (legacy spill file) cannot claim either.
+    const auto volumeWithSentinel = [](const std::uint16_t sentinelCode,
+                                       const MomentEncoding encoding) {
+        auto chunk = rainVolume("KTLX", 40.0);
+        chunk.momentEncoding = encoding;
+        chunk.rays.front()
+            .fields.at(static_cast<std::size_t>(ProductKind::Reflectivity))
+            .at(5) = sentinelCode;
+        return chunk;
+    };
+    constexpr auto nexrad = MomentEncoding::NexradMessage31;
+    constexpr auto odim = MomentEncoding::Odim;
+    constexpr auto unknown = MomentEncoding::Unknown;
+
+    {
+        // Gate 5 is range folded / missing in the older volume (NEXRAD code 1)
+        // and below threshold in the newest (code 0). Both credit zero depth;
+        // only the missing one is a coverage gap. Gate 4 was measured in both:
+        // one 300 s interval at R(40) = 12.2397 mm/h = 1.02 mm -> 10 tenths.
+        const auto missing = volumeWithSentinel(1, nexrad);
+        const auto dry = volumeWithSentinel(0, nexrad);
+        const std::vector<RainfallSample> samples{{&missing, 0.0}, {&dry, 300.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 1);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) != 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 10);
+        assert((grid.rays.front().gates.at(4).flags & RainfallGateIncomplete) == 0);
+    }
+    {
+        // The same gate below threshold in every volume: measured, no echo. Zero
+        // depth and no coverage claim. Four volumes keep the volume-count rule
+        // out of the way, so quality is Good and only a dry gate can be the
+        // reason. Three intervals at R(40) -> 30.599 tenths -> 31 elsewhere.
+        const auto dry = volumeWithSentinel(0, nexrad);
+        const std::vector<RainfallSample> samples{
+            {&dry, 0.0}, {&dry, 300.0}, {&dry, 600.0}, {&dry, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 0);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) == 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.quality == RainfallQuality::Good);
+    }
+    {
+        // ODIM swaps the codes: 0 is the missing gate, 1 is below threshold. If
+        // the accumulator ignored the recorded convention the two cases would
+        // come out the other way round. Encoding only decides the sentinel here;
+        // scale/offset stay per ray.
+        const auto odimMissing = volumeWithSentinel(0, odim);
+        const auto odimDry = volumeWithSentinel(1, odim);
+        const std::vector<RainfallSample> samples{
+            {&odimMissing, 0.0}, {&odimDry, 300.0}, {&odimDry, 600.0}, {&odimDry, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 1);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) != 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.quality == RainfallQuality::Marginal);
+    }
+    {
+        // A chunk with no recorded convention (legacy spill file) cannot tell
+        // the codes apart: keep the old reading, zero depth and no claim.
+        const auto legacy = volumeWithSentinel(1, unknown);
+        const std::vector<RainfallSample> samples{
+            {&legacy, 0.0}, {&legacy, 300.0}, {&legacy, 600.0}, {&legacy, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 0);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) == 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.quality == RainfallQuality::Good);
+    }
+}
+
 void testRainfallInvalidWindows() {
     {
         const auto grid = accumulateRainfall({}, 370.0);
@@ -1962,6 +2049,60 @@ void testMessage31SixteenBitMoment() {
                     179.82) < 0.1);
 }
 
+void testMessage31SentinelConvention() {
+    // Minimal single-radial Message 31 layout (ICD 2620001), not a synthesised
+    // volume: the smallest transfer/radial/data-block headers a DR moment needs.
+    // Gates 0/1/66 are the three cases: below threshold, range folded, valid.
+    constexpr std::size_t radialLength = 103;
+    constexpr std::size_t momentOffset = 72;
+    std::vector<std::byte> raw(radialLength);
+    for (std::size_t index = 0; index < 4; ++index) {
+        raw[index] = static_cast<std::byte>(static_cast<unsigned char>("KTLX"[index]));
+    }
+    writeBigEndian16(raw, 18, static_cast<std::uint16_t>(radialLength));
+    writeBigEndian32(raw, 12, std::bit_cast<std::uint32_t>(12.5F));
+    raw[20] = static_cast<std::byte>(1);
+    raw[22] = static_cast<std::byte>(1);
+    writeBigEndian32(raw, 24, std::bit_cast<std::uint32_t>(0.5F));
+    writeBigEndian16(raw, 30, 1);
+    writeBigEndian32(raw, 32, static_cast<std::uint32_t>(momentOffset));
+    raw[momentOffset] = static_cast<std::byte>('D');
+    raw[momentOffset + 1] = static_cast<std::byte>('R');
+    raw[momentOffset + 2] = static_cast<std::byte>('E');
+    raw[momentOffset + 3] = static_cast<std::byte>('F');
+    writeBigEndian16(raw, momentOffset + 8, 3);
+    writeBigEndian16(raw, momentOffset + 10,
+                     static_cast<std::uint16_t>(static_cast<std::int16_t>(-375)));
+    writeBigEndian16(raw, momentOffset + 12, 250);
+    raw[momentOffset + 19] = static_cast<std::byte>(8);
+    writeBigEndian32(raw, momentOffset + 20, std::bit_cast<std::uint32_t>(2.0F));
+    writeBigEndian32(raw, momentOffset + 24, std::bit_cast<std::uint32_t>(66.0F));
+    raw[momentOffset + 28] = static_cast<std::byte>(0);  // below threshold
+    raw[momentOffset + 29] = static_cast<std::byte>(1);  // range folded
+    raw[momentOffset + 30] = static_cast<std::byte>(66); // valid: 0.0 dBZ
+
+    const auto decoded = decodeMessage31Chunk(raw, "KTLX");
+    assert(decoded.messageCount == 1);
+    assert(decoded.rays.size() == 1);
+    assert(decoded.momentEncoding == MomentEncoding::NexradMessage31);
+    const auto codes = momentSentinelCodes(decoded.momentEncoding);
+    assert(codes.has_value());
+    assert(codes->belowThreshold == 0);
+    assert(codes->missing == 1);
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto& ray = decoded.rays.front();
+    assert(ray.fields.at(index) == std::vector<std::uint16_t>({0, 1, 66}));
+    assert(momentGateState(decoded.momentEncoding, 0) == MomentGateState::BelowThreshold);
+    assert(momentGateState(decoded.momentEncoding, 1) == MomentGateState::Missing);
+    assert(momentGateState(decoded.momentEncoding, 66) == MomentGateState::Valid);
+    // The value path is untouched: both sentinel codes still decode to nullopt.
+    assert(!nativeValue(0, ray.scaleByProduct.at(index), ray.offsetByProduct.at(index)).has_value());
+    assert(!nativeValue(1, ray.scaleByProduct.at(index), ray.offsetByProduct.at(index)).has_value());
+    const auto zero = nativeValue(66, ray.scaleByProduct.at(index), ray.offsetByProduct.at(index));
+    assert(zero.has_value());
+    assert(std::abs(*zero) < 1e-9);
+}
+
 void testMessage31MalformedInputs() {
     std::mt19937 generator(0xCA77EDu);
     std::uniform_int_distribution<int> sizeDistribution(0, 2048);
@@ -1996,6 +2137,7 @@ void testOptionalRealChunk() {
     const auto* bytes = reinterpret_cast<const std::byte*>(raw.data());
     const auto decoded = decodeMessage31Chunk(
         std::span<const std::byte>(bytes, raw.size()), radarId);
+    assert(decoded.momentEncoding == MomentEncoding::NexradMessage31);
     assert(decoded.messageCount > 0);
     assert(!decoded.rays.empty());
     assert(decoded.rays.front().has(ProductKind::Reflectivity));
@@ -2354,6 +2496,192 @@ void testLevel2VolumeCoveragePatternSyntheticBytesOnly() {
     mergeVolumeCoveragePattern(accumulated, first);
     assert(accumulated.volumeCoveragePattern == 0);
     assert(accumulated.volumeCoveragePatternConflicting);
+}
+
+void testMessage31RealArchiveChunkSentinelConvention() {
+    // Real bytes, not a synthesised volume: 60 Message 31 radials cut verbatim
+    // from KINX20130520_201333_V06 (Moore, OK outbreak), elevation 2, transfer
+    // headers included. Only the offset and length were chosen.
+    const auto bytes = readFixtureBytes("nexrad_m31_kinx_20130520.bin");
+    if (bytes.empty()) {
+        std::cout << "note: KINX fixture missing, skipping real-chunk asserts\n";
+        return;
+    }
+    const auto chunk = decodeMessage31Chunk(bytes, "KINX");
+    assert(chunk.momentEncoding == MomentEncoding::NexradMessage31);
+    assert(chunk.rays.size() == chunk.messageCount);
+    assert(chunk.messageCount == 60);
+    const auto codes = momentSentinelCodes(chunk.momentEncoding);
+    assert(codes.has_value());
+    assert(codes->belowThreshold == 0);
+    assert(codes->missing == 1);
+
+    std::size_t below = 0, folded = 0, valid = 0;
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+    for (const auto& ray : chunk.rays) {
+        for (const auto encoded : ray.fields.at(index)) {
+            switch (momentGateState(chunk.momentEncoding, encoded)) {
+            case MomentGateState::BelowThreshold: ++below; break;
+            case MomentGateState::Missing: ++folded; break;
+            case MomentGateState::Valid: ++valid; break;
+            case MomentGateState::Undetermined: assert(false); break;
+            }
+        }
+    }
+    std::cout << "KINX real sweep sentinels: below=" << below << " folded=" << folded
+              << " valid=" << valid << " gates\n";
+    // A real sweep mixes all three: dry air below threshold, range-folded gates
+    // that carry no measurement, and echoes.
+    assert(below > 0);
+    assert(folded > 0);
+    assert(valid > 0);
+}
+
+void testOdimSentinelConvention() {
+    // ODIM packs the opposite way round from Message 31: 0 = missing (nodata),
+    // 1 = below threshold (undetect). Proven on both real DWD/OPERA fixtures.
+    if (!odimReaderAvailable()) return;
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+
+    const auto deneuBytes = readFixtureBytes("odim_deneu_dbzh.h5");
+    if (deneuBytes.empty()) {
+        std::cout << "note: deneu fixture missing, skipping sentinel asserts\n";
+        return;
+    }
+    std::string error;
+    const auto deneu = readOdimPvol(deneuBytes, "deneu", &error);
+    assert(deneu.has_value());
+    assert(deneu->momentEncoding == MomentEncoding::Odim);
+    assert(momentSentinelCodes(deneu->momentEncoding).has_value());
+    assert(momentSentinelCodes(deneu->momentEncoding)->missing == 0);
+    assert(momentSentinelCodes(deneu->momentEncoding)->belowThreshold == 1);
+    std::size_t deneuMissing = 0, deneuBelow = 0, deneuValid = 0;
+    for (const auto& ray : deneu->rays) {
+        for (const auto encoded : ray.fields.at(index)) {
+            switch (momentGateState(deneu->momentEncoding, encoded)) {
+            case MomentGateState::Missing: ++deneuMissing; break;
+            case MomentGateState::BelowThreshold: ++deneuBelow; break;
+            case MomentGateState::Valid: ++deneuValid; break;
+            case MomentGateState::Undetermined: assert(false); break;
+            }
+        }
+    }
+    // The DWD fixture is a dense clear-air sweep: every gate is undetect, so it
+    // pins the below-threshold code but cannot show nodata.
+    std::cout << "DWD deneu ODIM sentinels: missing=" << deneuMissing << " below=" << deneuBelow
+              << " valid=" << deneuValid << " gates\n";
+    assert(deneuMissing == 0);
+    assert(deneuBelow > 0);
+    assert(deneuValid == 0);
+
+    const auto nohurBytes = readFixtureBytes("odim_nohur_dbzh.h5");
+    if (nohurBytes.empty()) {
+        std::cout << "note: nohur fixture missing, skipping mixed-sweep asserts\n";
+        return;
+    }
+    const auto nohur = readOdimPvol(nohurBytes, "nohur", &error);
+    assert(nohur.has_value());
+    assert(nohur->momentEncoding == MomentEncoding::Odim);
+    std::size_t nohurMissing = 0, nohurBelow = 0, nohurValid = 0;
+    for (const auto& ray : nohur->rays) {
+        for (const auto encoded : ray.fields.at(index)) {
+            switch (momentGateState(nohur->momentEncoding, encoded)) {
+            case MomentGateState::Missing: ++nohurMissing; break;
+            case MomentGateState::BelowThreshold: ++nohurBelow; break;
+            case MomentGateState::Valid: ++nohurValid; break;
+            case MomentGateState::Undetermined: assert(false); break;
+            }
+        }
+    }
+    std::cout << "OPERA nohur ODIM sentinels: missing=" << nohurMissing << " below=" << nohurBelow
+              << " valid=" << nohurValid << " gates\n";
+    assert(nohurBelow > 0);
+    assert(nohurValid > 0);
+    // Whatever the fixtures hold, the same numeric code must classify the other
+    // way under Message 31: that is the bug this discriminator closes.
+    assert(momentGateState(MomentEncoding::NexradMessage31, 0) == MomentGateState::BelowThreshold);
+    assert(momentGateState(MomentEncoding::NexradMessage31, 1) == MomentGateState::Missing);
+}
+
+void testOdimMinimalContainerMixedSentinels() {
+    // Minimal ODIM_H5 container per the ODIM spec (dataset1/data1/what + where
+    // plus a 1-ray, 4-gate DBZH array), NOT a radar volume: it exists only to
+    // exercise nodata, which neither real fixture contains (both are dense
+    // sweeps where every gate is either undetect or a value). Gates are
+    // 255 = nodata, 0 = undetect, 20 dBZ, 30 dBZ.
+    if (!odimReaderAvailable()) return;
+    const auto bytes = readFixtureBytes("odim_minimal_mixed.h5");
+    if (bytes.empty()) {
+        std::cout << "note: minimal ODIM fixture missing, skipping nodata asserts\n";
+        return;
+    }
+    std::string error;
+    const auto chunk = readOdimPvol(bytes, "TEST", &error);
+    assert(chunk.has_value());
+    assert(chunk->momentEncoding == MomentEncoding::Odim);
+    assert(chunk->rays.size() == 1);
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto& ray = chunk->rays.front();
+    // 20 dBZ -> 20*2+66 = 106, 30 dBZ -> 126, the same packing the reader uses.
+    assert(ray.fields.at(index) == std::vector<std::uint16_t>({0, 1, 106, 126}));
+    assert(momentGateState(chunk->momentEncoding, 0) == MomentGateState::Missing);
+    assert(momentGateState(chunk->momentEncoding, 1) == MomentGateState::BelowThreshold);
+    assert(momentGateState(chunk->momentEncoding, 106) == MomentGateState::Valid);
+    // Both sentinel codes still read as "no value" downstream.
+    assert(!nativeValue(0, ray.scaleByProduct.at(index), ray.offsetByProduct.at(index)).has_value());
+    assert(!nativeValue(1, ray.scaleByProduct.at(index), ray.offsetByProduct.at(index)).has_value());
+    const auto value = nativeValue(106, ray.scaleByProduct.at(index), ray.offsetByProduct.at(index));
+    assert(value.has_value());
+    assert(std::abs(*value - 20.0) < 1e-9);
+}
+
+void testMomentSentinelConventionFlipsBetweenFormats() {
+    // Same gate codes, two formats: 0 and 1 swap meaning. A chunk with no
+    // recorded convention must not pretend to know which is which.
+    for (const auto encoding : {MomentEncoding::NexradMessage31, MomentEncoding::Odim}) {
+        assert(momentGateState(encoding, 66) == MomentGateState::Valid);
+        assert(momentGateState(encoding, 65534) == MomentGateState::Valid);
+    }
+    assert(momentGateState(MomentEncoding::NexradMessage31, 0) == MomentGateState::BelowThreshold);
+    assert(momentGateState(MomentEncoding::NexradMessage31, 1) == MomentGateState::Missing);
+    assert(momentGateState(MomentEncoding::Odim, 0) == MomentGateState::Missing);
+    assert(momentGateState(MomentEncoding::Odim, 1) == MomentGateState::BelowThreshold);
+    assert(!momentSentinelCodes(MomentEncoding::Unknown).has_value());
+    assert(momentGateState(MomentEncoding::Unknown, 0) == MomentGateState::Undetermined);
+    assert(momentGateState(MomentEncoding::Unknown, 1) == MomentGateState::Undetermined);
+    assert(momentGateState(MomentEncoding::Unknown, 66) == MomentGateState::Valid);
+}
+
+void testSpillCarriesMomentEncoding() {
+    DecodedChunk chunk;
+    chunk.radarId = "KINX";
+    chunk.rays.push_back(syntheticDerivedRay(90.0F, 1, 0.5F, 30.0));
+    const auto path =
+        (std::filesystem::temp_directory_path() / "cappedweather-spill-encoding.cwdv").string();
+    chunk.momentEncoding = MomentEncoding::NexradMessage31;
+    assert(spillVolume(chunk, path));
+    {
+        const auto loaded = loadSpilledVolume(path);
+        assert(loaded);
+        assert(loaded->momentEncoding == MomentEncoding::NexradMessage31);
+    }
+    chunk.momentEncoding = MomentEncoding::Odim;
+    assert(spillVolume(chunk, path));
+    {
+        const auto loaded = loadSpilledVolume(path);
+        assert(loaded);
+        assert(loaded->momentEncoding == MomentEncoding::Odim);
+    }
+    // Unknown writes no trailer, so files from before the field existed still
+    // load and stay Unknown instead of assuming a format.
+    chunk.momentEncoding = MomentEncoding::Unknown;
+    assert(spillVolume(chunk, path));
+    {
+        const auto loaded = loadSpilledVolume(path);
+        assert(loaded);
+        assert(loaded->momentEncoding == MomentEncoding::Unknown);
+    }
+    std::remove(path.c_str());
 }
 
 void testOdimReader() {
@@ -3565,6 +3893,7 @@ int main() {
     testRainfallGapClamping();
     testRainfallGeometryRemap();
     testRainfallIncompleteCoverage();
+    testRainfallSentinelConvention();
     testRainfallInvalidWindows();
     testRainfallPartialReferenceRays();
     testStormTracker();
@@ -3594,6 +3923,8 @@ int main() {
     testZdrColumns();
     testMessage31MomentLayout();
     testMessage31SixteenBitMoment();
+    testMessage31SentinelConvention();
+    testMessage31RealArchiveChunkSentinelConvention();
     testMessage31MalformedInputs();
     testLevel2VolumeCoveragePattern();
     testLevel2VolumeCoveragePatternSyntheticBytesOnly();
@@ -3606,10 +3937,14 @@ int main() {
     testGlmReaderBuildContract();
     testOdimReader();
     testOdimAzimuthConvention();
+    testOdimSentinelConvention();
+    testOdimMinimalContainerMixedSentinels();
     testOdimNyquistFromHow();
     testOdimDualPolAbsentOnSinglePolVolumes();
     testOdimDualPolFromRealDwdSweeps();
     testOdimDualPolSpecShapedDataset();
+    testMomentSentinelConventionFlipsBetweenFormats();
+    testSpillCarriesMomentEncoding();
     testOdimParallelDecode();
     testRadarLightningFusion();
     testRadarLightningFusionSplitCut();

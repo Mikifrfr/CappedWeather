@@ -146,6 +146,7 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private slots:
     void radarSelected(const QModelIndex& index);
@@ -539,6 +540,8 @@ private:
     QString crossSectionRadarId_;
     // Temporary 1-panel focus without destroying the layout preset.
     bool panelMaximized_ = false;
+    bool settingsRestoreComplete_ = false;
+    int pendingDockWidth_ = -1;
     int maximizedPanelIndex_ = 0;
     int layoutBeforeMaximize_ = 0;
     int consecutiveFailures_ = 0;

@@ -188,6 +188,8 @@ QColor productChipColor(const ProductKind kind) {
             return QColor(QStringLiteral("#4ade80"));
         case ProductKind::Cappi:
             return QColor(QStringLiteral("#a3e635"));
+        case ProductKind::SpecificDifferentialPhase:
+            return QColor(QStringLiteral("#e879f9"));
     }
     return QColor(QStringLiteral("#8b94a5"));
 }
@@ -260,6 +262,8 @@ QString productShortBlurb(const ProductKind kind) {
             return QStringLiteral("Strongest echo in the column, all tilts");
         case ProductKind::Cappi:
             return QStringLiteral("Reflectivity at one constant altitude");
+        case ProductKind::SpecificDifferentialPhase:
+            return QStringLiteral("Rain rate from how fast phase grows downrange");
     }
     return {};
 }
@@ -323,6 +327,15 @@ QString productExplainer(const ProductKind kind) {
                 "below): compares storms without tilt geometry getting in the "
                 "way. Below the lowest beam it shows the lowest tilt; above "
                 "the scan top there is no data. Derived, not measured directly.");
+        case ProductKind::SpecificDifferentialPhase:
+            return QStringLiteral(
+                "Specific differential phase: the downrange gradient of differential "
+                "phase, in degrees per kilometre. Because it is a rate, it isolates rain "
+                "water content from phase that is merely accumulated: 0.1-0.5 deg/km is "
+                "drizzle to light rain, 1-3 moderate, 3-7 heavy rain, and negative values "
+                "appear in hail and near the melting layer. It is a measured moment in "
+                "OPERA ODIM volumes (KDP/UKDP); US NEXRAD Message 31 does not carry it, "
+                "so the chip stays grey on US sites.");
     }
     return {};
 }
@@ -1065,10 +1078,17 @@ MainWindow::MainWindow(QWidget* parent)
     const auto dockState = settings.value(QStringLiteral("window/dockState")).toByteArray();
     if (!dockState.isEmpty()) restoreState(dockState, 1);
     const auto maximumDockWidth = std::max(220, width() - 420);
-    const auto storedDockWidth = std::clamp(
+    pendingDockWidth_ = std::clamp(
         settings.value(QStringLiteral("window/controlDockWidth"), 272).toInt(),
         220, maximumDockWidth);
-    resizeDocks({controlDock_}, {storedDockWidth}, Qt::Horizontal);
+    settingsRestoreComplete_ = true;
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    if (pendingDockWidth_ <= 0 || !controlDock_) return;
+    resizeDocks({controlDock_}, {pendingDockWidth_}, Qt::Horizontal);
+    pendingDockWidth_ = -1;
 }
 
 void MainWindow::applyTheme(const AppTheme theme) {
@@ -3044,6 +3064,10 @@ void MainWindow::acceptDecodedChunk(const QString& radarId, const QString& volum
     const auto session = sessionFor(radarId, false);
     if (!session || !decoded || volumeId != session->pendingVolumeId) return;
     session->pendingVolume.messageCount += decoded->messageCount;
+    // All chunks of one volume come from one format, so the last chunk's
+    // sentinel convention is the volume's. Dropping it left every assembled
+    // volume at Unknown, where a coverage gap reads as a dry gate downstream.
+    session->pendingVolume.momentEncoding = decoded->momentEncoding;
     session->pendingVolume.rejectedMessages += decoded->rejectedMessages;
     session->pendingVolume.rejectedBlocks += decoded->rejectedBlocks;
     // Fold the Volume Coverage Pattern the same way the archive decoder folds
@@ -3428,9 +3452,11 @@ void MainWindow::updateProductAvailability() {
         if (!currentItem || !currentItem->isEnabled()) productCombo_->setCurrentIndex(firstAvailable);
     }
     // The chips are the primary product UI (two-column grid); they mirror the
-    // combo model but only refresh on currentIndexChanged. Without this, going
-    // OPERA (dual-pol disabled) -> NEXRAD leaves VEL/ZDR/etc chips disabled
-    // when the index itself doesn't change (e.g. stays on REF).
+    // combo model but only refresh on currentIndexChanged. Without this,
+    // switching to a volume with different moment coverage leaves the chips
+    // stale when the index itself doesn't change (e.g. stays on REF): OPERA
+    // ODIM carries KDP/UKDP, a NEXRAD Message 31 volume has no KDP source, so
+    // only that chip must grey out across the switch.
     syncProductChips();
 }
 
@@ -3674,6 +3700,7 @@ void MainWindow::restoreSettings() {
 }
 
 void MainWindow::saveSettings() const {
+    if (!settingsRestoreComplete_) return;
     QSettings settings;
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
     settings.setValue(QStringLiteral("window/dockState"), saveState(1));

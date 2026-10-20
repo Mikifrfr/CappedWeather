@@ -432,6 +432,9 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
     (void)hdf5Lock;
     DecodedChunk chunk;
     chunk.radarId = std::move(radarId);
+    // ODIM sentinel order is the reverse of Message 31: 0 = missing (nodata),
+    // 1 = below threshold (undetect). packGate() writes exactly those codes.
+    chunk.momentEncoding = MomentEncoding::Odim;
     if (!hasHdf5Signature(bytes)) {
         if (error != nullptr) *error = "not an HDF5 file (bad signature)";
         return std::nullopt;
