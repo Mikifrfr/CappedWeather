@@ -3029,6 +3029,11 @@ void MainWindow::acceptDecodedChunk(const QString& radarId, const QString& volum
     session->pendingVolume.messageCount += decoded->messageCount;
     session->pendingVolume.rejectedMessages += decoded->rejectedMessages;
     session->pendingVolume.rejectedBlocks += decoded->rejectedBlocks;
+    // Fold the Volume Coverage Pattern the same way the archive decoder folds
+    // it: first non-zero value wins, disagreement collapses to 0 + the
+    // conflicting flag. Copying the counters without this loses the pattern
+    // on the live feed, which is the path the SCAN block renders.
+    mergeVolumeCoveragePattern(session->pendingVolume, *decoded);
     session->pendingVolume.rays.insert(session->pendingVolume.rays.end(),
                                        std::make_move_iterator(decoded->rays.begin()),
                                        std::make_move_iterator(decoded->rays.end()));
@@ -3180,16 +3185,22 @@ void MainWindow::rebuildTiltCombo() {
 }
 
 QString MainWindow::scanAgeLabelText(const QDateTime& scanTimeUtc, const int rayCount,
-                                     const qint64 ageSeconds) {
+                                     const qint64 ageSeconds, const int volumeCoveragePattern) {
     const auto age = std::max<qint64>(0, ageSeconds);
     const auto timeText =
         scanTimeUtc.isValid() ? scanTimeUtc.toUTC().toString(QStringLiteral("HH:mm:ss")) +
                                     QStringLiteral("Z")
                               : QStringLiteral("—");
     const auto raysText = rayCount >= 0 ? QString::number(rayCount) : QStringLiteral("—");
-    // No VCP token: the decoder does not carry a Volume Coverage Pattern yet,
-    // and a labelled-but-empty "VCP" reads like a value that failed to load.
-    // The slot returns when level2_decoder.cpp actually parses the pattern.
+    // The VCP token only appears when the volume actually carries a pattern the
+    // decoder can vouch for. 0 means "no pattern" (or radials that disagree,
+    // volumeCoveragePatternConflicting), and rendering a labelled-but-empty
+    // "VCP" reads like a value that failed to load.
+    if (volumeCoveragePattern > 0) {
+        return QStringLiteral("SCAN %1 · VCP %2 · %3 min old · %4 rays")
+            .arg(timeText, QString::number(volumeCoveragePattern), QString::number(age / 60),
+                 raysText);
+    }
     return QStringLiteral("SCAN %1 · %2 min old · %3 rays")
         .arg(timeText, QString::number(age / 60), raysText);
 }
@@ -3200,7 +3211,7 @@ void MainWindow::refreshScanAgeLabel() {
     if (!session || session->history.empty()) return;
     const auto ageSeconds =
         std::max<qint64>(0, scanAgeTime_.secsTo(QDateTime::currentDateTimeUtc()));
-    frameLabel_->setText(scanAgeLabelText(scanAgeTime_, scanAgeRays_, ageSeconds));
+    frameLabel_->setText(scanAgeLabelText(scanAgeTime_, scanAgeRays_, ageSeconds, scanAgeVcp_));
     // Amber when stale, default palette otherwise. Never green: the block
     // reports scan age, not liveness.
     frameLabel_->setStyleSheet(ageSeconds >= kScanStaleSeconds
@@ -3309,13 +3320,15 @@ void MainWindow::showFrame(const int index) {
     rebuildTiltCombo();
     const auto isLatest = session->frameIndex == static_cast<int>(session->history.size()) - 1;
     // SCAN age block (replaces the LIVE dot): snapshot the shown volume so
-    // the 30 s health tick can recount the age without disk I/O. The VCP
-    // token is static — the decoder carries no VCP number — and the age
+    // the 30 s health tick can recount the age without disk I/O. The VCP token
+    // comes from the pattern the decoder parsed out of RVOL blocks; a volume
+    // without a vouchable pattern leaves it 0 and renders no token. The age
     // counts whole minutes from the honest UTC scan time.
     scanAgeTime_ = frame.dataTime;
     scanAgeVolumeId_ = frame.volumeId;
     const auto shownChunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
     scanAgeRays_ = shownChunk ? static_cast<int>(shownChunk->rays.size()) : -1;
+    scanAgeVcp_ = shownChunk ? static_cast<int>(shownChunk->volumeCoveragePattern) : 0;
     refreshScanAgeLabel();
     frameSlider_->setToolTip(QStringLiteral("Frame %1 of %2\n%3\n%4\n%5")
                                  .arg(session->frameIndex + 1).arg(session->history.size())
@@ -3394,6 +3407,7 @@ void MainWindow::updatePlaybackControls() {
         frameLabel_->setToolTip(QStringLiteral("Pick a station to load the latest scan"));
         scanAgeTime_ = {};
         scanAgeRays_ = -1;
+        scanAgeVcp_ = 0;
         scanAgeVolumeId_.clear();
     } else if (!canAnimate && session && !session->historyRequested) {
         frameSlider_->setToolTip(QStringLiteral("Click to load historical volumes"));
