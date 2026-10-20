@@ -1984,6 +1984,218 @@ void testOdimNyquistFromHow() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OPERA dual-pol decode. Three real DWD open-data sweeps (PCP scan, NOD deneu,
+// 2026-10-20T15:35:33Z, one moment per object) pin the mapping against real
+// published bytes; a hand-built container pins the multi-moment layout and the
+// U-prefixed aliases. Provenance and the assumed 2027 layout live in
+// docs/europe-sources.md ("OPERA dual-pol: what exists and what 2027 adds").
+struct DualPolSweepCase {
+    const char* fixture;
+    ProductKind kind;
+    // Physical values of ray 0, gates 0..2 as published in the source file.
+    double gate0;
+    double gate1;
+    double gate2;
+    // Round-trip tolerance: half a packing step for this product.
+    double tolerance;
+    double minimumBound;
+    double maximumBound;
+};
+
+void testOdimDualPolAbsentOnSinglePolVolumes() {
+    // updateProductAvailability() greys a product when no ray in the frame
+    // carries it. That gate is only honest if a single-pol volume reports no
+    // dual-pol field at all: both real DWD fixtures carry DBZH and nothing
+    // else, so ZDR/CC/PHI must stay absent (and the panels stay disabled).
+    if (!odimReaderAvailable()) return;
+    for (const char* fixture : {"odim_deneu_dbzh.h5", "odim_nohur_dbzh.h5"}) {
+        const auto bytes = readFixtureBytes(fixture);
+        if (bytes.empty()) {
+            std::cout << "note: " << fixture << " missing, skipping dual-pol absence asserts\n";
+            continue;
+        }
+        std::string error;
+        const auto chunk = readOdimPvol(bytes, "deneu", &error);
+        assert(chunk.has_value());
+        for (const auto& ray : chunk->rays) {
+            assert(ray.has(ProductKind::Reflectivity));
+            assert(!ray.has(ProductKind::DifferentialReflectivity));
+            assert(!ray.has(ProductKind::CorrelationCoefficient));
+            assert(!ray.has(ProductKind::DifferentialPhase));
+            assert(!ray.has(ProductKind::Velocity));
+        }
+    }
+}
+
+void testOdimDualPolFromRealDwdSweeps() {
+    // Each file is one real DWD dual-pol moment: UZDR, URHOHV, UPHIDP, 360
+    // rays x 600 gates at 0.802 deg, rstart 0, rscale 250 m. No gate value is
+    // altered; the asserts below are the published ray 0 gates and the
+    // published value range.
+    if (!odimReaderAvailable()) return;
+    const DualPolSweepCase cases[] = {
+        {"odim_deneu_uzdr.h5", ProductKind::DifferentialReflectivity, 0.3472, 5.1365, -1.3111,
+         0.002, -32.001, 32.001},
+        {"odim_deneu_urhohv.h5", ProductKind::CorrelationCoefficient, 0.8141, 0.8496, 0.8414,
+         0.0001, 0.0, 1.0001},
+        {"odim_deneu_uphidp.h5", ProductKind::DifferentialPhase, 61.9245, 46.4221, -43.9061,
+         0.02, -180.001, 180.001},
+    };
+    for (const auto& c : cases) {
+        const auto bytes = readFixtureBytes(c.fixture);
+        if (bytes.empty()) {
+            std::cout << "note: " << c.fixture << " missing, skipping dual-pol decode asserts\n";
+            continue;
+        }
+        std::string error;
+        const auto chunk = readOdimPvol(bytes, "deneu", &error);
+        assert(chunk.has_value());
+        assert(chunk->rays.size() == 360);
+        const auto index = static_cast<std::size_t>(c.kind);
+        std::size_t validGates = 0;
+        double minimum = 1.0e9;
+        double maximum = -1.0e9;
+        for (const auto& ray : chunk->rays) {
+            assert(ray.has(c.kind));
+            assert(!ray.has(ProductKind::Reflectivity));  // one moment per file
+            assert(!ray.has(ProductKind::Velocity));
+            assert(!ray.has(ProductKind::SpectrumWidth));
+            for (const ProductKind other : {ProductKind::DifferentialReflectivity,
+                                            ProductKind::CorrelationCoefficient,
+                                            ProductKind::DifferentialPhase}) {
+                if (other != c.kind) assert(!ray.has(other));
+            }
+            assert(ray.elevationNumber == 1);
+            assert(std::fabs(ray.elevationDegrees - 0.802F) < 0.001F);
+            assert(ray.gateCount == 600);
+            assert(ray.firstGateByProduct.at(index) == 0);
+            assert(ray.gateSpacingByProduct.at(index) == 250);
+            assert(ray.scaleByProduct.at(index) > 0.0F);
+            for (const auto encoded : ray.fields.at(index)) {
+                const auto value = nativeValue(encoded, ray.scaleByProduct.at(index),
+                                               ray.offsetByProduct.at(index));
+                if (!value.has_value()) continue;
+                ++validGates;
+                minimum = std::min(minimum, *value);
+                maximum = std::max(maximum, *value);
+            }
+        }
+        assert(minimum >= c.minimumBound);
+        assert(maximum <= c.maximumBound);
+        // DWD publishes no nodata/undetect gates in this sweep.
+        assert(validGates == 360 * 600);
+        // Azimuths come from the per-ray how/startazA+stopazA midpoint, not
+        // from a1gate (33 in this sweep) and not from a uniform guess.
+        assert(std::fabs(chunk->rays[0].azimuthDegrees - 0.5219) < 0.01);
+        assert(std::fabs(chunk->rays[90].azimuthDegrees - 90.5219) < 0.01);
+        assert(std::fabs(chunk->rays[359].azimuthDegrees - 359.5193) < 0.01);
+        // Published ray 0 gates survive the 16-bit re-encode within half a
+        // packing step (no gate is invented, none is shifted).
+        const auto& firstRay = chunk->rays.front();
+        const double expected[3] = {c.gate0, c.gate1, c.gate2};
+        for (std::size_t gate = 0; gate < 3; ++gate) {
+            const auto value = nativeValue(firstRay.fields.at(index).at(gate),
+                                           firstRay.scaleByProduct.at(index),
+                                           firstRay.offsetByProduct.at(index));
+            assert(value.has_value());
+            assert(std::fabs(*value - expected[gate]) < c.tolerance);
+        }
+        std::cout << "odim dual-pol " << c.fixture << ": rays=" << chunk->rays.size()
+                  << " gates=" << chunk->rays.front().gateCount << " valid=" << validGates
+                  << " range=[" << minimum << ", " << maximum << "]"
+                  << " ray0_gate0=" << expected[0] << "\n";
+    }
+}
+
+void testOdimDualPolSpecShapedDataset() {
+    // NOT an observation. odim_specshape_dualpol_3ray.h5 is a minimal ODIM_H5
+    // container constructed byte by byte (see make_odim_dualpol_specshape.py):
+    // dataset1 holds DBZH+ZDR+RHOHV+PHIDP in one sweep, dataset2 holds the
+    // U-prefixed (unfiltered) aliases, dataset3 holds UKDP only.
+    if (!odimReaderAvailable()) return;
+    const auto bytes = readFixtureBytes("odim_specshape_dualpol_3ray.h5");
+    if (bytes.empty()) {
+        std::cout << "note: spec-shaped dual-pol fixture missing, skipping layout asserts\n";
+        return;
+    }
+    std::string error;
+    const auto chunk = readOdimPvol(bytes, "specc", &error);
+    assert(chunk.has_value());
+    // The KDP-only dataset has no product slot: counted and dropped.
+    assert(chunk->rejectedBlocks == 1);
+    assert(chunk->rays.size() == 6);
+    const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto zdrIndex = static_cast<std::size_t>(ProductKind::DifferentialReflectivity);
+    const auto ccIndex = static_cast<std::size_t>(ProductKind::CorrelationCoefficient);
+    const auto phiIndex = static_cast<std::size_t>(ProductKind::DifferentialPhase);
+    auto decoded = [&](const std::size_t ray, const std::size_t index, const std::size_t gate) {
+        const auto& r = chunk->rays.at(ray);
+        return nativeValue(r.fields.at(index).at(gate), r.scaleByProduct.at(index),
+                           r.offsetByProduct.at(index));
+    };
+    // dataset1: standard names, elangle 1.5, startazA 0/120/240.
+    const float expectedAzimuth[3] = {60.0F, 180.0F, 300.0F};
+    for (std::size_t ray = 0; ray < 3; ++ray) {
+        const auto& r = chunk->rays.at(ray);
+        assert(r.elevationNumber == 1);
+        assert(std::fabs(r.elevationDegrees - 1.5F) < 0.001F);
+        // Wrap-aware midpoint: the third ray runs 240 -> 0 deg, so its center
+        // is 300, not 370.
+        assert(std::fabs(r.azimuthDegrees - expectedAzimuth[ray]) < 0.01F);
+        assert(r.gateCount == 4);
+        assert(r.firstGateByProduct.at(refIndex) == 0);
+        assert(r.gateSpacingByProduct.at(refIndex) == 500);
+        assert(r.has(ProductKind::Reflectivity));
+        assert(r.has(ProductKind::DifferentialReflectivity));
+        assert(r.has(ProductKind::CorrelationCoefficient));
+        assert(r.has(ProductKind::DifferentialPhase));
+        assert(!r.has(ProductKind::Velocity));
+        // DBZH: gain 0.5 offset -32 -> 100 = 18 dBZ, 200 = 68 dBZ, then
+        // undetect (0) and nodata (65535).
+        assert(std::fabs(*decoded(ray, refIndex, 0) - 18.0) < 0.26);
+        assert(std::fabs(*decoded(ray, refIndex, 1) - 68.0) < 0.26);
+        assert(!decoded(ray, refIndex, 2).has_value());
+        assert(!decoded(ray, refIndex, 3).has_value());
+        // ZDR: gain 0.01 offset -5 -> 1000 = 5 dB, 0 = undetect,
+        // 65535 = nodata, 500 = 0 dB.
+        assert(std::fabs(*decoded(ray, zdrIndex, 0) - 5.0) < 0.002);
+        assert(!decoded(ray, zdrIndex, 1).has_value());
+        assert(!decoded(ray, zdrIndex, 2).has_value());
+        assert(std::fabs(*decoded(ray, zdrIndex, 3) - 0.0) < 0.002);
+        // RHOHV: gain 1/65535 -> 65534 ~ 0.99998, 32768 ~ 0.5.
+        assert(std::fabs(*decoded(ray, ccIndex, 0) - 65534.0 / 65535.0) < 0.0001);
+        assert(!decoded(ray, ccIndex, 1).has_value());
+        assert(!decoded(ray, ccIndex, 2).has_value());
+        assert(std::fabs(*decoded(ray, ccIndex, 3) - 32768.0 / 65535.0) < 0.0001);
+        // PHIDP: gain 0.01 offset -180 -> 18000 = 0 deg, 27000 = 90 deg.
+        assert(std::fabs(*decoded(ray, phiIndex, 0) - 0.0) < 0.02);
+        assert(!decoded(ray, phiIndex, 1).has_value());
+        assert(!decoded(ray, phiIndex, 2).has_value());
+        assert(std::fabs(*decoded(ray, phiIndex, 3) - 90.0) < 0.02);
+    }
+    // dataset2: U-prefixed aliases, elangle 2.5, startazA 10/130/250.
+    for (std::size_t ray = 3; ray < 6; ++ray) {
+        const auto& r = chunk->rays.at(ray);
+        assert(r.elevationNumber == 2);
+        assert(std::fabs(r.elevationDegrees - 2.5F) < 0.001F);
+        assert(!r.has(ProductKind::Reflectivity));  // no DBZH in this sweep
+        assert(r.has(ProductKind::DifferentialReflectivity));
+        assert(r.has(ProductKind::CorrelationCoefficient));
+        assert(r.has(ProductKind::DifferentialPhase));
+        assert(std::fabs(*decoded(ray, zdrIndex, 0) - 3.0) < 0.002);
+        assert(std::fabs(*decoded(ray, zdrIndex, 3) - 2.0) < 0.002);
+        assert(std::fabs(*decoded(ray, ccIndex, 0) - 32768.0 / 65535.0) < 0.0001);
+        assert(std::fabs(*decoded(ray, ccIndex, 3) - 65534.0 / 65535.0) < 0.0001);
+        assert(std::fabs(*decoded(ray, phiIndex, 0) + 90.0) < 0.02);
+        assert(std::fabs(*decoded(ray, phiIndex, 3) - 0.0) < 0.02);
+    }
+    assert(std::fabs(chunk->rays.at(4).azimuthDegrees - 190.0F) < 0.01F);
+    assert(std::fabs(chunk->rays.at(5).azimuthDegrees - 310.0F) < 0.01F);
+    std::cout << "odim dual-pol spec-shaped: rays=" << chunk->rays.size()
+              << " rejected_datasets=" << chunk->rejectedBlocks << "\n";
+}
+
 void testSlantRangeVerticalBeam() {
     const double slant = slantRangeForSurfaceDistance(10000.0, 90.0);
     assert(std::isfinite(slant));
@@ -2839,6 +3051,9 @@ int main() {
     testOdimReader();
     testOdimAzimuthConvention();
     testOdimNyquistFromHow();
+    testOdimDualPolAbsentOnSinglePolVolumes();
+    testOdimDualPolFromRealDwdSweeps();
+    testOdimDualPolSpecShapedDataset();
     testOdimParallelDecode();
     testRadarLightningFusion();
     testRadarLightningFusionSplitCut();

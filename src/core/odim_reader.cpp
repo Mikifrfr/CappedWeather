@@ -6,6 +6,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -26,10 +27,45 @@ constexpr float kReflectivityScale = 2.0F;
 constexpr float kReflectivityOffset = 66.0F;
 constexpr float kVelocityScale = 2.0F;
 constexpr float kVelocityOffset = 129.0F;
+// Dual-pol packing. Each moment gets a 16-bit code span that covers the full
+// published physical range, so a real gate is never clipped into a missing
+// sentinel (packGate reserves 0/1):
+//   ZDR   [-32, +32] dB     - DWD's own UZDR span, 1/1024 dB per step
+//   RHOHV [0, 1.05]         - product descriptor maximum, 1.6e-5 per step
+//   PHIDP [-180, 360] deg   - ODIM writers publish either range, 0.0082 deg
+//                             per step
+constexpr float kDifferentialReflectivityScale = 1023.9375F;
+constexpr float kDifferentialReflectivityOffset = 32768.0F;
+constexpr float kCorrelationCoefficientScale = 62411.43F;
+constexpr float kCorrelationCoefficientOffset = 2.0F;
+constexpr float kDifferentialPhaseScale = 121.35555F;
+constexpr float kDifferentialPhaseOffset = 21846.0F;
 constexpr std::uint16_t kEncodedMissing = 0;
 constexpr std::uint16_t kEncodedBelowThreshold = 1;
 constexpr std::uint16_t kEncodedFirstValid = 2;
 constexpr std::uint16_t kEncodedMax = 65534;
+
+// ODIM dual-pol moments and the product slot each one feeds. The U-prefixed
+// identifiers are the unfiltered variants defined by ODIM_H5 v2.4 (DWD
+// publishes them today); the standard identifier wins when a writer carries
+// both, mirroring DBZH-over-TH. KDP/UKDP is deliberately absent: there is no
+// ProductKind for specific differential phase yet, so a KDP-only dataset is
+// counted as rejected instead of being folded into another product.
+struct DualPolMomentSpec {
+    ProductKind kind;
+    const char* quantity;
+    const char* unfilteredQuantity;
+    float scale;
+    float offset;
+};
+constexpr DualPolMomentSpec kDualPolMoments[] = {
+    {ProductKind::DifferentialReflectivity, "ZDR", "UZDR", kDifferentialReflectivityScale,
+     kDifferentialReflectivityOffset},
+    {ProductKind::CorrelationCoefficient, "RHOHV", "URHOHV", kCorrelationCoefficientScale,
+     kCorrelationCoefficientOffset},
+    {ProductKind::DifferentialPhase, "PHIDP", "UPHIDP", kDifferentialPhaseScale,
+     kDifferentialPhaseOffset},
+};
 
 bool hasHdf5Signature(const std::span<const std::byte> bytes) {
     static constexpr std::byte kSignature[] = {std::byte{0x89}, std::byte{'H'}, std::byte{'D'},
@@ -204,6 +240,28 @@ double wrapAzimuth(double degrees) {
     double wrapped = std::fmod(degrees, 360.0);
     if (wrapped < 0.0) wrapped += 360.0;
     return wrapped;
+}
+
+// Nearest source ray to an azimuth, by circular distance. Within one ODIM
+// dataset every moment shares where/nrays and the how/startazA arrays, so
+// the caller normally matches by index; this is the fallback for writers
+// that put moments on different ray grids.
+std::size_t nearestRayForAzimuth(const OdimSweep& sweep, const double azimuth) {
+    const double resolution = 360.0 / static_cast<double>(sweep.rayCount);
+    std::size_t best = 0;
+    double bestDistance = 360.0;
+    for (std::size_t candidate = 0; candidate < sweep.rayCount; ++candidate) {
+        const double candidateAzimuth = sweep.rayAzimuthDegrees.size() == sweep.rayCount
+                                           ? sweep.rayAzimuthDegrees[candidate]
+                                           : wrapAzimuth(static_cast<double>(candidate) * resolution);
+        double distance = std::fabs(azimuth - candidateAzimuth);
+        if (distance > 180.0) distance = 360.0 - distance;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = candidate;
+        }
+    }
+    return best;
 }
 
 bool readMomentSweep(const hid_t dataset, const char* moment, OdimSweep* sweep) {
@@ -404,6 +462,22 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
         bool hasReflectivity = false;
         OdimSweep velocity;
         bool hasVelocity = false;
+        // Dual-pol moments keyed by ProductKind index (ZDR/CC/PHI only), and
+        // only populated when the dataset actually carried that moment.
+        // Absence is preserved: no field is created for a missing moment.
+        std::array<OdimSweep, kProductCount> dualPol;
+        std::array<bool, kProductCount> hasDualPol{};
+    };
+    // Preferred geometry sweep for an elevation: a base moment first, then any
+    // dual-pol moment (DWD publishes one moment per object).
+    const auto geometrySweep = [](const ElevationData& elevation) -> const OdimSweep* {
+        if (elevation.hasReflectivity) return &elevation.reflectivity;
+        if (elevation.hasVelocity) return &elevation.velocity;
+        for (const auto& moment : kDualPolMoments) {
+            const auto index = static_cast<std::size_t>(moment.kind);
+            if (elevation.hasDualPol[index]) return &elevation.dualPol[index];
+        }
+        return nullptr;
     };
     std::vector<ElevationData> elevations;
     // datasetN groups; bail out past the cap rather than looping forever.
@@ -419,12 +493,24 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
         const bool hasDbzh = readMomentSweep(dataset.id, "DBZH", &dbzh);
         const bool hasTh = !hasDbzh && readMomentSweep(dataset.id, "TH", &th);
         const bool hasVradh = readMomentSweep(dataset.id, "VRADH", &vradh);
-        if (!hasDbzh && !hasTh && !hasVradh) {
+        bool hasAnyMoment = hasDbzh || hasTh || hasVradh;
+        for (const auto& moment : kDualPolMoments) {
+            const auto index = static_cast<std::size_t>(moment.kind);
+            // Prefer the corrected/filtered identifier over the U-prefixed
+            // unfiltered one when a writer publishes both.
+            const bool found =
+                readMomentSweep(dataset.id, moment.quantity, &elevation.dualPol[index]) ||
+                (moment.unfilteredQuantity != nullptr &&
+                 readMomentSweep(dataset.id, moment.unfilteredQuantity,
+                                 &elevation.dualPol[index]));
+            if (!found) continue;
+            elevation.hasDualPol[index] = true;
+            hasAnyMoment = true;
+        }
+        if (!hasAnyMoment) {
             ++chunk.rejectedBlocks;
             continue;
         }
-        const OdimSweep& geometry = hasDbzh ? dbzh : (hasTh ? th : vradh);
-        elevation.elevation = geometry.elevationDegrees;
         if (hasDbzh || hasTh) {
             elevation.reflectivity = hasDbzh ? std::move(dbzh) : std::move(th);
             elevation.hasReflectivity = true;
@@ -433,10 +519,16 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
             elevation.velocity = std::move(vradh);
             elevation.hasVelocity = true;
         }
+        // A dual-pol-only sweep (DWD publishes one moment per object) is still
+        // a real sweep and carries the same where/how grid.
+        elevation.elevation = geometrySweep(elevation)->elevationDegrees;
         elevations.push_back(std::move(elevation));
     }
     if (elevations.empty()) {
-        if (error != nullptr) *error = "no readable ODIM elevations (need DBZH/TH/VRADH scans)";
+        if (error != nullptr) {
+            *error = "no readable ODIM elevations (need DBZH/TH/VRADH or ZDR/RHOHV/PHIDP "
+                     "scans)";
+        }
         return std::nullopt;
     }
     std::sort(elevations.begin(), elevations.end(), [](const ElevationData& a, const ElevationData& b) {
@@ -447,8 +539,7 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
     std::uint8_t elevationNumber = 0;
     for (auto& elevation : elevations) {
         ++elevationNumber;
-        const OdimSweep* geometry = elevation.hasReflectivity ? &elevation.reflectivity
-                                                             : &elevation.velocity;
+        const OdimSweep* geometry = geometrySweep(elevation);
         const double resolution = 360.0 / static_cast<double>(geometry->rayCount);
         const auto firstGateMeters =
             static_cast<std::int16_t>(std::clamp(std::llround(geometry->rangeStartKm * 1000.0),
@@ -495,26 +586,7 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
                 // to the nearest velocity ray by circular distance on the
                 // velocity sweep's own azimuths, then resample gates by
                 // slant range.
-                const double velocityResolution = 360.0 / static_cast<double>(sweep.rayCount);
-                auto nearestVelocityRay = [&](const double azimuth) {
-                    std::size_t best = 0;
-                    double bestDistance = 360.0;
-                    for (std::size_t candidate = 0; candidate < sweep.rayCount; ++candidate) {
-                        const double candidateAzimuth =
-                            sweep.rayAzimuthDegrees.size() == sweep.rayCount
-                                ? sweep.rayAzimuthDegrees[candidate]
-                                : wrapAzimuth(static_cast<double>(candidate) *
-                                              velocityResolution);
-                        double distance = std::fabs(azimuth - candidateAzimuth);
-                        if (distance > 180.0) distance = 360.0 - distance;
-                        if (distance < bestDistance) {
-                            bestDistance = distance;
-                            best = candidate;
-                        }
-                    }
-                    return best;
-                };
-                const auto velocityRay = nearestVelocityRay(azimuth);
+                const auto velocityRay = nearestRayForAzimuth(sweep, azimuth);
                 auto& field = decoded.fields[velocityIndex];
                 field.reserve(decoded.gateCount);
                 for (std::size_t gate = 0; gate < decoded.gateCount; ++gate) {
@@ -538,6 +610,59 @@ std::optional<DecodedChunk> readOdimPvol(const std::span<const std::byte> bytes,
                 decoded.gateSpacingByProduct[velocityIndex] = spacingMeters;
                 decoded.scaleByProduct[velocityIndex] = kVelocityScale;
                 decoded.offsetByProduct[velocityIndex] = kVelocityOffset;
+            }
+            // Dual-pol moments carried by this dataset. ODIM_H5 2.4.2 puts
+            // where/{nrays,nbins,rstart,rscale} and how/startazA|stopazA on
+            // the dataset, with one azimuth entry per ray sized where/nrays,
+            // so every moment in a dataset shares the geometry grid: pack by
+            // index. The nearest-azimuth + slant-range path is the fallback
+            // for a writer that breaks that contract.
+            for (const auto& moment : kDualPolMoments) {
+                const auto productIndex = static_cast<std::size_t>(moment.kind);
+                if (!elevation.hasDualPol[productIndex]) continue;
+                const auto& sweep = elevation.dualPol[productIndex];
+                auto& field = decoded.fields[productIndex];
+                field.reserve(decoded.gateCount);
+                if (sweep.rayCount == geometry->rayCount) {
+                    const auto gates =
+                        std::min(sweep.gateCount, static_cast<std::size_t>(decoded.gateCount));
+                    for (std::size_t gate = 0; gate < decoded.gateCount; ++gate) {
+                        if (gate >= gates) {
+                            field.push_back(kEncodedMissing);
+                            continue;
+                        }
+                        const std::size_t flat = ray * sweep.gateCount + gate;
+                        field.push_back(packGate(sweep.values[flat], sweep.belowThreshold[flat] != 0,
+                                                 moment.scale, moment.offset));
+                    }
+                } else {
+                    const auto sourceRay = nearestRayForAzimuth(sweep, azimuth);
+                    for (std::size_t gate = 0; gate < decoded.gateCount; ++gate) {
+                        const double slant = static_cast<double>(firstGateMeters) +
+                                             static_cast<double>(gate * spacingMeters);
+                        const double sweepFirst = sweep.rangeStartKm * 1000.0;
+                        long long source = 0;
+                        if (sweep.rangeScaleM > 0.0) {
+                            source = std::llround((slant - sweepFirst) / sweep.rangeScaleM);
+                        }
+                        if (source < 0 || source >= static_cast<long long>(sweep.gateCount)) {
+                            field.push_back(kEncodedMissing);
+                            continue;
+                        }
+                        const std::size_t flat = sourceRay * sweep.gateCount +
+                                                 static_cast<std::size_t>(source);
+                        field.push_back(packGate(sweep.values[flat], sweep.belowThreshold[flat] != 0,
+                                                 moment.scale, moment.offset));
+                    }
+                }
+                decoded.firstGateByProduct[productIndex] = static_cast<std::int16_t>(
+                    std::clamp(std::llround(sweep.rangeStartKm * 1000.0),
+                               static_cast<long long>(std::numeric_limits<std::int16_t>::min()),
+                               static_cast<long long>(std::numeric_limits<std::int16_t>::max())));
+                decoded.gateSpacingByProduct[productIndex] = static_cast<std::uint16_t>(
+                    std::clamp(std::llround(sweep.rangeScaleM), 1LL, 5000LL));
+                decoded.scaleByProduct[productIndex] = moment.scale;
+                decoded.offsetByProduct[productIndex] = moment.offset;
             }
             chunk.rays.push_back(std::move(decoded));
             ++chunk.messageCount;
