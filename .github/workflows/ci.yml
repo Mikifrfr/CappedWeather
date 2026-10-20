@@ -21,3 +21,21 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  honesty:
+    # The honesty bar was culture. These gates are the mechanical part: static,
+    # hermetic, no build, no Qt, no network, so they cannot be skipped for cost.
+    # Each gate first runs a mutation self-test proving it can go red.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the claims gate diffs against the base commit
+
+      - name: Gate self-test (a gate that cannot fail is not a gate)
+        run: python3 tests/honesty_gate.py --self-test
+
+      - name: Honesty gates
+        env:
+          HONESTY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 tests/honesty_gate.py --base "$HONESTY_BASE"

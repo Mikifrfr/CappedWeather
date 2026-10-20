@@ -55,6 +55,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
 import re
 import subprocess
@@ -73,7 +75,6 @@ ALLOW_MIN_REASON = 8
 ALLOW_REJECTED_REASON = re.compile(r"^(todo|fixme|n/a|na|none|test|because)\b", re.IGNORECASE)
 
 SKIP_DIRS = {".git", "build", "dist", "node_modules", "__pycache__", ".worktrees"}
-SKIP_REL = ("docs/screenshots",)
 
 
 @dataclass(frozen=True)
@@ -503,10 +504,15 @@ def run_gates(root: Path, base: str | None, gates: list[str]) -> list[GateResult
     return results
 
 
-def print_report(root: Path, results: list[GateResult], verbose: bool) -> None:
+def print_report(root: Path, results: list[GateResult], verbose: bool, strict_claims: bool) -> None:
     print(f"CappedWeather honesty gate \u2014 tree {root}")
     for result in results:
-        state = "FAIL" if result.findings else ("ADVISORY" if result.gate == "claims" else "ok")
+        if result.findings and result.gate == "claims" and not strict_claims:
+            state = "ADVISORY"
+        elif result.findings:
+            state = "FAIL"
+        else:
+            state = "ADVISORY" if result.gate == "claims" else "ok"
         print(f"[{result.gate}] {state} \u2014 {result.scope}")
         for note in result.notes:
             print(f"  allow {note.path}:{note.line} \u2014 {note.reason}")
@@ -753,6 +759,38 @@ def self_test() -> int:
         )
         cases.append(("claims: plain number is not a claim", not line_is_claim("// 1000 gates per ray")))
 
+        # 13. A claims-only finding must print ADVISORY while the exit stays 0,
+        #     and print FAIL when --strict-claims asked it to fail.
+        claims_result = [
+            GateResult(
+                gate="claims",
+                findings=[
+                    Finding(
+                        gate="claims",
+                        path="src/app/x.cpp",
+                        line=1,
+                        message="numeric capability claim",
+                        text="// POD 62%",
+                    )
+                ],
+                scope="unit fixture",
+                notes=[],
+            )
+        ]
+        advisory_text = io.StringIO()
+        with contextlib.redirect_stdout(advisory_text):
+            print_report(root, claims_result, False, False)
+        strict_text = io.StringIO()
+        with contextlib.redirect_stdout(strict_text):
+            print_report(root, claims_result, False, True)
+        cases.append(
+            (
+                "claims report: ADVISORY without strict, FAIL with strict",
+                "[claims] ADVISORY" in advisory_text.getvalue()
+                and "[claims] FAIL" in strict_text.getvalue(),
+            )
+        )
+
     failures = [name for name, ok in cases if not ok]
     for name, ok in cases:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
@@ -771,7 +809,7 @@ def main(argv: list[str]) -> int:
         print(f"unknown gate id(s): {', '.join(unknown)}", file=sys.stderr)
         return 2
     results = run_gates(root, args.base, gates)
-    print_report(root, results, args.verbose)
+    print_report(root, results, args.verbose, args.strict_claims)
     failed = [r.gate for r in results if r.findings and (r.gate != "claims" or args.strict_claims)]
     if failed:
         print(f"\nFAILED: {', '.join(failed)}")
