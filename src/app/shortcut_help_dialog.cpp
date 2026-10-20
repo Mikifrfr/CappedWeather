@@ -44,7 +44,7 @@ void ShortcutHelpDialog::populateShortcutsInto(QTextEdit* text) {
         {"PgUp / PgDn",  "Tilt up / down"},
         {"+ / -",        "Zoom in / out"},
         {"R",            "Recenter on selected radar"},
-        {"L",            "Jump to LIVE (latest volume)"},
+        {"L",            "Jump to latest volume (follow newest scan)"},
         {"1 - 9, 0",      "Switch product: 1 REF, 2 VEL, 3 SW, 4 ZDR, 5 CC, 6 PHI, 7 ET18, 8 VIL, 9 CREF, 0 CAPPI"},
         {"P",            "Lock / unlock pinned card"},
         {"Up / Down",    "Scroll pinned card (when it overflows)"},

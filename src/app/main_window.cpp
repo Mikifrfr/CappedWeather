@@ -112,6 +112,7 @@
 #include <QThread>
 #include <QThreadPool>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QHeaderView>
 #include <QTime>
 #include <QTimer>
@@ -542,7 +543,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(frameSlider_, &QSlider::valueChanged, this, [this](const int index) {
         const auto session = activeSession();
         if (!session) return;
-        session->followLatest = index == static_cast<int>(session->history.size()) - 1 && liveButton_->isChecked();
+        session->followLatest = index == static_cast<int>(session->history.size()) - 1 && followLatestButton_->isChecked();
         showFrame(index);
     });
     connect(previousButton_, &QToolButton::clicked, this, [this] {
@@ -557,7 +558,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (!session) return;
         stopAnimation();
         session->followLatest = session->frameIndex + 1 >= static_cast<int>(session->history.size()) - 1 &&
-                                liveButton_->isChecked();
+                                followLatestButton_->isChecked();
         showFrame(std::min(static_cast<int>(session->history.size()) - 1, session->frameIndex + 1));
     });
     connect(playButton_, &QToolButton::toggled, this, [this](const bool playing) {
@@ -569,16 +570,16 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         session->followLatest = false;
-        liveButton_->setChecked(false);
+        followLatestButton_->setChecked(false);
         if (session->frameIndex >= static_cast<int>(session->history.size()) - 1) showFrame(0);
         playButton_->setText(QStringLiteral("Pause"));
         animationTimer_->start(speedCombo_->currentData().toInt());
     });
-    connect(liveButton_, &QToolButton::toggled, this, [this](const bool live) {
+    connect(followLatestButton_, &QToolButton::toggled, this, [this](const bool follow) {
         const auto session = activeSession();
         if (!session) return;
-        session->followLatest = live;
-        if (live && !session->history.empty()) showFrame(static_cast<int>(session->history.size()) - 1);
+        session->followLatest = follow;
+        if (follow && !session->history.empty()) showFrame(static_cast<int>(session->history.size()) - 1);
     });
     connect(speedCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         if (animationTimer_->isActive()) animationTimer_->setInterval(speedCombo_->currentData().toInt());
@@ -893,7 +894,7 @@ MainWindow::MainWindow(QWidget* parent)
     addShortcut(QKeySequence(Qt::Key_End), [this] {
         const auto session = activeSession();
         if (!session || session->history.empty()) return;
-        session->followLatest = liveButton_->isChecked();
+        session->followLatest = followLatestButton_->isChecked();
         showFrame(static_cast<int>(session->history.size()) - 1);
     });
     addShortcut(QKeySequence(Qt::Key_P), [this] {
@@ -955,7 +956,7 @@ MainWindow::MainWindow(QWidget* parent)
     addShortcut(QKeySequence(Qt::Key_Plus), [this] { map_->zoomIn(); });
     addShortcut(QKeySequence(Qt::Key_Minus), [this] { map_->zoomOut(); });
     addShortcut(QKeySequence(Qt::Key_R), [this] { map_->recenterSelected(); });
-    addShortcut(QKeySequence(Qt::Key_L), [this] { liveButton_->setChecked(true); });
+    addShortcut(QKeySequence(Qt::Key_L), [this] { followLatestButton_->setChecked(true); });
     addShortcut(QKeySequence(Qt::Key_B), [this] { toggleFrameBookmark(); });
     addShortcut(QKeySequence(QStringLiteral("Ctrl+K")), [this] { showCommandPalette(); });
     // Products 1-9 take digit keys, the 10th takes 0 (GR-style).
@@ -1113,13 +1114,42 @@ void MainWindow::buildUi() {
 
     auto* mapHost = new QWidget(this);
     mapHost->setObjectName(QStringLiteral("mapHost"));
-    mapGrid_ = new QGridLayout(mapHost);
+    mapHost_ = mapHost;
+    auto* mapColumn = new QVBoxLayout(mapHost);
+    mapColumn->setContentsMargins(0, 0, 0, 0);
+    mapColumn->setSpacing(0);
+    mapColumn_ = mapColumn;
+    // GR-style product tabs above the map: short operational names on the
+    // tab, full label + explainer in the tooltip. productCombo_ stays the
+    // data owner; the tab bar is a visible face like the chip grid.
+    productTabBar_ = new QTabBar(mapHost);
+    productTabBar_->setObjectName(QStringLiteral("productTabBar"));
+    productTabBar_->setAccessibleName(QStringLiteral("Radar product tabs"));
+    productTabBar_->setUsesScrollButtons(true);
+    productTabBar_->setExpanding(false);
+    productTabBar_->setDocumentMode(true);
+    for (const auto& product : productDescriptors()) {
+        const int tab = productTabBar_->addTab(QString::fromUtf8(product.shortName.data()));
+        productTabBar_->setTabToolTip(tab, productChipTooltip(product.kind));
+        productTabBar_->setTabData(tab, static_cast<int>(product.kind));
+    }
+    productTabBar_->setCurrentIndex(0);
+    connect(productTabBar_, &QTabBar::currentChanged, this, [this](const int index) {
+        if (!productCombo_ || index < 0 || index >= productCombo_->count()) return;
+        if (productCombo_->currentIndex() == index) return;
+        productCombo_->setCurrentIndex(index);
+    });
+    mapColumn->addWidget(productTabBar_);
+    auto* mapGridHost = new QWidget(mapHost);
+    mapGridHost->setObjectName(QStringLiteral("mapGridHost"));
+    mapGridHost_ = mapGridHost;
+    mapGrid_ = new QGridLayout(mapGridHost);
     mapGrid_->setContentsMargins(0, 0, 0, 0);
     // Themed gutter (see applyTheme). This used to hardcode 4 here, which
     // silently overwrote the 6 px the Squall theme had just installed.
     mapGrid_->setSpacing(theme_ == AppTheme::Prototype ? 6 : 4);
     for (int panel = 0; panel < 4; ++panel) {
-        auto* canvas = new RadarMapCanvas(mapHost);
+        auto* canvas = new RadarMapCanvas(mapGridHost);
         canvas->setObjectName(panel == 0 ? QStringLiteral("radarMap")
                                         : QStringLiteral("radarMapPanel%1").arg(panel + 1));
         maps_.push_back(canvas);
@@ -1131,14 +1161,15 @@ void MainWindow::buildUi() {
     maps_.at(3)->setProduct(ProductKind::DifferentialReflectivity);
     map_ = maps_.front();
     map_->setActivePanel(true);
+    mapColumn->addWidget(mapGridHost, 1);
     setPanelLayout(0);
     setCentralWidget(mapHost);
 
     emptyStateHint_ = new QLabel(mapHost);
     emptyStateHint_->setObjectName(QStringLiteral("emptyStateHint"));
     emptyStateHint_->setText(QStringLiteral(
-        "Welcome to CappedWeather — live Level II in 3 steps:\n"
-        "1. Pick a radar (search ID, city, or ★ favorites)   2. Keep LIVE on   3. Turn on Warnings + Reports\n"
+        "Welcome to CappedWeather — latest Level II in 3 steps:\n"
+        "1. Pick a radar (search ID, city, or ★ favorites)   2. Keep Latest on   3. Turn on Warnings + Reports\n"
         "Chasing? Settings → chase position → nearest radar. Press ? for shortcuts."));
     emptyStateHint_->setAlignment(Qt::AlignCenter);
     emptyStateHint_->setWordWrap(true);
@@ -2139,7 +2170,7 @@ void MainWindow::buildUi() {
         if (!session) return;
         stopAnimation();
         session->followLatest = index >= static_cast<int>(session->history.size()) - 1 &&
-                                liveButton_->isChecked();
+                                followLatestButton_->isChecked();
         showFrame(index);
     });
     connect(timelineStrip_, &TimelineStrip::bookmarkToggled, this, [this](const QString& volumeId) {
@@ -2170,13 +2201,13 @@ void MainWindow::buildUi() {
     nextButton_->setText(QStringLiteral("Next"));
     nextButton_->setToolTip(QStringLiteral("Next frame (Right arrow)"));
     transportRow->addWidget(nextButton_);
-    liveButton_ = new QToolButton(playbackBody);
-    liveButton_->setObjectName(QStringLiteral("liveButton"));
-    liveButton_->setText(QStringLiteral("LIVE"));
-    liveButton_->setCheckable(true);
-    liveButton_->setChecked(true);
-    liveButton_->setToolTip(QStringLiteral("Follow the newest complete volume (L)"));
-    transportRow->addWidget(liveButton_);
+    followLatestButton_ = new QToolButton(playbackBody);
+    followLatestButton_->setObjectName(QStringLiteral("followLatestButton"));
+    followLatestButton_->setText(QStringLiteral("Latest"));
+    followLatestButton_->setCheckable(true);
+    followLatestButton_->setChecked(true);
+    followLatestButton_->setToolTip(QStringLiteral("Follow the newest volume (L) — SCAN shows its age"));
+    transportRow->addWidget(followLatestButton_);
     frameSlider_ = new QSlider(Qt::Horizontal, playbackBody);
     frameSlider_->setObjectName(QStringLiteral("frameSlider"));
     frameSlider_->setRange(0, 0);
@@ -2207,7 +2238,7 @@ void MainWindow::buildUi() {
     auto* detailsRow = new QHBoxLayout();
     detailsRow->setContentsMargins(0, 0, 0, 0);
     detailsRow->setSpacing(4);
-    frameLabel_ = new QLabel(QStringLiteral("No volume history"), playbackBody);
+    frameLabel_ = new QLabel(QStringLiteral("No scan loaded — pick a station"), playbackBody);
     frameLabel_->setObjectName(QStringLiteral("frameLabel"));
     frameLabel_->setMinimumWidth(0);
     frameLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -2267,7 +2298,7 @@ void MainWindow::buildUi() {
     // two-column chip and layer rows that need the room.
 
     auto* status = statusBar();
-    unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for live services"));
+    unifiedStatusLabel_ = new QLabel(QStringLiteral("Waiting for radar services"));
     unifiedStatusLabel_->setObjectName(QStringLiteral("unifiedStatusLabel"));
     unifiedStatusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     unifiedStatusLabel_->setMinimumWidth(0);
@@ -2508,7 +2539,7 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     rebuildStationPicker();
     stopAnimation();
     session->followLatest = true;
-    liveButton_->setChecked(true);
+    followLatestButton_->setChecked(true);
     updateProductAvailability();
     updatePlaybackControls();
     for (auto* panel : maps_) {
@@ -2770,7 +2801,7 @@ void MainWindow::volumeReady(const QString& radarId, const QString& volumeId, co
                 Qt::QueuedConnection);
         });
     if (radarId == selectedRadarId()) {
-        radarStatus_ = QStringLiteral("%1 live · derived products (ET/VIL/CREF/CAPPI) in background").arg(radarId);
+        radarStatus_ = QStringLiteral("%1 latest · derived products (ET/VIL/CREF/CAPPI) in background").arg(radarId);
         updateUnifiedStatus();
     }
 }
@@ -3148,6 +3179,42 @@ void MainWindow::rebuildTiltCombo() {
     rebuildTiltGrid();
 }
 
+QString MainWindow::scanAgeLabelText(const QDateTime& scanTimeUtc, const int rayCount,
+                                     const qint64 ageSeconds) {
+    const auto age = std::max<qint64>(0, ageSeconds);
+    const auto timeText =
+        scanTimeUtc.isValid() ? scanTimeUtc.toUTC().toString(QStringLiteral("HH:mm:ss")) +
+                                    QStringLiteral("Z")
+                              : QStringLiteral("—");
+    const auto raysText = rayCount >= 0 ? QString::number(rayCount) : QStringLiteral("—");
+    return QStringLiteral("SCAN %1 · VCP · %2 min old · %3 rays")
+        .arg(timeText, QString::number(age / 60), raysText);
+}
+
+void MainWindow::refreshScanAgeLabel() {
+    if (!frameLabel_ || !scanAgeTime_.isValid()) return;
+    const auto session = activeSession();
+    if (!session || session->history.empty()) return;
+    const auto ageSeconds =
+        std::max<qint64>(0, scanAgeTime_.secsTo(QDateTime::currentDateTimeUtc()));
+    frameLabel_->setText(scanAgeLabelText(scanAgeTime_, scanAgeRays_, ageSeconds));
+    // Amber when stale, default palette otherwise. Never green: the block
+    // reports scan age, not liveness.
+    frameLabel_->setStyleSheet(ageSeconds >= kScanStaleSeconds
+                                   ? QStringLiteral("color: #e0c14a;")
+                                   : QString{});
+    const auto isLatest = session->frameIndex == static_cast<int>(session->history.size()) - 1;
+    frameLabel_->setToolTip(
+        QStringLiteral("Volume %1 · frame %2 of %3\n%4\n%5")
+            .arg(scanAgeVolumeId_.isEmpty() ? QStringLiteral("—") : scanAgeVolumeId_)
+            .arg(session->frameIndex + 1)
+            .arg(session->history.size())
+            .arg(scanAgeTime_.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t")))
+            .arg(session->followLatest && isLatest
+                     ? QStringLiteral("Following the newest volume (L)")
+                     : QStringLiteral("Not following — press L for the newest volume")));
+}
+
 void MainWindow::showFrame(const int index) {
     const auto session = activeSession();
     if (!session || index < 0 || index >= static_cast<int>(session->history.size())) return;
@@ -3237,27 +3304,28 @@ void MainWindow::showFrame(const int index) {
     }
     updateProductAvailability();
     rebuildTiltCombo();
-    const auto ageSeconds = std::max<qint64>(0, frame.dataTime.secsTo(QDateTime::currentDateTimeUtc()));
-    const auto ageText = ageSeconds < 60 ? QStringLiteral("now")
-                         : ageSeconds < 3600 ? QStringLiteral("%1m ago").arg(ageSeconds / 60)
-                                             : QStringLiteral("%1h %2m ago")
-                                                   .arg(ageSeconds / 3600)
-                                                   .arg((ageSeconds % 3600) / 60);
     const auto isLatest = session->frameIndex == static_cast<int>(session->history.size()) - 1;
-    frameLabel_->setText(QStringLiteral("%1/%2 · %3 · %4%5")
-                             .arg(session->frameIndex + 1).arg(session->history.size())
-                             .arg(frame.dataTime.toLocalTime().toString(QStringLiteral("HH:mm:ss")))
-                             .arg(ageText)
-                             .arg(isLatest && session->followLatest ? QStringLiteral(" · LIVE") : QString{}));
-    frameSlider_->setToolTip(QStringLiteral("Frame %1 of %2\n%3\n%4")
+    // SCAN age block (replaces the LIVE dot): snapshot the shown volume so
+    // the 30 s health tick can recount the age without disk I/O. The VCP
+    // token is static — the decoder carries no VCP number — and the age
+    // counts whole minutes from the honest UTC scan time.
+    scanAgeTime_ = frame.dataTime;
+    scanAgeVolumeId_ = frame.volumeId;
+    const auto shownChunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
+    scanAgeRays_ = shownChunk ? static_cast<int>(shownChunk->rays.size()) : -1;
+    refreshScanAgeLabel();
+    frameSlider_->setToolTip(QStringLiteral("Frame %1 of %2\n%3\n%4\n%5")
                                  .arg(session->frameIndex + 1).arg(session->history.size())
                                  .arg(frame.dataTime.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss t")))
                                  .arg(frame.failedChunks == 0 ? QStringLiteral("Complete volume")
                                                               : QStringLiteral("Partial: %1 chunks unavailable")
-                                                                    .arg(frame.failedChunks)));
+                                                                    .arg(frame.failedChunks))
+                                 .arg(session->followLatest && isLatest
+                                          ? QStringLiteral("Following the newest volume (L)")
+                                          : QStringLiteral("Not following — press L for the newest volume")));
     {
-        const QSignalBlocker liveBlocker(liveButton_);
-        liveButton_->setChecked(session->followLatest && isLatest);
+        const QSignalBlocker followBlocker(followLatestButton_);
+        followLatestButton_->setChecked(session->followLatest && isLatest);
     }
     updatePlaybackControls();
     refreshLayerBadges();
@@ -3316,10 +3384,15 @@ void MainWindow::updatePlaybackControls() {
     playButton_->setEnabled(hasFrames);
     frameSlider_->setEnabled(hasFrames);
     speedCombo_->setEnabled(canAnimate);
-    liveButton_->setEnabled(hasFrames);
-    if (!hasFrames) frameLabel_->setText(QStringLiteral("Waiting for latest volume"));
-    else if (!canAnimate && session && !session->historyRequested) {
-        frameLabel_->setText(QStringLiteral("LIVE · click timeline or Play to load history"));
+    followLatestButton_->setEnabled(hasFrames);
+    if (!hasFrames) {
+        frameLabel_->setText(QStringLiteral("Waiting for latest scan"));
+        frameLabel_->setStyleSheet(QString{});
+        frameLabel_->setToolTip(QStringLiteral("Pick a station to load the latest scan"));
+        scanAgeTime_ = {};
+        scanAgeRays_ = -1;
+        scanAgeVolumeId_.clear();
+    } else if (!canAnimate && session && !session->historyRequested) {
         frameSlider_->setToolTip(QStringLiteral("Click to load historical volumes"));
     }
     refreshTimelineStrip();
@@ -4140,6 +4213,53 @@ void MainWindow::selectNearestChaseRadar() {
     if (bestRow >= 0) radarSelected(model_->index(bestRow, 0));
 }
 
+void MainWindow::repositionProductTabs() {
+    if (!productTabBar_ || !mapGrid_ || !mapColumn_ || !mapGridHost_ || !mapHost_ ||
+        maps_.size() < 4 || !map_) {
+        return;
+    }
+    // 1x1 and temporary maximize keep the historic top-of-column bar, so the
+    // single-panel layout is pixel-identical to before.
+    if (panelMaximized_ || panelLayoutIndex_ == 0) {
+        if (mapColumn_->indexOf(productTabBar_) < 0) {
+            mapGrid_->removeWidget(productTabBar_);
+            productTabBar_->setParent(mapHost_);
+            mapColumn_->insertWidget(0, productTabBar_);
+        } else if (mapColumn_->itemAt(0) == nullptr ||
+                   mapColumn_->itemAt(0)->widget() != productTabBar_) {
+            mapColumn_->removeWidget(productTabBar_);
+            mapColumn_->insertWidget(0, productTabBar_);
+        }
+        productTabBar_->show();
+        return;
+    }
+    // Multi-panel: the single bar lives in a zero-stretch tab row directly
+    // above the active cell. Empty tab rows collapse, so inactive rows/cols
+    // keep full height with no gap.
+    const int active = std::clamp(panelIndex(map_), 0, 3);
+    int tabRow = 0;
+    int tabColumn = 0;
+    if (panelLayoutIndex_ == 1) {
+        tabRow = 0;
+        tabColumn = std::min(active, 1);
+    } else if (panelLayoutIndex_ == 2) {
+        tabRow = (active == 0) ? 0 : 2;
+        tabColumn = 0;
+    } else {
+        tabRow = (active < 2) ? 0 : 2;
+        tabColumn = active % 2;
+    }
+    if (mapGrid_->indexOf(productTabBar_) < 0 ||
+        productTabBar_->parentWidget() != mapGridHost_) {
+        mapColumn_->removeWidget(productTabBar_);
+        productTabBar_->setParent(mapGridHost_);
+    } else {
+        mapGrid_->removeWidget(productTabBar_);
+    }
+    mapGrid_->addWidget(productTabBar_, tabRow, tabColumn);
+    productTabBar_->show();
+}
+
 void MainWindow::setPanelLayout(const int layoutIndex) {
     if (!mapGrid_ || maps_.size() < 4) return;
     if (panelMaximized_) {
@@ -4151,6 +4271,8 @@ void MainWindow::setPanelLayout(const int layoutIndex) {
         }
     }
     layoutBeforeMaximize_ = layoutIndex;
+    panelLayoutIndex_ = layoutIndex;
+    if (productTabBar_) mapGrid_->removeWidget(productTabBar_);
     for (auto* panel : maps_) {
         mapGrid_->removeWidget(panel);
         panel->hide();
@@ -4161,23 +4283,51 @@ void MainWindow::setPanelLayout(const int layoutIndex) {
         maps_.at(panel)->show();
     };
     if (layoutIndex == 1) {
-        add(0, 0, 0);
-        add(1, 0, 1);
+        // 1x2: fixed tab row 0, panels row 1. The bar moves columns with focus.
+        add(0, 1, 0);
+        add(1, 1, 1);
     } else if (layoutIndex == 2) {
-        add(0, 0, 0);
-        add(1, 1, 0);
+        // 2x1: tab slots row 0 (panel 1) and row 2 (panel 2); panels fixed at
+        // rows 1 and 3 so focus only moves the bar, never the canvases.
+        add(0, 1, 0);
+        add(1, 3, 0);
     } else if (layoutIndex == 3) {
-        add(0, 0, 0);
-        add(1, 0, 1);
-        add(2, 1, 0);
-        add(3, 1, 1);
+        // 2x2: tab rows 0/2 over panel rows 1/3. Bar tracks active row+column.
+        add(0, 1, 0);
+        add(1, 1, 1);
+        add(2, 3, 0);
+        add(3, 3, 1);
     } else {
         add(0, 0, 0, 2, 2);
     }
-    mapGrid_->setRowStretch(0, 1);
-    mapGrid_->setRowStretch(1, layoutIndex == 1 ? 0 : 1);
-    mapGrid_->setColumnStretch(0, 1);
-    mapGrid_->setColumnStretch(1, layoutIndex == 2 ? 0 : 1);
+    if (layoutIndex == 0) {
+        mapGrid_->setRowStretch(0, 1);
+        mapGrid_->setRowStretch(1, 1);
+        mapGrid_->setColumnStretch(0, 1);
+        mapGrid_->setColumnStretch(1, 0);
+    } else if (layoutIndex == 1) {
+        mapGrid_->setRowStretch(0, 0);
+        mapGrid_->setRowStretch(1, 1);
+        mapGrid_->setRowStretch(2, 0);
+        mapGrid_->setRowStretch(3, 0);
+        mapGrid_->setColumnStretch(0, 1);
+        mapGrid_->setColumnStretch(1, 1);
+    } else if (layoutIndex == 2) {
+        mapGrid_->setRowStretch(0, 0);
+        mapGrid_->setRowStretch(1, 1);
+        mapGrid_->setRowStretch(2, 0);
+        mapGrid_->setRowStretch(3, 1);
+        mapGrid_->setColumnStretch(0, 1);
+        mapGrid_->setColumnStretch(1, 0);
+    } else {
+        mapGrid_->setRowStretch(0, 0);
+        mapGrid_->setRowStretch(1, 1);
+        mapGrid_->setRowStretch(2, 0);
+        mapGrid_->setRowStretch(3, 1);
+        mapGrid_->setColumnStretch(0, 1);
+        mapGrid_->setColumnStretch(1, 1);
+    }
+    repositionProductTabs();
     if (panelLayoutCombo_ && map_->isHidden()) activateMap(maps_.front());
     if (panelLayoutCombo_) saveSettings();
 }
@@ -4199,6 +4349,8 @@ void MainWindow::togglePanelMaximized() {
         mapGrid_->setRowStretch(1, 1);
         mapGrid_->setColumnStretch(0, 1);
         mapGrid_->setColumnStretch(1, 0);
+        // Maximized reads as 1x1: the bar returns to the top of the column.
+        repositionProductTabs();
         statusBar()->showMessage(
             QStringLiteral("Panel %1 maximized — toggle off to restore %2")
                 .arg(maximizedPanelIndex_ + 1)
@@ -4361,8 +4513,8 @@ void MainWindow::showCommandPalette() {
              [this] { map_->recenterSelected(); });
     addEntry(QStringLiteral("Timeline: play / pause"), QStringLiteral("Shortcut Space"),
              [this] { playButton_->toggle(); });
-    addEntry(QStringLiteral("Timeline: follow LIVE"), QStringLiteral("Shortcut L"),
-             [this] { liveButton_->setChecked(true); });
+    addEntry(QStringLiteral("Timeline: follow latest"), QStringLiteral("Shortcut L"),
+             [this] { followLatestButton_->setChecked(true); });
     addEntry(QStringLiteral("Timeline: bookmark this frame"), QStringLiteral("Shortcut B"),
              [this] { toggleFrameBookmark(); });
     addEntry(QStringLiteral("View: maximize active panel"), QStringLiteral("Shortcut F11"),
@@ -4548,6 +4700,10 @@ void MainWindow::activateMap(RadarMapCanvas* map) {
         showFrame(session->frameIndex);
     }
     refreshActivePanelOverlayUi();
+    // Focus-follow: the tab bar moves directly above the newly active cell.
+    // Tab/combo edits still target map_ only, and digit-key shortcuts share
+    // the combo setter path, so they stay global to the active panel.
+    repositionProductTabs();
 }
 
 void MainWindow::refreshActivePanelOverlayUi() {
@@ -4606,6 +4762,22 @@ void MainWindow::syncProductChips() {
                        : QStringLiteral("\nNot in this volume: the site sent no such moment.");
         }
         productChips_.at(i)->setToolTip(tip);
+        // The map-top tab bar mirrors the same model: same enabled state
+        // and reason-annotated tooltip, so availability never disagrees
+        // between the dock chips and the GR-style tabs.
+        if (productTabBar_ && i < productTabBar_->count()) {
+            productTabBar_->setTabEnabled(i, enabled);
+            productTabBar_->setTabToolTip(i, tip);
+        }
+    }
+    // Tab bar follows the combo (active-panel-scoped, like the chips).
+    // Blocked so the currentChanged -> setCurrentIndex combo path never
+    // loops; per-panel focus arrives here via activateMap /
+    // updateProductAvailability, and digit keys via the combo setters.
+    if (productTabBar_ && productTabBar_->count() == productCombo_->count() &&
+        current >= 0) {
+        const QSignalBlocker tabBlocker(productTabBar_);
+        productTabBar_->setCurrentIndex(current);
     }
     if (activeProductLabel_ && current >= 0 && current < productCombo_->count()) {
         const auto& descriptor = productDescriptors()[static_cast<std::size_t>(current)];
@@ -5057,7 +5229,7 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
     const auto chunk = frameChunk(*session, static_cast<std::size_t>(session->frameIndex));
     if (!chunk) return;
     if (crossSectionDialog_ && crossSectionWidget_) {
-        crossSectionDialog_->setWindowTitle(QStringLiteral("%1 Cross-section — live").arg(selectedRadarId_));
+        crossSectionDialog_->setWindowTitle(QStringLiteral("%1 Cross-section — latest").arg(selectedRadarId_));
         crossSectionWidget_->setData(chunk, map_->product(), map_->palette(),
                                      map_->customPalette(), map_->velocityProcessing());
         crossSectionDialog_->show();
@@ -5066,7 +5238,7 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
         return;
     }
     auto* dialog = new QDialog(this);
-    dialog->setWindowTitle(QStringLiteral("%1 Cross-section — live").arg(selectedRadarId_));
+    dialog->setWindowTitle(QStringLiteral("%1 Cross-section — latest").arg(selectedRadarId_));
     dialog->resize(980, 620);
     dialog->setModal(false);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -5074,7 +5246,7 @@ void MainWindow::showCrossSection(const QPointF& start, const QPointF& end) {
     layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(8);
     auto* note = new QLabel(
-        QStringLiteral("Live: follows the timeline as new volumes arrive. Keep chasing — this window never blocks radar."),
+        QStringLiteral("Latest scan: follows the timeline as new volumes arrive. Keep chasing — this window never blocks radar."),
         dialog);
     note->setWordWrap(true);
     note->setObjectName(QStringLiteral("groupCaption"));
@@ -5357,7 +5529,7 @@ void MainWindow::populateScanDialog() {
     scanDialog_->setWindowTitle(radar.isEmpty() ? QStringLiteral("Scan diagnostics")
                                                 : QStringLiteral("%1 Scan diagnostics").arg(radar));
     if (!chunk || chunk->rays.empty() || radar.isEmpty()) {
-        scanSummary_->setText(QStringLiteral("No volume loaded. Pick a station and go LIVE first."));
+        scanSummary_->setText(QStringLiteral("No volume loaded. Pick a station to load the latest scan."));
         scanTable_->setRowCount(0);
         return;
     }
@@ -6381,7 +6553,7 @@ void MainWindow::clearPlacefiles() {
 
 void MainWindow::prepareArchiveCase(const int requestedFrames) {
     stopAnimation();
-    liveButton_->setChecked(false);
+    followLatestButton_->setChecked(false);
     cancelFor(selectedRadarId_);
     archiveSource_->cancel();
     maximumHistoryFrames_ = std::max(maximumHistoryFrames_, std::clamp(requestedFrames, 2, 32));
@@ -6563,6 +6735,9 @@ void MainWindow::recomputeRadarHealth() {
                        .arg(healthAgeText(lastArrivalTime_.secsTo(now)));
     }
     setRadarHealth(classifyHealth(), tip);
+    // The SCAN age block counts up on this same 30 s tick (no disk I/O:
+    // refreshScanAgeLabel re-renders from the showFrame() snapshot).
+    refreshScanAgeLabel();
 }
 
 bool MainWindow::isOperaRadar(const QString& radarId) const {

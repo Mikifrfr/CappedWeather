@@ -24,6 +24,7 @@
 #include "app/opera_source.hpp"
 #include "app/shortcut_help_dialog.hpp"
 #include "app/theme.hpp"
+#include "app/timeline_strip.hpp"
 #include "app/session_store.hpp"
 #include "app/session_prefetch.hpp"
 #include "app/metar_source.hpp"
@@ -43,6 +44,7 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QFile>
+#include <QGridLayout>
 #include <QImage>
 #include <QLabel>
 #include <QList>
@@ -59,7 +61,9 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QStandardItemModel>
 #include <QStringList>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTest>
 #include <QTemporaryDir>
@@ -71,6 +75,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -1091,6 +1096,372 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
     return true;
 }
 
+static bool testProductTabs(MainWindow* window, QString* error) {
+    // GR-style product tabs above the map: short operational names on the
+    // tab, full labels in the tooltips, bound to productCombo_ as the data
+    // owner. Hermetic: plain widget setters plus processEvents, no network,
+    // no synthetic radar frames.
+    auto* bar = window->findChild<QTabBar*>(QStringLiteral("productTabBar"));
+    auto* products = window->findChild<QComboBox*>(QStringLiteral("productCombo"));
+    auto* map = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
+    auto* secondMap = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
+    if (!bar || !products || !map || !secondMap) {
+        *error = QStringLiteral("product tab bar, combo, or panels missing");
+        return false;
+    }
+    const auto& descriptors = productDescriptors();
+    if (bar->count() != products->count() ||
+        bar->count() != static_cast<int>(descriptors.size())) {
+        *error = QStringLiteral("product tabs should mirror the combo (%1 tabs, %2 combo)")
+                     .arg(bar->count())
+                     .arg(products->count());
+        return false;
+    }
+    // Short names on the tabs, full labels in the tooltips.
+    for (int i = 0; i < bar->count(); ++i) {
+        const auto& descriptor = descriptors.at(static_cast<std::size_t>(i));
+        const QString shortName = QString::fromUtf8(descriptor.shortName.data());
+        const QString label = QString::fromUtf8(descriptor.label.data());
+        if (bar->tabText(i) != shortName) {
+            *error = QStringLiteral("tab %1 should read %2, got %3")
+                         .arg(i)
+                         .arg(shortName, bar->tabText(i));
+            return false;
+        }
+        if (bar->tabToolTip(i).isEmpty() || !bar->tabToolTip(i).contains(label)) {
+            *error = QStringLiteral("tab %1 tooltip should name %2").arg(shortName, label);
+            return false;
+        }
+        if (bar->tabData(i).toInt() != static_cast<int>(descriptor.kind)) {
+            *error = QStringLiteral("tab %1 carries the wrong product kind").arg(shortName);
+            return false;
+        }
+    }
+    // The bar sits above the map in the central widget, not in the dock.
+    if (!bar->isVisibleTo(window)) {
+        *error = QStringLiteral("product tab bar should be visible");
+        return false;
+    }
+    const int barTop = bar->mapTo(window, QPoint(0, 0)).y();
+    const int mapTop = map->mapTo(window, QPoint(0, 0)).y();
+    if (barTop >= mapTop) {
+        *error = QStringLiteral("product tabs should sit above the map");
+        return false;
+    }
+    // Resolve the active panel dynamically (flagged by activateMap), so
+    // this holds whichever panel owns focus when the suite runs.
+    auto* activePanel = map;
+    for (auto* panel : window->findChildren<RadarMapCanvas*>()) {
+        if (panel->property("activePanel").toBool()) {
+            activePanel = panel;
+            break;
+        }
+    }
+    // Tab click drives the data owner and the active canvas.
+    const auto velocityIndex = products->findData(static_cast<int>(ProductKind::Velocity));
+    bar->setCurrentIndex(velocityIndex);
+    QCoreApplication::processEvents();
+    if (products->currentIndex() != velocityIndex) {
+        *error = QStringLiteral("selecting the VEL tab should drive the product combo");
+        return false;
+    }
+    if (activePanel->product() != ProductKind::Velocity) {
+        *error = QStringLiteral("selecting the VEL tab should switch the active panel");
+        return false;
+    }
+    // Combo drives the tabs back (digit keys 1-9/0 and chips share this
+    // setter path, so this covers both directions of the binding).
+    const auto reflectivityIndex =
+        products->findData(static_cast<int>(ProductKind::Reflectivity));
+    products->setCurrentIndex(reflectivityIndex);
+    QCoreApplication::processEvents();
+    if (bar->currentIndex() != reflectivityIndex ||
+        activePanel->product() != ProductKind::Reflectivity) {
+        *error = QStringLiteral("the combo should drive the tabs back");
+        return false;
+    }
+    const auto chips = window->findChildren<QToolButton*>(QStringLiteral("productChip"));
+    if (chips.size() != products->count() || !chips.at(reflectivityIndex)->isChecked()) {
+        *error = QStringLiteral("chips and tabs should agree on the checked product");
+        return false;
+    }
+    // Availability mirrors the chips: disabling a moment disables its tab.
+    auto* itemModel = qobject_cast<QStandardItemModel*>(products->model());
+    if (!itemModel || !itemModel->item(velocityIndex)) {
+        *error = QStringLiteral("product combo model missing");
+        return false;
+    }
+    itemModel->item(velocityIndex)->setEnabled(false);
+    products->setCurrentIndex(velocityIndex);  // fires syncProductChips
+    QCoreApplication::processEvents();
+    if (bar->isTabEnabled(velocityIndex) || chips.at(velocityIndex)->isEnabled()) {
+        *error = QStringLiteral("disabled moments should disable their tab and chip");
+        itemModel->item(velocityIndex)->setEnabled(true);
+        products->setCurrentIndex(reflectivityIndex);
+        return false;
+    }
+    itemModel->item(velocityIndex)->setEnabled(true);
+    products->setCurrentIndex(reflectivityIndex);
+    QCoreApplication::processEvents();
+    if (!bar->isTabEnabled(velocityIndex)) {
+        *error = QStringLiteral("re-enabled moments should re-enable their tab");
+        return false;
+    }
+    // Per-panel focus follows the active panel; restore the original focus
+    // afterwards so later suite stages keep their panel assumptions. The
+    // probe panel and product are picked distinct from the active ones so
+    // the follow is observable in every entry state.
+    RadarMapCanvas* otherPanel = nullptr;
+    for (auto* panel : window->findChildren<RadarMapCanvas*>()) {
+        if (panel != activePanel) {
+            otherPanel = panel;
+            break;
+        }
+    }
+    if (!otherPanel) {
+        *error = QStringLiteral("multi-panel layout missing a second canvas");
+        return false;
+    }
+    const auto restoreIndex = products->findData(static_cast<int>(activePanel->product()));
+    const auto probeKind = activePanel->product() == ProductKind::EchoTop
+                               ? ProductKind::Velocity
+                               : ProductKind::EchoTop;
+    const auto probeIndex = products->findData(static_cast<int>(probeKind));
+    otherPanel->setProduct(probeKind);
+    otherPanel->activated();
+    QCoreApplication::processEvents();
+    if (products->currentIndex() != probeIndex || bar->currentIndex() != probeIndex) {
+        *error = QStringLiteral("tabs should follow the newly activated panel");
+        activePanel->activated();
+        QCoreApplication::processEvents();
+        return false;
+    }
+    activePanel->activated();
+    QCoreApplication::processEvents();
+    if (products->currentIndex() != restoreIndex || bar->currentIndex() != restoreIndex) {
+        *error = QStringLiteral("tabs should follow back to the primary panel");
+        return false;
+    }
+    // Focus-follow geometry: the single bar sits directly above the active
+    // cell in multi-panel layouts and returns to the top of the column in
+    // 1x1. Hermetic: layout combo + activated() + widget setters plus
+    // processEvents, no network, no synthetic radar frames.
+    auto* layoutCombo = window->findChild<QComboBox*>(QStringLiteral("panelLayoutCombo"));
+    auto* mapGridHost = window->findChild<QWidget*>(QStringLiteral("mapGridHost"));
+    auto* mapHost = window->findChild<QWidget*>(QStringLiteral("mapHost"));
+    auto* panel0 = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
+    auto* panel1 = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel2"));
+    auto* panel2 = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel3"));
+    auto* panel3 = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMapPanel4"));
+    if (!layoutCombo || !mapGridHost || !mapHost || !panel0 || !panel1 || !panel2 ||
+        !panel3) {
+        *error = QStringLiteral("layout combo, map hosts, or panels missing");
+        return false;
+    }
+    auto* grid = qobject_cast<QGridLayout*>(mapGridHost->layout());
+    if (!grid) {
+        *error = QStringLiteral("map grid layout missing");
+        return false;
+    }
+    const int originalLayout = layoutCombo->currentIndex();
+    const auto panelProduct = [](RadarMapCanvas* panel) { return panel->product(); };
+    const auto savedProducts =
+        std::array<ProductKind, 4>{panelProduct(panel0), panelProduct(panel1),
+                                   panelProduct(panel2), panelProduct(panel3)};
+    // Grid cell of a widget; false when the widget is not in the grid (1x1
+    // keeps the bar in the top column instead).
+    const auto gridCell = [grid](QWidget* widget, int* row, int* column) {
+        int rowSpan = 0;
+        int columnSpan = 0;
+        const int index = grid->indexOf(widget);
+        if (index < 0) return false;
+        grid->getItemPosition(index, row, column, &rowSpan, &columnSpan);
+        return true;
+    };
+    // The bar counts as directly above the panel when it occupies the grid
+    // cell one row up in the same column (tab rows are zero-stretch and
+    // empty ones collapse, so there is no gap).
+    const auto checkDirectlyAbove = [&](RadarMapCanvas* panel, QString* failReason) {
+        int barRow = -1;
+        int barColumn = -1;
+        int panelRow = -1;
+        int panelColumn = -1;
+        if (!gridCell(bar, &barRow, &barColumn) ||
+            !gridCell(panel, &panelRow, &panelColumn)) {
+            *failReason = QStringLiteral("tab bar or panel not placed in the grid");
+            return false;
+        }
+        if (barRow + 1 != panelRow || barColumn != panelColumn) {
+            *failReason = QStringLiteral("tab bar should sit directly above the active panel");
+            return false;
+        }
+        const int barBottom = bar->mapTo(window, QPoint(0, bar->height())).y();
+        const int panelTop = panel->mapTo(window, QPoint(0, 0)).y();
+        if (barBottom > panelTop + 4) {
+            *failReason = QStringLiteral("tab bar should render above the active panel");
+            return false;
+        }
+        return true;
+    };
+    const auto restoreLayouts = [&] {
+        panel0->setProduct(savedProducts[0]);
+        panel1->setProduct(savedProducts[1]);
+        panel2->setProduct(savedProducts[2]);
+        panel3->setProduct(savedProducts[3]);
+        layoutCombo->setCurrentIndex(originalLayout);
+        QCoreApplication::processEvents();
+        activePanel->activated();
+        QCoreApplication::processEvents();
+    };
+    // 1x1 keeps the historic top-of-column bar (unchanged behavior).
+    layoutCombo->setCurrentIndex(0);
+    QCoreApplication::processEvents();
+    if (bar->parentWidget() != mapHost) {
+        *error = QStringLiteral("1x1 tabs should sit at the top of the column");
+        restoreLayouts();
+        return false;
+    }
+    // 1x2: the bar switches sides with focus.
+    layoutCombo->setCurrentIndex(1);
+    QCoreApplication::processEvents();
+    panel0->activated();
+    QCoreApplication::processEvents();
+    {
+        QString reason;
+        if (!checkDirectlyAbove(panel0, &reason)) {
+            *error = QStringLiteral("1x2 tabs should sit above the left panel: %1").arg(reason);
+            restoreLayouts();
+            return false;
+        }
+    }
+    panel1->activated();
+    QCoreApplication::processEvents();
+    {
+        QString reason;
+        if (!checkDirectlyAbove(panel1, &reason)) {
+            *error = QStringLiteral("1x2 tabs should follow to the right panel: %1").arg(reason);
+            restoreLayouts();
+            return false;
+        }
+        int barRow = -1;
+        int barColumn = -1;
+        int leftColumn = -1;
+        int dummy = -1;
+        gridCell(bar, &barRow, &barColumn);
+        gridCell(panel0, &dummy, &leftColumn);
+        if (barColumn == leftColumn) {
+            *error = QStringLiteral("1x2 tabs should switch sides with focus");
+            restoreLayouts();
+            return false;
+        }
+    }
+    // 2x1: the bar switches rows with focus.
+    layoutCombo->setCurrentIndex(2);
+    QCoreApplication::processEvents();
+    panel0->activated();
+    QCoreApplication::processEvents();
+    int topBarRow = -1;
+    {
+        QString reason;
+        if (!checkDirectlyAbove(panel0, &reason)) {
+            *error = QStringLiteral("2x1 tabs should sit above the top panel: %1").arg(reason);
+            restoreLayouts();
+            return false;
+        }
+        int topBarColumn = -1;
+        gridCell(bar, &topBarRow, &topBarColumn);
+    }
+    panel1->activated();
+    QCoreApplication::processEvents();
+    {
+        QString reason;
+        if (!checkDirectlyAbove(panel1, &reason)) {
+            *error = QStringLiteral("2x1 tabs should follow to the bottom panel: %1").arg(reason);
+            restoreLayouts();
+            return false;
+        }
+        int bottomBarRow = -1;
+        int bottomBarColumn = -1;
+        gridCell(bar, &bottomBarRow, &bottomBarColumn);
+        if (bottomBarRow == topBarRow) {
+            *error = QStringLiteral("2x1 tabs should switch rows with focus");
+            restoreLayouts();
+            return false;
+        }
+    }
+    // 2x2: the bar switches sides and rows with focus; still a single bar.
+    layoutCombo->setCurrentIndex(3);
+    QCoreApplication::processEvents();
+    panel0->activated();
+    QCoreApplication::processEvents();
+    int cornerBarRow = -1;
+    int cornerBarColumn = -1;
+    {
+        QString reason;
+        if (!checkDirectlyAbove(panel0, &reason)) {
+            *error = QStringLiteral("2x2 tabs should sit above the top-left panel: %1").arg(reason);
+            restoreLayouts();
+            return false;
+        }
+        gridCell(bar, &cornerBarRow, &cornerBarColumn);
+    }
+    panel3->activated();
+    QCoreApplication::processEvents();
+    {
+        QString reason;
+        if (!checkDirectlyAbove(panel3, &reason)) {
+            *error = QStringLiteral("2x2 tabs should follow to the bottom-right panel: %1").arg(reason);
+            restoreLayouts();
+            return false;
+        }
+        int barRow = -1;
+        int barColumn = -1;
+        gridCell(bar, &barRow, &barColumn);
+        if (barRow == cornerBarRow && barColumn == cornerBarColumn) {
+            *error = QStringLiteral("2x2 tabs should switch sides and rows with focus");
+            restoreLayouts();
+            return false;
+        }
+        if (window->findChildren<QTabBar*>(QStringLiteral("productTabBar")).size() != 1) {
+            *error = QStringLiteral("focus-follow should reparent one tab bar, not duplicate it");
+            restoreLayouts();
+            return false;
+        }
+    }
+    // Tab edits drive the active panel only; the combo setter (shared with
+    // the digit-key shortcuts) stays global to the active panel.
+    panel1->activated();
+    QCoreApplication::processEvents();
+    const auto panel0Product = panel0->product();
+    bar->setCurrentIndex(velocityIndex);
+    QCoreApplication::processEvents();
+    if (panel1->product() != ProductKind::Velocity) {
+        *error = QStringLiteral("tab edit in 2x2 should switch the active panel");
+        restoreLayouts();
+        return false;
+    }
+    if (panel0->product() != panel0Product) {
+        *error = QStringLiteral("tab edit should drive the active panel only");
+        restoreLayouts();
+        return false;
+    }
+    products->setCurrentIndex(reflectivityIndex);
+    QCoreApplication::processEvents();
+    if (panel1->product() != ProductKind::Reflectivity ||
+        bar->currentIndex() != reflectivityIndex) {
+        *error = QStringLiteral("combo edit should drive the active panel and tabs back");
+        restoreLayouts();
+        return false;
+    }
+    if (panel0->product() != panel0Product) {
+        *error = QStringLiteral("combo edit should leave inactive panels alone");
+        restoreLayouts();
+        return false;
+    }
+    restoreLayouts();
+    return true;
+}
+
 static bool testOperaKeys(QString* error) {
     const auto prefix = OperaSource::pvolPrefix(QStringLiteral("NO"), QStringLiteral("nohur"),
                                                 QDate(2026, 9, 5));
@@ -2029,6 +2400,84 @@ static bool testHealthIndicator(MainWindow* window, QString* error) {
     return true;
 }
 
+static bool testScanAgeBlock(MainWindow* window, QString* error) {
+    // SCAN age block replaces the LIVE affordance: honest UTC scan time,
+    // static VCP token, whole-minute age, and ray count — amber only when
+    // stale, never a green dot, and no LIVE wording on any playback widget.
+    const auto scanTime = QDateTime(QDate(2026, 5, 20), QTime(14, 22, 10), QTimeZone::UTC);
+    const auto fresh = MainWindow::scanAgeLabelText(scanTime, 1080, 150);
+    if (fresh != QStringLiteral("SCAN 14:22:10Z · VCP · 2 min old · 1080 rays")) {
+        *error = QStringLiteral("SCAN label format wrong, got '%1'").arg(fresh);
+        return false;
+    }
+    const auto stale = MainWindow::scanAgeLabelText(scanTime, 720, 600);
+    if (stale != QStringLiteral("SCAN 14:22:10Z · VCP · 10 min old · 720 rays")) {
+        *error = QStringLiteral("SCAN stale label wrong, got '%1'").arg(stale);
+        return false;
+    }
+    const auto freshBorn = MainWindow::scanAgeLabelText(scanTime, 10, -5);
+    if (!freshBorn.contains(QStringLiteral("0 min old"))) {
+        *error = QStringLiteral("SCAN age should clamp at 0 min, got '%1'").arg(freshBorn);
+        return false;
+    }
+    const auto unknownRays = MainWindow::scanAgeLabelText(scanTime, -1, 60);
+    if (unknownRays != QStringLiteral("SCAN 14:22:10Z · VCP · 1 min old · — rays")) {
+        *error = QStringLiteral("SCAN unknown rays should read '— rays', got '%1'").arg(unknownRays);
+        return false;
+    }
+    if (MainWindow::kScanStaleSeconds != 300) {
+        *error = QStringLiteral("SCAN stale bound should be 300 s, got %1")
+                     .arg(MainWindow::kScanStaleSeconds);
+        return false;
+    }
+    auto* follow = window->findChild<QToolButton*>(QStringLiteral("followLatestButton"));
+    if (!follow) {
+        *error = QStringLiteral("followLatestButton widget missing");
+        return false;
+    }
+    if (window->findChild<QToolButton*>(QStringLiteral("liveButton"))) {
+        *error = QStringLiteral("liveButton object should be gone (renamed to followLatestButton)");
+        return false;
+    }
+    if (follow->text() != QStringLiteral("Latest")) {
+        *error = QStringLiteral("follow toggle should read 'Latest', got '%1'").arg(follow->text());
+        return false;
+    }
+    if (!follow->isCheckable() || !follow->isChecked() ||
+        !follow->toolTip().contains(QStringLiteral("(L)"))) {
+        *error = QStringLiteral("follow toggle should be a checked (L) shortcut button");
+        return false;
+    }
+    auto* frameLabel = window->findChild<QLabel*>(QStringLiteral("frameLabel"));
+    if (!frameLabel) {
+        *error = QStringLiteral("frameLabel (SCAN age block) widget missing");
+        return false;
+    }
+    if (frameLabel->text().contains(QStringLiteral("LIVE")) ||
+        follow->text().contains(QStringLiteral("LIVE")) ||
+        follow->toolTip().contains(QStringLiteral("LIVE"))) {
+        *error = QStringLiteral("playback widgets must carry no LIVE wording");
+        return false;
+    }
+    if (!frameLabel->text().contains(QStringLiteral("scan"), Qt::CaseInsensitive)) {
+        *error = QStringLiteral("empty SCAN block should name the scan, got '%1'")
+                     .arg(frameLabel->text());
+        return false;
+    }
+    if (frameLabel->styleSheet().contains(QStringLiteral("#6fbf5a")) ||
+        frameLabel->styleSheet().contains(QStringLiteral("#7bd88a"))) {
+        *error = QStringLiteral("SCAN block must never use the green LIVE styling");
+        return false;
+    }
+    if (auto* hint = window->findChild<QLabel*>(QStringLiteral("emptyStateHint"))) {
+        if (hint->text().contains(QStringLiteral("LIVE"))) {
+            *error = QStringLiteral("empty-state hint must carry no LIVE wording");
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool testContextMenuToolModes(QString* error) {
     RadarMapCanvas canvas;
     canvas.resize(800, 600);
@@ -2055,6 +2504,173 @@ static bool testContextMenuToolModes(QString* error) {
         return false;
     }
     canvas.setProduct(ProductKind::Reflectivity);
+    return true;
+}
+
+static bool testTimelineStrip(QString* error) {
+    // Empty state carries no LIVE wording.
+    const auto empty = TimelineStrip::emptyStateText();
+    if (empty.isEmpty() || empty.contains(QStringLiteral("LIVE"))) {
+        *error = QStringLiteral("timeline empty state must be non-empty with no LIVE wording, got '%1'")
+                     .arg(empty);
+        return false;
+    }
+    // HH:mm labels draw on first/current/last only.
+    for (int i = 0; i < 5; ++i) {
+        const bool want = (i == 0 || i == 2 || i == 4);
+        if (TimelineStrip::showsTimeLabel(i, 2, 5) != want) {
+            *error = QStringLiteral("frame %1 label mismatch with current=2 of 5").arg(i);
+            return false;
+        }
+    }
+    if (!TimelineStrip::showsTimeLabel(0, 0, 1) ||
+        TimelineStrip::showsTimeLabel(-1, 0, 3) || TimelineStrip::showsTimeLabel(3, 0, 3) ||
+        TimelineStrip::showsTimeLabel(0, 0, 0) ||
+        !TimelineStrip::showsTimeLabel(0, -1, 3) || !TimelineStrip::showsTimeLabel(2, -1, 3) ||
+        TimelineStrip::showsTimeLabel(1, -1, 3)) {
+        *error = QStringLiteral("timeline label edges (single/out-of-range/unselected) mismatch");
+        return false;
+    }
+    // Warning-onset ticks map inside [first, last], clamp nowhere else.
+    const QDateTime first(QDate(2026, 5, 16), QTime(12, 0), QTimeZone::UTC);
+    const QDateTime last(QDate(2026, 5, 16), QTime(13, 0), QTimeZone::UTC);
+    const auto mid = TimelineStrip::eventTickX(first.addSecs(1800), first, last, 300.0);
+    const auto atFirst = TimelineStrip::eventTickX(first, first, last, 300.0);
+    const auto atLast = TimelineStrip::eventTickX(last, first, last, 300.0);
+    if (!mid.has_value() || std::abs(*mid - 150.0) > 1e-9 || !atFirst.has_value() ||
+        std::abs(*atFirst - 3.0) > 1e-9 || !atLast.has_value() ||
+        std::abs(*atLast - 297.0) > 1e-9) {
+        *error = QStringLiteral("timeline tick mapping mismatch (mid/first/last)");
+        return false;
+    }
+    if (TimelineStrip::eventTickX(first.addSecs(-1), first, last, 300.0).has_value() ||
+        TimelineStrip::eventTickX(last.addSecs(1), first, last, 300.0).has_value() ||
+        TimelineStrip::eventTickX(first, first, first, 300.0).has_value() ||
+        TimelineStrip::eventTickX(QDateTime{}, first, last, 300.0).has_value()) {
+        *error = QStringLiteral("timeline ticks must drop out-of-range/degenerate onsets");
+        return false;
+    }
+    // Offscreen paint: complete vs incomplete blocks, gold bookmark bar,
+    // red warning tick. Channel-dominance asserts survive blending.
+    TimelineStrip strip;
+    strip.resize(400, 44);
+    QVector<TimelineStrip::Frame> frames;
+    for (int i = 0; i < 4; ++i) {
+        TimelineStrip::Frame frame;
+        frame.time = QDateTime(QDate(2026, 5, 16), QTime(12 + i, 0), QTimeZone::UTC);
+        frame.complete = (i != 1);
+        frame.bookmarked = (i == 2);
+        frame.volumeId = QStringLiteral("vol-%1").arg(i);
+        frames.push_back(frame);
+    }
+    strip.setFrames(frames, 2);
+    strip.setEvents({QDateTime(QDate(2026, 5, 16), QTime(12, 30), QTimeZone::UTC)});
+    const QImage shot = strip.grab().toImage();
+    if (shot.isNull()) {
+        *error = QStringLiteral("timeline should render frames offscreen");
+        return false;
+    }
+    const auto complete = shot.pixelColor(60, 27);    // block 0 center-ish
+    if (!(complete.blue() > complete.red())) {
+        *error = QStringLiteral("complete block should read blue, got %1").arg(complete.name());
+        return false;
+    }
+    const auto incomplete = shot.pixelColor(159, 27);  // block 1 center-ish
+    if (!(incomplete.red() > incomplete.blue())) {
+        *error = QStringLiteral("incomplete block should read rust, got %1").arg(incomplete.name());
+        return false;
+    }
+    const auto bookmark = shot.pixelColor(250, 11);  // gold bar over block 2
+    if (bookmark != QColor(224, 193, 74)) {
+        *error = QStringLiteral("bookmark bar should be gold, got %1").arg(bookmark.name());
+        return false;
+    }
+    const auto tickX = TimelineStrip::eventTickX(
+        QDateTime(QDate(2026, 5, 16), QTime(12, 30), QTimeZone::UTC),
+        frames.front().time, frames.back().time, 400.0);
+    if (!tickX.has_value()) {
+        *error = QStringLiteral("fixture onset should map inside the strip");
+        return false;
+    }
+    const auto tick = shot.pixelColor(static_cast<int>(*tickX), 5);
+    if (!(tick.red() > 200 && tick.red() > tick.green() + 80 && tick.red() > tick.blue() + 80)) {
+        *error = QStringLiteral("warning tick should read red at x=%1, got %2")
+                     .arg(*tickX)
+                     .arg(tick.name());
+        return false;
+    }
+    // Empty state paints crash-free too.
+    strip.setFrames({}, -1);
+    strip.setEvents({});
+    if (strip.grab().toImage().isNull()) {
+        *error = QStringLiteral("timeline should render the empty state without crashing");
+        return false;
+    }
+    return true;
+}
+
+static bool testLegendSpec(QString* error) {
+    // Narrow panels skip the 258 px stack cleanly.
+    if (RadarMapCanvas::legendVisibleForWidth(0) || RadarMapCanvas::legendVisibleForWidth(273) ||
+        !RadarMapCanvas::legendVisibleForWidth(274) ||
+        !RadarMapCanvas::legendVisibleForWidth(800)) {
+        *error = QStringLiteral("legend width gate should flip at 274 px");
+        return false;
+    }
+    // 5 color-table ticks, anchored inside the bar, never overlapping.
+    // Gradient (20,34,242x10): tick x = 20/80.5/141/201.5/262, so 40 px
+    // boxes land at lefts 20/60.5/121/181.5/222.
+    const auto rects = RadarMapCanvas::legendTickRects(QRectF(20, 34, 242, 10));
+    const double wantLeft[5] = {20.0, 60.5, 121.0, 181.5, 222.0};
+    for (int i = 0; i < 5; ++i) {
+        const auto& rect = rects[static_cast<std::size_t>(i)];
+        if (std::abs(rect.left() - wantLeft[i]) > 1e-9 ||
+            std::abs(rect.width() - 40.0) > 1e-9 || rect.left() < 20.0 - 1e-9 ||
+            rect.right() > 262.0 + 1e-9) {
+            *error = QStringLiteral("legend tick %1 geometry mismatch: x=%2 w=%3")
+                         .arg(i)
+                         .arg(rect.left())
+                         .arg(rect.width());
+            return false;
+        }
+        for (int j = i + 1; j < 5; ++j) {
+            if (rect.intersects(rects[static_cast<std::size_t>(j)])) {
+                *error = QStringLiteral("legend ticks %1 and %2 overlap").arg(i).arg(j);
+                return false;
+            }
+        }
+    }
+    // Report symbols key only kinds actually drawn.
+    const std::array<bool, 3> all{true, true, true};
+    const std::array<bool, 3> none{false, false, false};
+    if (RadarMapCanvas::legendReportKeys(false, all, all) != none ||
+        RadarMapCanvas::legendReportKeys(true, all, none) != none) {
+        *error = QStringLiteral("legend must key nothing when the layer is off or the feed is empty");
+        return false;
+    }
+    const auto tornadoOnly = RadarMapCanvas::legendReportKeys(true, all, {true, false, false});
+    if (!tornadoOnly[0] || tornadoOnly[1] || tornadoOnly[2]) {
+        *error = QStringLiteral("legend must key only the loaded tornado symbol");
+        return false;
+    }
+    const auto hailHidden = RadarMapCanvas::legendReportKeys(true, {true, false, true}, all);
+    if (!hailHidden[0] || hailHidden[1] || !hailHidden[2]) {
+        *error = QStringLiteral("legend must respect the per-kind visibility flags");
+        return false;
+    }
+    // Narrow + wide canvases both paint crash-free (skip vs full stack).
+    RadarMapCanvas narrow;
+    narrow.resize(200, 600);
+    if (narrow.grab().toImage().isNull()) {
+        *error = QStringLiteral("narrow legend panel should skip cleanly");
+        return false;
+    }
+    RadarMapCanvas wide;
+    wide.resize(800, 600);
+    if (wide.grab().toImage().isNull()) {
+        *error = QStringLiteral("wide legend panel should render");
+        return false;
+    }
     return true;
 }
 
@@ -2115,7 +2731,7 @@ int main(int argc, char** argv) {
     auto* glmStatusNote = window.findChild<QLabel*>(QStringLiteral("glmStatusNote"));
     auto* belowThresholdCheck = window.findChild<QCheckBox*>(QStringLiteral("belowThresholdCheck"));
     auto* stationCombo = window.findChild<QComboBox*>(QStringLiteral("stationCombo"));
-    auto* liveButton = window.findChild<QToolButton*>(QStringLiteral("liveButton"));
+    auto* followLatestButton = window.findChild<QToolButton*>(QStringLiteral("followLatestButton"));
     auto* panelLayout = window.findChild<QComboBox*>(QStringLiteral("panelLayoutCombo"));
     auto* controlDock = window.findChild<QDockWidget*>(QStringLiteral("controlDock"));
     const auto radarPanels = window.findChildren<RadarMapCanvas*>();
@@ -2132,7 +2748,7 @@ int main(int argc, char** argv) {
         !addPlacefileButton || !addPlacefileUrlButton || !clearPlacefilesButton ||
         !openArchiveFilesButton || !openArchiveFolderButton || !awsArchiveButton ||
         !belowThresholdCheck ||
-        !stationCombo || stationCombo->count() < 200 || !liveButton || !loadingProgress ||
+        !stationCombo || stationCombo->count() < 200 || !followLatestButton || !loadingProgress ||
         !model || model->rowCount() < 200 || !panelLayout || panelLayout->count() != 4 ||
         !controlDock || controlDock->width() < 300 ||
         radarPanels.size() != 4 || !glmStatusNote) {
@@ -4444,6 +5060,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             std::cerr << "Sidebar redesign failed: " << failure.toStdString() << '\n';
             return 1;
         }
+        if (!testProductTabs(&window, &failure)) {
+            std::cerr << "Product tabs failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
         if (!testProximityFilter(&failure)) {
             std::cerr << "Proximity filter failed: " << failure.toStdString() << '\n';
             return 1;
@@ -4488,8 +5108,20 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             std::cerr << "Health indicator failed: " << failure.toStdString() << '\n';
             return 1;
         }
+        if (!testScanAgeBlock(&window, &failure)) {
+            std::cerr << "SCAN age block failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
         if (!testContextMenuToolModes(&failure)) {
             std::cerr << "Context-menu tool modes failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testTimelineStrip(&failure)) {
+            std::cerr << "Timeline strip spec failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testLegendSpec(&failure)) {
+            std::cerr << "Legend spec failed: " << failure.toStdString() << '\n';
             return 1;
         }
         // Restore main-map view that preset/speed probes may have touched.

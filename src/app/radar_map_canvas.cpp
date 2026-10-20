@@ -4085,12 +4085,44 @@ void RadarMapCanvas::paintStormTrail(QPainter& painter) {
     painter.restore();
 }
 
+bool RadarMapCanvas::legendVisibleForWidth(int width) { return width >= 274; }
+
+std::array<QRectF, 5> RadarMapCanvas::legendTickRects(const QRectF& gradientRect) {
+    // 40 px boxes: 5 ticks over a 242 px gradient sit 60.5 px apart, so a
+    // centered middle box (half-width 20) clears both neighbors, and the
+    // inside-anchored ends clear theirs. Any wider and the ends overlap.
+    constexpr double kTickWidth = 40.0;
+    constexpr double kTickY = 45.0;
+    constexpr double kTickHeight = 12.0;
+    const auto tickLeft = [&](const int tick, const double x) -> double {
+        if (tick == 0) return gradientRect.left();
+        if (tick == 4) return gradientRect.right() - kTickWidth;
+        return std::max(gradientRect.left(), x - kTickWidth / 2.0);
+    };
+    std::array<QRectF, 5> rects;
+    for (int tick = 0; tick < 5; ++tick) {
+        const auto fraction = tick / 4.0;
+        const auto x = gradientRect.left() + fraction * gradientRect.width();
+        rects[static_cast<std::size_t>(tick)] =
+            QRectF(tickLeft(tick, x), kTickY, kTickWidth, kTickHeight);
+    }
+    return rects;
+}
+
+std::array<bool, 3> RadarMapCanvas::legendReportKeys(bool layerVisible,
+                                                     const std::array<bool, 3>& kindsVisible,
+                                                     const std::array<bool, 3>& kindsPresent) {
+    return {layerVisible && kindsVisible[0] && kindsPresent[0],
+            layerVisible && kindsVisible[1] && kindsPresent[1],
+            layerVisible && kindsVisible[2] && kindsPresent[2]};
+}
+
 void RadarMapCanvas::paintLegend(QPainter& painter) {
     const auto& descriptor = productDescriptor(product_);
     // The legend column is a fixed 258 px stack. Panels get that narrow in a
     // 2x2 layout on small laptops, so skip the stack instead of drawing three
     // boxes that all get clipped on the right.
-    if (width() < 274) return;
+    if (!legendVisibleForWidth(width())) return;
     const QRectF panel(12, 12, 258, 50);
     painter.setPen(QPen(QColor(205, 216, 222, 130), 1));
     painter.setBrush(QColor(8, 15, 19, 220));
@@ -4121,28 +4153,32 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
     painter.setPen(QColor(205, 215, 220));
     painter.setFont(hudFont(7));
     // Anchor the end labels inside the bar and let the middle two share the
-    // span; the old fixed 60 px boxes overlapped by ~30 px at the right edge.
+    // span. Boxes are 40 px: at a 242 px gradient the 60.5 px tick spacing
+    // leaves a gap everywhere (the old 58 px boxes overlapped their
+    // neighbors by ~26 px at both ends), so cramped numbers can't return.
     const auto tickText = [](const double value) { return QString::number(value, 'g', 4); };
-    const auto tickLeft = [&](const int tick, const double x) -> double {
-        if (tick == 0) return gradientRect.left();
-        if (tick == 4) return gradientRect.right() - 58.0;
-        return std::max(gradientRect.left(), x - 29.0);
-    };
+    const auto tickRects = legendTickRects(gradientRect);
     for (int tick = 0; tick < 5; ++tick) {
         const auto fraction = tick / 4.0;
         const auto value = descriptor.minimum + fraction * (descriptor.maximum - descriptor.minimum);
-        const auto x = gradientRect.left() + fraction * gradientRect.width();
-        painter.drawText(QRectF(tickLeft(tick, x), 45, 58, 12),
+        painter.drawText(tickRects[static_cast<std::size_t>(tick)],
                          tick == 0 ? Qt::AlignLeft : tick == 4 ? Qt::AlignRight : Qt::AlignCenter,
                          tickText(value));
     }
 
-    // Only key the report symbols that are actually drawn. Hiding hail and wind
-    // in the Layers group used to leave the full three-symbol key on screen.
+    // Only key the report symbols that are actually drawn: the layer must be
+    // on, the kind enabled, and at least one report of that kind loaded.
+    // Hiding hail and wind in the Layers group used to leave the full
+    // three-symbol key on screen, and an empty feed keyed symbols for
+    // reports that were never painted.
     const auto reportKinds = std::array<bool, 3>{
         stormReportKindsVisible_[0], stormReportKindsVisible_[1], stormReportKindsVisible_[2]};
-    const auto anyReportKind = reportKinds[0] || reportKinds[1] || reportKinds[2];
-    if (stormReportsVisible_ && anyReportKind) {
+    auto kindsPresent = std::array<bool, 3>{false, false, false};
+    for (const auto& report : stormReports_)
+        kindsPresent[static_cast<std::size_t>(report.kind)] = true;
+    const auto reportKeys = legendReportKeys(stormReportsVisible_, reportKinds, kindsPresent);
+    const auto anyReportKind = reportKeys[0] || reportKeys[1] || reportKeys[2];
+    if (anyReportKind) {
         const QRectF reportPanel(12, 68, 258, 24);
         painter.setPen(QPen(QColor(205, 216, 222, 100), 1));
         painter.setBrush(QColor(8, 15, 19, 205));
@@ -4153,7 +4189,7 @@ void RadarMapCanvas::paintLegend(QPainter& painter) {
         const std::array<QColor, 3> colors{QColor("#ff3b4d"), QColor("#53d769"), QColor("#44a7ff")};
         const std::array<double, 3> offsets{20.0, 92.0, 153.0};
         for (int index = 0; index < 3; ++index) {
-            if (!reportKinds[static_cast<std::size_t>(index)]) continue;
+            if (!reportKeys[static_cast<std::size_t>(index)]) continue;
             painter.setPen(colors[static_cast<std::size_t>(index)]);
             painter.drawText(QRectF(offsets[static_cast<std::size_t>(index)], 72, 70, 16),
                              Qt::AlignLeft | Qt::AlignVCenter, symbols[static_cast<std::size_t>(index)]);

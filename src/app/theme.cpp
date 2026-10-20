@@ -129,7 +129,6 @@ QToolButton:pressed, QPushButton:pressed { background: #131416; }
 QToolButton:focus, QPushButton:focus { border: 1px solid #7ea6c9; }
 QToolButton:checked, QPushButton:checked { background: rgba(126, 166, 201, 26); border-color: #7ea6c9; color: #7ea6c9; }
 QToolButton:disabled, QPushButton:disabled { color: #7d838c; background: #17181a; border-color: #4a4e57; }
-QToolButton#liveButton:checked { background: rgba(111, 191, 90, 26); border-color: #6fbf5a; color: #6fbf5a; }
 QCheckBox { color: #d4d6d9; background: transparent; spacing: 6px; }
 QCheckBox:disabled { color: #7d838c; }
 QCheckBox:focus { color: #7ea6c9; }
@@ -159,6 +158,9 @@ QTabBar::tab { background: #1a1b1e; color: #9298a0; border: 1px solid #2b2d33; b
 QTabBar::tab:selected { background: #212328; color: #7ea6c9; border-color: #3f444d; }
 QTabBar::tab:hover:!selected { color: #d4d6d9; }
 QTabBar::tab:focus { border: 1px solid #7ea6c9; }
+QTabBar#productTabBar { background: #131416; }
+QTabBar#productTabBar::tab { padding: 6px 10px; }
+QTabBar#productTabBar::tab:disabled { color: #7d838c; background: #17181a; }
 QListWidget#warningList { background: #131416; color: #d4d6d9; border: 1px solid #3f444d; outline: none; font-size: 11px; }
 QListWidget#warningList::item { padding: 5px 6px; border-bottom: 1px solid #232529; }
 QListWidget#warningList::item:hover { background: rgba(126, 166, 201, 26); }
@@ -241,8 +243,9 @@ QToolButton:pressed, QPushButton:pressed { background: #0d0f13; }
 QToolButton:focus, QPushButton:focus { border: 1px solid #46c8f0; }
 QToolButton:checked, QPushButton:checked { background: rgba(70, 200, 240, 32); border-color: #46c8f0; color: #46c8f0; }
 QToolButton:disabled, QPushButton:disabled { color: #828b9b; background: #14171d; border-color: #4d5666; }
-QToolButton#liveButton { font-weight: 700; padding: 6px 14px; }
-QToolButton#liveButton:checked { background: rgba(123, 216, 138, 30); border-color: #7bd88a; color: #7bd88a; }
+// Follow-latest toggle keeps the emphasis sizing; the checked state uses
+// the default accent (no green LIVE dot).
+QToolButton#followLatestButton { font-weight: 700; padding: 6px 14px; }
 QCheckBox { color: #e9edf3; background: transparent; spacing: 7px; }
 QCheckBox:disabled { color: #828b9b; }
 QCheckBox:focus { color: #46c8f0; }
@@ -272,6 +275,9 @@ QTabBar::tab { background: #10131a; color: #8b94a5; border: 1px solid #262c36; b
 QTabBar::tab:selected { background: #1a2029; color: #46c8f0; border-color: #39424f; }
 QTabBar::tab:hover:!selected { color: #e9edf3; }
 QTabBar::tab:focus { border: 1px solid #46c8f0; }
+QTabBar#productTabBar { background: #0d0f13; }
+QTabBar#productTabBar::tab { padding: 7px 12px; }
+QTabBar#productTabBar::tab:disabled { color: #828b9b; background: #10131a; }
 QListWidget#warningList { background: #0d0f13; color: #e9edf3; border: 1px solid #39424f; border-radius: 6px; outline: none; font-size: 11px; }
 QListWidget#warningList::item { padding: 6px 8px; border-bottom: 1px solid #1c212a; }
 QListWidget#warningList::item:hover { background: rgba(70, 200, 240, 18); }

@@ -5,6 +5,8 @@
 #include <QVector>
 #include <QWidget>
 
+#include <optional>
+
 namespace cappedweather {
 
 // Filmstrip timeline: one block per loaded volume under the transport
@@ -26,6 +28,15 @@ public:
 
     void setFrames(QVector<Frame> frames, int currentIndex);
     void setEvents(QVector<QDateTime> eventTimes);
+
+    // Spec hooks (pure, hermetic-testable): the empty state carries no LIVE
+    // wording, HH:mm labels draw on first/current/last only, and warning
+    // onsets inside [first, last] map to tick x positions.
+    static QString emptyStateText();
+    static bool showsTimeLabel(int index, int currentIndex, int frameCount);
+    static std::optional<double> eventTickX(const QDateTime& when, const QDateTime& first,
+                                            const QDateTime& last, double width,
+                                            double gap = 3.0);
 
 signals:
     void frameSelected(int index);

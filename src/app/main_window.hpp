@@ -38,10 +38,12 @@ class QProgressBar;
 class QResizeEvent;
 class QLabel;
 class QGridLayout;
+class QVBoxLayout;
 class QListWidget;
 class QListWidgetItem;
 class QSlider;
 class QSpinBox;
+class QTabBar;
 class QTabWidget;
 class QTableWidget;
 class QTimer;
@@ -107,6 +109,15 @@ public:
     // mapping image pixels to lon/lat so GIS tools load the grab in place.
     static QString frameWorldFile(double north, double south, double east, double west,
                                   int imageWidth, int imageHeight, QString* error);
+    // SCAN age block: "SCAN 14:22:10Z · VCP · 3 min old · 1080 rays".
+    // Honest UTC scan time plus whole-minute age and ray count; the VCP
+    // token is static (the decoder carries no VCP number). Public and
+    // static so the label format is unit-testable. rayCount < 0 renders
+    // as an em-dash (spilled volume whose disk copy is unreadable).
+    static QString scanAgeLabelText(const QDateTime& scanTimeUtc, int rayCount, qint64 ageSeconds);
+    // Whole-minute age at which the SCAN block turns amber. Matches the
+    // radar-health Online bound (data older than 5 min is stale, not live).
+    static constexpr qint64 kScanStaleSeconds = 300;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -150,6 +161,9 @@ private:
     void rebuildTiltCombo();
     void updateProductAvailability();
     void updatePlaybackControls();
+    // Re-renders the SCAN age block from the showFrame() snapshot so the
+    // displayed age counts up between frames. No-op without a shown scan.
+    void refreshScanAgeLabel();
     void ensureHistoryLoaded(bool playWhenReady = false);
     void stopAnimation();
     void acceptDecodedChunk(const QString& radarId, const QString& volumeId,
@@ -210,6 +224,10 @@ private:
     void refreshScanDialog();
     void populateScanDialog();
     void togglePanelMaximized();
+    // Moves the single product tab bar directly above the active panel cell
+    // (1x1 / maximized: top of the column; multi-panel: grid tab row over
+    // the active column/row). Tab edits still drive the active panel only.
+    void repositionProductTabs();
     void updateOfflineBanner();
     void applyDataSaverPreset();
     void setupMenus();
@@ -268,6 +286,14 @@ private:
     RadarMapCanvas* map_ = nullptr;
     QVector<RadarMapCanvas*> maps_;
     QGridLayout* mapGrid_ = nullptr;
+    // Focus-following product tabs: the single tab bar is reparented between
+    // the top column (1x1 / maximized) and a tab row directly above the
+    // active panel cell (1x2 / 2x1 / 2x2). Members pin the layouts so
+    // repositionProductTabs() can move the bar without rebuilding the UI.
+    QWidget* mapHost_ = nullptr;
+    QVBoxLayout* mapColumn_ = nullptr;
+    QWidget* mapGridHost_ = nullptr;
+    int panelLayoutIndex_ = 0;
     QDockWidget* controlDock_ = nullptr;
     QDockWidget* playbackDock_ = nullptr;
     QTabWidget* sidebarTabs_ = nullptr;
@@ -276,6 +302,7 @@ private:
     // warning inbox. Indexes double as canvas warning indexes.
     QVector<WeatherWarning> latestWarnings_;
     QComboBox* productCombo_ = nullptr;
+    QTabBar* productTabBar_ = nullptr;
     QVector<QToolButton*> productChips_;
     // Spells out the active product; the chips themselves only carry the short
     // operational abbreviation so a two-column grid fits a narrow dock.
@@ -307,6 +334,13 @@ private:
     QLabel* statusLabel_ = nullptr;
     QLabel* stationSummaryLabel_ = nullptr;
     QLabel* frameLabel_ = nullptr;
+    // SCAN age block cache: showFrame() snapshots the shown volume's scan
+    // time, ray count, and id; refreshScanAgeLabel() re-renders the
+    // whole-minute age from the snapshot so the 30 s health tick counts
+    // without faulting spilled volumes back from disk.
+    QDateTime scanAgeTime_;
+    int scanAgeRays_ = -1;
+    QString scanAgeVolumeId_;
     QLabel* overlayStatusLabel_ = nullptr;
     QLabel* unifiedStatusLabel_ = nullptr;
     QString unifiedStatusFullText_;
@@ -328,7 +362,9 @@ private:
     QToolButton* previousButton_ = nullptr;
     QToolButton* playButton_ = nullptr;
     QToolButton* nextButton_ = nullptr;
-    QToolButton* liveButton_ = nullptr;
+    // Follow-latest toggle (session->followLatest UI; the session logic is
+    // unchanged, only the LIVE text/dot is gone).
+    QToolButton* followLatestButton_ = nullptr;
     QToolButton* favoriteButton_ = nullptr;
     QToolButton* retryButton_ = nullptr;
     QToolButton* cancelButton_ = nullptr;
@@ -438,7 +474,7 @@ private:
     QTimer* overlayRefreshTimer_ = nullptr;
     QTimer* animationTimer_ = nullptr;
     QString selectedRadarId_;
-    QString radarStatus_ = QStringLiteral("Pick a station → LIVE → timeline → overlays");
+    QString radarStatus_ = QStringLiteral("Pick a station → latest scan → timeline → overlays");
     QString overlayStatus_ = QStringLiteral("Waiting for NWS/SPC overlays");
     QString spcStatus_;
     QString lightningStatus_ = QStringLiteral("Waiting for GOES GLM");

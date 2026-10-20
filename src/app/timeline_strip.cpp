@@ -30,6 +30,24 @@ void TimelineStrip::setEvents(QVector<QDateTime> eventTimes) {
 
 QSize TimelineStrip::sizeHint() const { return {200, 44}; }
 
+QString TimelineStrip::emptyStateText() {
+    return QStringLiteral("No volumes yet \u2014 press Play");
+}
+
+bool TimelineStrip::showsTimeLabel(int index, int currentIndex, int frameCount) {
+    if (frameCount <= 0 || index < 0 || index >= frameCount) return false;
+    return index == currentIndex || index == 0 || index + 1 == frameCount;
+}
+
+std::optional<double> TimelineStrip::eventTickX(const QDateTime& when, const QDateTime& first,
+                                                const QDateTime& last, double width, double gap) {
+    if (!when.isValid() || !first.isValid() || !last.isValid()) return std::nullopt;
+    if (when < first || when > last) return std::nullopt;
+    const auto span = static_cast<double>(first.secsTo(last));
+    if (!(span > 0.0) || !(width > 2.0 * gap)) return std::nullopt;
+    return gap + (static_cast<double>(first.secsTo(when)) / span) * (width - 2.0 * gap);
+}
+
 int TimelineStrip::indexAt(double x) const {
     if (frames_.isEmpty() || width() <= 0) return -1;
     const auto index = static_cast<int>(x / width() * frames_.size());
@@ -51,7 +69,7 @@ void TimelineStrip::paintEvent(QPaintEvent*) {
     painter.drawRoundedRect(rect(), 4, 4);
     if (frames_.isEmpty()) {
         painter.setPen(QColor(125, 131, 140));
-        painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("No volumes yet — press Play or keep LIVE on"));
+        painter.drawText(rect(), Qt::AlignCenter, emptyStateText());
         return;
     }
     const double gap = 3.0;
@@ -78,7 +96,7 @@ void TimelineStrip::paintEvent(QPaintEvent*) {
         }
         if (frame.time.isValid()) {
             const auto label = frame.time.toLocalTime().toString(QStringLiteral("HH:mm"));
-            if (i == current_ || i == 0 || i + 1 == frames_.size()) {
+            if (showsTimeLabel(i, current_, frames_.size())) {
                 painter.setPen(QColor(200, 208, 214));
                 painter.drawText(QRectF(block.left() - 20, area.bottom() - 2, block.width() + 40, 12),
                                  Qt::AlignHCenter | Qt::AlignTop, label);
@@ -87,12 +105,11 @@ void TimelineStrip::paintEvent(QPaintEvent*) {
     }
     // Warning-onset ticks across the loaded time range.
     if (timeRange && !events_.isEmpty()) {
-        const auto span = static_cast<double>(first.secsTo(last));
         painter.setPen(QPen(QColor(255, 107, 94), 2.0));
         for (const auto& when : events_) {
-            if (when < first || when > last) continue;
-            const auto x = gap + (static_cast<double>(first.secsTo(when)) / span) * (width() - 2 * gap);
-            painter.drawLine(QPointF(x, 2.0), QPointF(x, 9.0));
+            const auto x = eventTickX(when, first, last, width(), gap);
+            if (!x.has_value()) continue;
+            painter.drawLine(QPointF(*x, 2.0), QPointF(*x, 9.0));
         }
     }
 }

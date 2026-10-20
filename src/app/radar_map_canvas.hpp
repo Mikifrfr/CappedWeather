@@ -35,6 +35,7 @@
 #include <QImage>
 #include <QPainterPath>
 #include <QPointF>
+#include <QRectF>
 #include <QUrl>
 #include <QWidget>
 
@@ -389,6 +390,15 @@ public:
     [[nodiscard]] bool hasScrollablePinnedCard() const;
     void scrollPinnedCard(int pixels);
     int stormReportCount() const;
+    // Legend spec hooks (pure, hermetic-testable): the 258 px stack is
+    // skipped on narrow panels, the 5 color-table ticks never overlap, and
+    // report symbols key only kinds that are actually drawn (layer visible,
+    // kind enabled, and at least one report of that kind loaded).
+    static bool legendVisibleForWidth(int width);
+    static std::array<QRectF, 5> legendTickRects(const QRectF& gradientRect);
+    static std::array<bool, 3> legendReportKeys(bool layerVisible,
+                                                const std::array<bool, 3>& kindsVisible,
+                                                const std::array<bool, 3>& kindsPresent);
     int placefileElementCount() const;
     bool placefilesVisible() const { return placefilesVisible_; }
     int lightningCellCount() const;
