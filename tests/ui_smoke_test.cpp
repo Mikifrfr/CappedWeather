@@ -2420,9 +2420,33 @@ static bool testScanAgeBlock(MainWindow* window, QString* error) {
                      .arg(fresh);
         return false;
     }
+    // A volume whose RVOL constant block carried a pattern prints it. The number
+    // is the decoder's, never a guess from the file name or the tilt ladder.
+    const auto withVcp = MainWindow::scanAgeLabelText(scanTime, 1080, 150, 212);
+    if (withVcp != QStringLiteral("SCAN 14:22:10Z · VCP 212 · 2 min old · 1080 rays")) {
+        *error = QStringLiteral("SCAN label with VCP wrong, got '%1'").arg(withVcp);
+        return false;
+    }
     const auto stale = MainWindow::scanAgeLabelText(scanTime, 720, 600);
     if (stale != QStringLiteral("SCAN 14:22:10Z · 10 min old · 720 rays")) {
         *error = QStringLiteral("SCAN stale label wrong, got '%1'").arg(stale);
+        return false;
+    }
+    // An explicit no-pattern value must render byte-for-byte the 3-arg label:
+    // 0 is what the decoder reports for a volume with no vouchable pattern (or
+    // chunks that disagree), and a negative can never become a token either.
+    // Pinned separately from the default-argument guard above so a future
+    // default change cannot quietly reintroduce the bare token.
+    const auto explicitNone = MainWindow::scanAgeLabelText(scanTime, 720, 600, 0);
+    if (explicitNone != stale) {
+        *error = QStringLiteral("SCAN label with pattern 0 must match the no-token form, got '%1'")
+                     .arg(explicitNone);
+        return false;
+    }
+    const auto negativePattern = MainWindow::scanAgeLabelText(scanTime, 720, 600, -1);
+    if (negativePattern != stale) {
+        *error = QStringLiteral("SCAN label with pattern -1 must match the no-token form, got '%1'")
+                     .arg(negativePattern);
         return false;
     }
     const auto freshBorn = MainWindow::scanAgeLabelText(scanTime, 10, -5);
