@@ -44,6 +44,11 @@ void mergeDecoded(DecodedChunk& destination, DecodedChunk source) {
     destination.messageCount += source.messageCount;
     destination.rejectedMessages += source.rejectedMessages;
     destination.rejectedBlocks += source.rejectedBlocks;
+    // A volume is decoded record by record (KPAH 2021 is 94 bzip records), so
+    // the pattern has to survive the merge. It is kept only while every record
+    // agrees: disagreement means the volume spans a pattern change, and then
+    // no single number describes the volume.
+    mergeVolumeCoveragePattern(destination, source);
     destination.rays.insert(destination.rays.end(),
                             std::make_move_iterator(source.rays.begin()),
                             std::make_move_iterator(source.rays.end()));

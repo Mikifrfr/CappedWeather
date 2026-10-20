@@ -11,7 +11,12 @@ namespace cappedweather {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x43574456; // "CWDV"
-constexpr std::uint16_t kVersion = 1;
+// v2 appends the volume-level Volume Coverage Pattern after the ray table.
+// v1 files still load: their pattern reads as 0 (not carried), which is the
+// same value the label already renders as "no token". A v2 file read by an
+// older build fails clean instead of being misread.
+constexpr std::uint16_t kVersion = 2;
+constexpr std::uint16_t kOldestVersion = 1;
 
 template <typename T>
 void toLeBytes(const T value, std::byte* out) {
@@ -113,6 +118,7 @@ bool spillVolume(const DecodedChunk& chunk, const std::string& path) {
             if (!writeLe(file, ray.offsetByProduct[product])) return false;
         }
     }
+    if (!writeLe(file, chunk.volumeCoveragePattern)) return false;
     file.close();
     return static_cast<bool>(file);
 }
@@ -130,7 +136,7 @@ std::shared_ptr<DecodedChunk> loadSpilledVolume(const std::string& path) {
     std::uint32_t magic = 0;
     std::uint16_t version = 0, productCount = 0;
     if (!readLe(cursor, end, magic) || magic != kMagic) return nullptr;
-    if (!readLe(cursor, end, version) || version != kVersion) return nullptr;
+    if (!readLe(cursor, end, version) || version < kOldestVersion || version > kVersion) return nullptr;
     if (!readLe(cursor, end, productCount) || productCount != kProductCount) return nullptr;
     auto chunk = std::make_shared<DecodedChunk>();
     std::uint64_t radarIdSize = 0;
@@ -176,6 +182,7 @@ std::shared_ptr<DecodedChunk> loadSpilledVolume(const std::string& path) {
         }
         chunk->rays.push_back(std::move(ray));
     }
+    if (version >= 2 && !readLe(cursor, end, chunk->volumeCoveragePattern)) return nullptr;
     if (cursor != end) return nullptr; // trailing garbage: not our file
     return chunk;
 }

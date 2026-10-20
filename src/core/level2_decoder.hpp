@@ -44,10 +44,23 @@ struct DecodedChunk {
     std::size_t messageCount = 0;
     std::size_t rejectedMessages = 0;
     std::size_t rejectedBlocks = 0;
+    // Volume Coverage Pattern from the RVOL volume constant block (ICD 2620001
+    // Table XVII-E, block byte 40, big-endian u16). 0 means the volume carried
+    // no pattern this decoder can vouch for; volumeCoveragePatternConflicting
+    // records the case where radials of one volume disagree, so a single
+    // number is never presented as the whole volume's pattern.
+    std::uint16_t volumeCoveragePattern = 0;
+    bool volumeCoveragePatternConflicting = false;
 };
 
 std::optional<double> nativeValue(ProductKind kind, std::uint8_t encoded);
 std::optional<double> nativeValue(std::uint16_t encoded, float scale, float offset);
 DecodedChunk decodeMessage31Chunk(std::span<const std::byte> bytes, std::string radarId);
+// Folds one decoded piece of a volume into the volume-level accumulator. A
+// volume decoded record by record (or chunk by chunk on the live feed) keeps
+// its pattern only while every piece agrees: two different patterns mean the
+// volume spans a change, so the accumulator ends with 0 and the conflicting
+// flag set instead of a number that describes half the volume.
+void mergeVolumeCoveragePattern(DecodedChunk& destination, const DecodedChunk& source);
 
 } // namespace cappedweather
