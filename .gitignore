@@ -27,3 +27,5 @@ coverage/
 __pycache__/
 *.py[cod]
 /aqtinstall.log
+# Task worktrees live here; they are separate checkouts, never repo content.
+/.worktrees/
