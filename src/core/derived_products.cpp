@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -255,6 +256,185 @@ std::uint16_t encodeReflectivityDbz(const double dbz) {
     return static_cast<std::uint16_t>(std::clamp<long long>(encoded, 2, 65535));
 }
 
+// ---------------------------------------------------------------------------
+// Z-R accumulation internals
+// ---------------------------------------------------------------------------
+
+struct RainfallGateMap {
+    long long sourceGate = -1;
+    double groundRangeMeters = 0.0;
+    double beamHeightMeters = 0.0;  // MSL at the source gate centre
+};
+
+// Reference gate -> source gate by ground range, with the beam height the
+// sample was actually measured at. Same geometry as buildGateLookup, plus the
+// range/height provenance the accumulation needs.
+std::vector<RainfallGateMap> buildRainfallGateMap(const std::int16_t referenceFirstGate,
+                                                  const std::uint16_t referenceSpacing,
+                                                  const std::size_t referenceGateCount,
+                                                  const double referenceElevationDegrees,
+                                                  const std::int16_t sourceFirstGate,
+                                                  const std::uint16_t sourceSpacing,
+                                                  const std::size_t sourceGateCount,
+                                                  const double sourceElevationDegrees,
+                                                  const double radarElevationMeters) {
+    std::vector<RainfallGateMap> map(referenceGateCount);
+    if (referenceSpacing == 0 || sourceSpacing == 0) return map;
+    for (std::size_t gate = 0; gate < referenceGateCount; ++gate) {
+        const auto referenceSlant = gateCenterSlantRange(referenceFirstGate, referenceSpacing, gate);
+        if (referenceSlant <= 0.0) continue;
+        const auto groundRange =
+            standardBeamGeometry(referenceSlant, referenceElevationDegrees).surfaceDistanceMeters;
+        if (!std::isfinite(groundRange) || groundRange <= 0.0) continue;
+        const auto sourceSlant = slantRangeForSurfaceDistance(groundRange, sourceElevationDegrees);
+        if (!std::isfinite(sourceSlant)) continue;
+        const auto position = (sourceSlant - static_cast<double>(sourceFirstGate)) /
+                              static_cast<double>(sourceSpacing);
+        if (!std::isfinite(position)) continue;
+        const auto sourceGate = static_cast<long long>(std::llround(position));
+        if (sourceGate < 0 || static_cast<std::size_t>(sourceGate) >= sourceGateCount) continue;
+        // Beam height at the gate that is actually read, not at the ideal
+        // range: rounding to the nearest source gate moves it a little.
+        const auto actualSlant =
+            gateCenterSlantRange(sourceFirstGate, sourceSpacing,
+                                 static_cast<std::size_t>(sourceGate));
+        const auto height = standardBeamGeometry(actualSlant, sourceElevationDegrees)
+                                .heightAboveRadarMeters +
+                            radarElevationMeters;
+        if (!std::isfinite(height)) continue;
+        map[gate] = {sourceGate, groundRange, height};
+    }
+    return map;
+}
+
+struct ColumnProfile {
+    // Echo top (>= 18 dBZ) in m MSL; NaN where the column carries no echo.
+    std::vector<double> echoTopMeters;
+    // Highest beam that sampled this gate, echo or not: the ceiling of what the
+    // volume could possibly know. NaN where no tilt covered the gate.
+    std::vector<double> observedCeilingMeters;
+};
+
+// Per-volume column profiles for one lowest-tilt ray. Cached per ray because
+// the accumulation asks for the same ray from several reference rays when the
+// azimuth grids differ, and the lookup tables are geometry-keyed like the
+// product derive.
+class ColumnProfiles {
+public:
+    ColumnProfiles(const DecodedChunk& chunk, std::vector<Tilt> tilts,
+                   const double radarElevationMeters)
+        : chunk_(chunk), tilts_(std::move(tilts)),
+          radarElevationMeters_(radarElevationMeters) {}
+
+    const ColumnProfile& forRay(const std::size_t rayIndex) {
+        const auto found = cache_.find(rayIndex);
+        if (found != cache_.end()) return found->second;
+        return cache_.emplace(rayIndex, compute(rayIndex)).first->second;
+    }
+
+private:
+    ColumnProfile compute(const std::size_t rayIndex) {
+        const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+        const auto& ray = chunk_.rays.at(rayIndex);
+        const auto& encoded = ray.fields.at(reflectivityIndex);
+        ColumnProfile profile;
+        profile.echoTopMeters.assign(encoded.size(), std::numeric_limits<double>::quiet_NaN());
+        profile.observedCeilingMeters.assign(encoded.size(),
+                                             std::numeric_limits<double>::quiet_NaN());
+        const auto firstGate = ray.firstGateByProduct.at(reflectivityIndex);
+        const auto spacing = ray.gateSpacingByProduct.at(reflectivityIndex);
+        if (spacing == 0 || encoded.empty()) return profile;
+
+        std::vector<ColumnSource> sources;
+        sources.reserve(tilts_.size());
+        for (std::size_t tiltOrdinal = 0; tiltOrdinal < tilts_.size(); ++tiltOrdinal) {
+            const auto& tilt = tilts_[tiltOrdinal];
+            const auto sourceRayIndex = nearestRay(chunk_, tilt, ray.azimuthDegrees);
+            if (!sourceRayIndex) continue;
+            const auto& sourceRay = chunk_.rays.at(*sourceRayIndex);
+            const auto sourceFirstGate = sourceRay.firstGateByProduct.at(reflectivityIndex);
+            const auto sourceSpacing = sourceRay.gateSpacingByProduct.at(reflectivityIndex);
+            if (sourceSpacing == 0) continue;
+            const LookupKey key{
+                firstGate, spacing, encoded.size(),
+                static_cast<int>(std::llround(ray.elevationDegrees * 1000.0)),
+                sourceFirstGate, sourceSpacing,
+                static_cast<int>(std::llround(tilt.meanElevationDegrees * 1000.0)),
+            };
+            auto [lookup, inserted] = lookupCache_.try_emplace(key);
+            if (inserted) {
+                lookup->second = buildGateLookup(firstGate, spacing, encoded.size(),
+                                                 ray.elevationDegrees, sourceFirstGate,
+                                                 sourceSpacing, tilt.meanElevationDegrees,
+                                                 radarElevationMeters_);
+            }
+            sources.push_back({&sourceRay, &lookup->second, tiltOrdinal});
+        }
+        if (sources.empty()) return profile;
+
+        std::vector<VerticalSample> samples;
+        samples.reserve(sources.size());
+        for (std::size_t gate = 0; gate < encoded.size(); ++gate) {
+            samples.clear();
+            double ceiling = std::numeric_limits<double>::quiet_NaN();
+            for (const auto& source : sources) {
+                const auto& sample = source.lookup->at(gate);
+                if (sample.sourceGate < 0) continue;
+                // A tilt with no echo still observed the gate: the ceiling is
+                // where observation stops, not where echo stops.
+                if (!std::isfinite(ceiling) || sample.heightMslMeters > ceiling)
+                    ceiling = sample.heightMslMeters;
+                const auto& sourceEncoded = source.ray->fields.at(reflectivityIndex);
+                if (static_cast<std::size_t>(sample.sourceGate) >= sourceEncoded.size()) continue;
+                if (sourceEncoded[static_cast<std::size_t>(sample.sourceGate)] <= 1) continue;
+                const auto value = nativeValue(sourceEncoded[static_cast<std::size_t>(sample.sourceGate)],
+                                               source.ray->scaleByProduct.at(reflectivityIndex),
+                                               source.ray->offsetByProduct.at(reflectivityIndex));
+                if (!value || !std::isfinite(*value)) continue;
+                samples.push_back({sample.heightMslMeters, *value, source.tiltOrdinal});
+            }
+            profile.observedCeilingMeters[gate] = ceiling;
+            if (samples.empty()) continue;
+            if (const auto top = echoTopMeters(samples)) profile.echoTopMeters[gate] = top->first;
+        }
+        return profile;
+    }
+
+    const DecodedChunk& chunk_;
+    std::vector<Tilt> tilts_;
+    double radarElevationMeters_ = 0.0;
+    std::map<LookupKey, std::vector<GateLookup>> lookupCache_;
+    std::map<std::size_t, ColumnProfile> cache_;
+};
+
+// Cache key for the reference->source gate maps. The source gate count is part
+// of the key: a truncated volume must not reuse a map built for a full one.
+struct RainfallMapKey {
+    std::int16_t referenceFirstGate = 0;
+    std::uint16_t referenceSpacing = 0;
+    std::size_t referenceGateCount = 0;
+    int referenceElevationMilli = 0;
+    std::int16_t sourceFirstGate = 0;
+    std::uint16_t sourceSpacing = 0;
+    std::size_t sourceGateCount = 0;
+    int sourceElevationMilli = 0;
+
+    bool operator<(const RainfallMapKey& other) const {
+        return std::make_tuple(referenceFirstGate, referenceSpacing, referenceGateCount,
+                               referenceElevationMilli, sourceFirstGate, sourceSpacing,
+                               sourceGateCount, sourceElevationMilli) <
+               std::make_tuple(other.referenceFirstGate, other.referenceSpacing,
+                               other.referenceGateCount, other.referenceElevationMilli,
+                               other.sourceFirstGate, other.sourceSpacing,
+                               other.sourceGateCount, other.sourceElevationMilli);
+    }
+};
+
+constexpr double kRainfallPoorCoverageFraction = 0.5;
+constexpr double kRainfallPoorContaminationFraction = 0.05;
+constexpr int kRainfallMinimumSamplesForGood = 4;
+constexpr double kRainfallDepthStorageCapTenths = 65535.0;
+
 } // namespace
 
 // Pure VILD helper (unit-test hook): VIL [kg/m^2] / thickness [m] -> [kg/m^3].
@@ -430,6 +610,330 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
         ++summary.outputRayCount;
     }
     return summary;
+}
+
+std::optional<double> zrRateMillimetersPerHour(const double reflectivityDbz, const double zrA,
+                                               const double zrB) {
+    if (!std::isfinite(reflectivityDbz) || !std::isfinite(zrA) || !std::isfinite(zrB))
+        return std::nullopt;
+    if (zrA <= 0.0 || zrB <= 0.0) return std::nullopt;
+    const auto linearReflectivity = std::pow(10.0, reflectivityDbz / 10.0);
+    if (!std::isfinite(linearReflectivity) || linearReflectivity < 0.0) return std::nullopt;
+    const auto rate = std::pow(linearReflectivity / zrA, 1.0 / zrB);
+    if (!std::isfinite(rate) || rate < 0.0) return std::nullopt;
+    return rate;
+}
+
+RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
+                                const double radarElevationMeters,
+                                const double endSecondsSinceEpoch,
+                                const RainfallConfig config) {
+    RainfallGrid grid;
+    RainfallSummary& summary = grid.summary;
+
+    // Fail closed on a relation or cap that cannot produce an honest number.
+    if (!(config.zrA > 0.0) || !(config.zrB > 0.0) ||
+        !(config.maximumIntervalSeconds > 0.0) || !std::isfinite(radarElevationMeters))
+        return grid;
+
+    // Order by volume time and drop unusable or duplicate entries. Sorting here
+    // means a caller that hands in a reversed history still gets an honest
+    // integration instead of silently negative intervals.
+    std::vector<RainfallSample> usable;
+    usable.reserve(samples.size());
+    for (const auto& sample : samples) {
+        if (!sample.chunk || !std::isfinite(sample.secondsSinceEpoch)) {
+            ++summary.rejectedSampleCount;
+            continue;
+        }
+        usable.push_back(sample);
+    }
+    std::stable_sort(usable.begin(), usable.end(),
+                     [](const RainfallSample& left, const RainfallSample& right) {
+                         return left.secondsSinceEpoch < right.secondsSinceEpoch;
+                     });
+    std::vector<RainfallSample> ordered;
+    ordered.reserve(usable.size());
+    for (const auto& sample : usable) {
+        if (!ordered.empty() &&
+            !(sample.secondsSinceEpoch - ordered.back().secondsSinceEpoch > 1e-6)) {
+            ++summary.rejectedSampleCount;  // duplicate volume time
+            continue;
+        }
+        ordered.push_back(sample);
+    }
+    summary.sampleCount = static_cast<int>(ordered.size());
+    if (!ordered.empty()) grid.radarId = ordered.back().chunk->radarId;
+    if (ordered.size() < 2) return grid;  // no interval: Invalid, nothing invented
+
+    summary.windowSeconds =
+        ordered.back().secondsSinceEpoch - ordered.front().secondsSinceEpoch;
+    if (!(summary.windowSeconds > 0.0)) return grid;
+
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto correlationIndex = static_cast<std::size_t>(ProductKind::CorrelationCoefficient);
+    const auto& newest = ordered.back();
+    const auto referenceTilts = reflectivityTilts(*newest.chunk);
+    if (referenceTilts.empty()) return grid;
+    const auto& referenceTilt = referenceTilts.front();
+    grid.referenceElevationDegrees = referenceTilt.meanElevationDegrees;
+
+    std::vector<std::vector<double>> depths;
+    std::vector<std::vector<std::uint8_t>> incomplete;
+    depths.reserve(referenceTilt.rayIndexes.size());
+    incomplete.reserve(referenceTilt.rayIndexes.size());
+    for (const auto rayIndex : referenceTilt.rayIndexes) {
+        const auto& ray = newest.chunk->rays.at(rayIndex);
+        const auto& field = ray.fields.at(reflectivityIndex);
+        if (field.empty()) continue;
+        if (grid.rays.empty()) {
+            grid.firstGateMeters = ray.firstGateByProduct.at(reflectivityIndex);
+            grid.gateSpacingMeters = ray.gateSpacingByProduct.at(reflectivityIndex);
+        }
+        RainfallRay out;
+        out.referenceRayIndex = static_cast<int>(rayIndex);
+        out.azimuthDegrees = ray.azimuthDegrees;
+        out.gates.assign(field.size(), RainfallGate{});
+        grid.rays.push_back(std::move(out));
+        depths.emplace_back(field.size(), 0.0);
+        incomplete.emplace_back(field.size(), 0);
+    }
+    if (grid.rays.empty()) return grid;
+
+    // Geometry-keyed mapping cache: the same pair of range tables repeats for
+    // every ray and every volume of one product.
+    std::map<RainfallMapKey, std::vector<RainfallGateMap>> gateMapCache;
+
+    for (std::size_t sampleIndex = 0; sampleIndex < ordered.size(); ++sampleIndex) {
+        double intervalSeconds = 0.0;
+        bool gapClamped = false;
+        if (sampleIndex + 1 < ordered.size()) {
+            intervalSeconds =
+                ordered[sampleIndex + 1].secondsSinceEpoch - ordered[sampleIndex].secondsSinceEpoch;
+        } else if (std::isfinite(endSecondsSinceEpoch)) {
+            intervalSeconds = endSecondsSinceEpoch - ordered[sampleIndex].secondsSinceEpoch;
+        }
+        if (!(intervalSeconds > 0.0)) continue;
+        if (intervalSeconds > config.maximumIntervalSeconds) {
+            intervalSeconds = config.maximumIntervalSeconds;
+            gapClamped = true;
+            ++summary.gapClampedIntervalCount;
+        }
+        if (!(intervalSeconds > 0.0)) continue;
+        ++summary.intervalCount;
+
+        const auto tilts = reflectivityTilts(*ordered[sampleIndex].chunk);
+        if (tilts.empty()) {
+            // No reflectivity at all for this interval: every gate loses a
+            // measurement and the covered time is not credited.
+            for (auto& rayFlags : incomplete)
+                std::fill(rayFlags.begin(), rayFlags.end(), static_cast<std::uint8_t>(1));
+            continue;
+        }
+        summary.coveredSeconds += intervalSeconds;
+
+        ColumnProfiles profiles(*ordered[sampleIndex].chunk, tilts, radarElevationMeters);
+        const auto& lowestTilt = tilts.front();
+        const double tenthsPerInterval = intervalSeconds / 360.0;  // rate[mm/h] -> 0.1 mm
+
+        for (std::size_t rayIndex = 0; rayIndex < grid.rays.size(); ++rayIndex) {
+            auto& outRay = grid.rays[rayIndex];
+            const auto& referenceRay =
+                newest.chunk->rays.at(static_cast<std::size_t>(outRay.referenceRayIndex));
+            const auto referenceFirstGate = referenceRay.firstGateByProduct.at(reflectivityIndex);
+            const auto referenceSpacing = referenceRay.gateSpacingByProduct.at(reflectivityIndex);
+            if (referenceSpacing == 0) continue;
+
+            const auto sourceRayIndex =
+                nearestRay(*ordered[sampleIndex].chunk, lowestTilt, referenceRay.azimuthDegrees);
+            if (!sourceRayIndex) {
+                std::fill(incomplete[rayIndex].begin(), incomplete[rayIndex].end(),
+                          static_cast<std::uint8_t>(1));
+                continue;
+            }
+            const auto& sourceRay = ordered[sampleIndex].chunk->rays.at(*sourceRayIndex);
+            const auto sourceFirstGate = sourceRay.firstGateByProduct.at(reflectivityIndex);
+            const auto sourceSpacing = sourceRay.gateSpacingByProduct.at(reflectivityIndex);
+            if (sourceSpacing == 0) {
+                std::fill(incomplete[rayIndex].begin(), incomplete[rayIndex].end(),
+                          static_cast<std::uint8_t>(1));
+                continue;
+            }
+            const auto& sourceEncoded = sourceRay.fields.at(reflectivityIndex);
+            const auto& sourceCorrelation = sourceRay.fields.at(correlationIndex);
+            // Size the map from this ray's own gates: partial rays in one tilt
+            // need not match the first ray's count.
+            const auto referenceGateCount = outRay.gates.size();
+
+            const RainfallMapKey key{
+                referenceFirstGate, referenceSpacing, referenceGateCount,
+                static_cast<int>(std::llround(referenceRay.elevationDegrees * 1000.0)),
+                sourceFirstGate, sourceSpacing, sourceEncoded.size(),
+                static_cast<int>(std::llround(sourceRay.elevationDegrees * 1000.0)),
+            };
+            auto [mapEntry, inserted] = gateMapCache.try_emplace(key);
+            if (inserted) {
+                mapEntry->second = buildRainfallGateMap(
+                    referenceFirstGate, referenceSpacing, referenceGateCount,
+                    referenceRay.elevationDegrees, sourceFirstGate, sourceSpacing,
+                    sourceEncoded.size(), sourceRay.elevationDegrees, radarElevationMeters);
+            }
+            const auto& gateMap = mapEntry->second;
+            const auto& profile = profiles.forRay(*sourceRayIndex);
+
+            for (std::size_t gate = 0; gate < outRay.gates.size(); ++gate) {
+                auto& cell = outRay.gates[gate];
+                const auto& mapped = gateMap[gate];
+                if (mapped.sourceGate < 0) {
+                    incomplete[rayIndex][gate] = 1;
+                    continue;
+                }
+                if (mapped.groundRangeMeters > config.maximumRangeMeters) {
+                    cell.flags |= RainfallGateRangeLimited;
+                    continue;
+                }
+                if (mapped.beamHeightMeters > config.maximumBeamHeightMeters) {
+                    // Too high to be rain: refuse the depth, keep the fact.
+                    cell.flags |= RainfallGateBeamHigh;
+                    continue;
+                }
+                const auto sourceGate = static_cast<std::size_t>(mapped.sourceGate);
+                if (sourceGate >= sourceEncoded.size()) {
+                    incomplete[rayIndex][gate] = 1;
+                    continue;
+                }
+                const auto raw = sourceEncoded[sourceGate];
+                // Codes 0 and 1 are "below threshold" and "missing" (or the
+                // reverse: ODIM packs 0 = missing, 1 = below threshold, NEXRAD
+                // the other way). A DecodedChunk does not say which, so the only
+                // honest reading is "no rain measured here": both contribute
+                // zero depth, and neither is claimed as data. Structural gaps
+                // (absent ray, gate beyond the ray) still raise Incomplete;
+                // see docs/rainfall-validation.md.
+                if (raw <= 1) continue;
+                const auto value = nativeValue(raw, sourceRay.scaleByProduct.at(reflectivityIndex),
+                                               sourceRay.offsetByProduct.at(reflectivityIndex));
+                if (!value || !std::isfinite(*value)) {
+                    incomplete[rayIndex][gate] = 1;
+                    continue;
+                }
+
+                // Dual-pol veto first: CC sees non-meteorological returns that a
+                // single-pol threshold cannot.
+                if (sourceGate < sourceCorrelation.size()) {
+                    const auto ccRaw = sourceCorrelation[sourceGate];
+                    if (ccRaw > 1) {
+                        const auto cc = nativeValue(ccRaw,
+                                                    sourceRay.scaleByProduct.at(correlationIndex),
+                                                    sourceRay.offsetByProduct.at(correlationIndex));
+                        if (cc && std::isfinite(*cc) &&
+                            *cc < config.minimumCorrelationCoefficient) {
+                            cell.flags |= RainfallGateNonMeteorological;
+                            continue;
+                        }
+                    }
+                }
+
+                double reflectivity = *value;
+                if (reflectivity >= config.clutterReflectivityDbz) {
+                    // Vertical check: strong echo with a column that stops below
+                    // the melt-level floor is clutter or anomalous propagation.
+                    // If the volume never looked above that height at this range,
+                    // say so instead of pretending the check passed.
+                    const auto ceiling = profile.observedCeilingMeters[sourceGate];
+                    const auto columnTop = profile.echoTopMeters[sourceGate];
+                    if (!std::isfinite(ceiling) || ceiling < config.clutterTopMeters) {
+                        cell.flags |= RainfallGateNoVerticalCheck;
+                    } else if (std::isfinite(columnTop) && columnTop < config.clutterTopMeters) {
+                        cell.flags |= RainfallGateClutterSuspect;
+                        continue;
+                    }
+                }
+                if (reflectivity > config.hailCapDbz) {
+                    reflectivity = config.hailCapDbz;
+                    cell.flags |= RainfallGateHailCapped;
+                }
+                if (reflectivity < config.minimumReflectivityDbz) continue;
+                const auto rate =
+                    zrRateMillimetersPerHour(reflectivity, config.zrA, config.zrB);
+                if (!rate) continue;
+                depths[rayIndex][gate] += *rate * tenthsPerInterval;
+                if (mapped.beamHeightMeters > config.beamHeightFlagMeters)
+                    cell.flags |= RainfallGateBeamHigh;
+                if (gapClamped) cell.flags |= RainfallGateGapClamped;
+            }
+        }
+    }
+
+    // Fold the interval sums into the storage grid and collect the quality
+    // evidence in one pass so counts and flags cannot drift apart.
+    double depthSum = 0.0;
+    for (std::size_t rayIndex = 0; rayIndex < grid.rays.size(); ++rayIndex) {
+        auto& outRay = grid.rays[rayIndex];
+        for (std::size_t gate = 0; gate < outRay.gates.size(); ++gate) {
+            auto& cell = outRay.gates[gate];
+            if (incomplete[rayIndex][gate]) cell.flags |= RainfallGateIncomplete;
+            const auto tenths = depths[rayIndex][gate];
+            if (tenths > 0.0) {
+                if (tenths >= kRainfallDepthStorageCapTenths) {
+                    cell.depthTenthsMillimeters =
+                        static_cast<std::uint16_t>(kRainfallDepthStorageCapTenths);
+                    cell.flags |= RainfallGateDepthSaturated;
+                } else {
+                    cell.depthTenthsMillimeters =
+                        static_cast<std::uint16_t>(std::llround(tenths));
+                }
+            }
+            if (cell.depthTenthsMillimeters > 0) {
+                ++summary.depthGateCount;
+                const auto millimeters = cell.depthTenthsMillimeters / 10.0;
+                depthSum += millimeters;
+                if (millimeters > summary.maximumMillimeters) {
+                    summary.maximumMillimeters = millimeters;
+                    summary.maximumRayIndex = outRay.referenceRayIndex;
+                    summary.maximumGateIndex = static_cast<int>(gate);
+                    summary.haveMaximum = true;
+                }
+            }
+            if (cell.flags & RainfallGateClutterSuspect) ++summary.clutterSuspectGateCount;
+            if (cell.flags & RainfallGateNonMeteorological) ++summary.nonMeteorologicalGateCount;
+            if (cell.flags & RainfallGateHailCapped) ++summary.hailCappedGateCount;
+            if (cell.flags & RainfallGateBeamHigh) ++summary.beamHighGateCount;
+            if (cell.flags & RainfallGateRangeLimited) ++summary.rangeLimitedGateCount;
+            if (cell.flags & RainfallGateIncomplete) ++summary.incompleteGateCount;
+            if (cell.flags & RainfallGateNoVerticalCheck) ++summary.noVerticalCheckGateCount;
+            if (cell.flags & RainfallGateGapClamped) ++summary.gapClampedGateCount;
+            if (cell.flags & RainfallGateDepthSaturated) ++summary.depthSaturatedGateCount;
+        }
+    }
+    if (summary.depthGateCount > 0)
+        summary.meanMillimeters = depthSum / static_cast<double>(summary.depthGateCount);
+
+    if (!(summary.coveredSeconds > 0.0)) return grid;  // still Invalid
+    summary.valid = true;
+
+    // Quality is about whether the number may be read as a total, not about how
+    // wet the storm was. Per-gate beam/range/hail flags are provenance, counted
+    // above; they do not downgrade the whole product on their own.
+    const auto contaminated =
+        summary.clutterSuspectGateCount + summary.nonMeteorologicalGateCount;
+    const auto rainBearing = summary.depthGateCount + contaminated;
+    const double contaminationFraction =
+        rainBearing > 0 ? static_cast<double>(contaminated) / static_cast<double>(rainBearing)
+                        : 0.0;
+    if (summary.windowSeconds > 0.0 &&
+        summary.coveredSeconds < kRainfallPoorCoverageFraction * summary.windowSeconds) {
+        summary.quality = RainfallQuality::Poor;
+    } else if (contaminationFraction > kRainfallPoorContaminationFraction) {
+        summary.quality = RainfallQuality::Poor;
+    } else if (summary.sampleCount < kRainfallMinimumSamplesForGood ||
+               summary.gapClampedIntervalCount > 0 || summary.incompleteGateCount > 0 ||
+               summary.noVerticalCheckGateCount > 0) {
+        summary.quality = RainfallQuality::Marginal;
+    } else {
+        summary.quality = RainfallQuality::Good;
+    }
+    return grid;
 }
 
 } // namespace cappedweather

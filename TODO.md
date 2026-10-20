@@ -5,7 +5,7 @@ Short active list. Done work stays in git history and release notes, not in this
 ## Open
 
 ### Analysis depth
-- [ ] Rainfall accumulation (one-hour and storm-total style) from Z-R over spill-to-disk history. Needs AP/clutter guard plus validation before any trust. No precision claims until then.
+- [ ] Rainfall accumulation UI wiring plus gauge/MRMS scoring. The engine is done (`accumulateRainfall`, documented and unscored in `docs/rainfall-validation.md`): Z-R left-hold integration over spill history with the AP/clutter guard, beam-height/range/hail caps and per-gate provenance flags. What is left is surfacing it (a value must read as an unwired estimate with its window and coverage, never a measurement) and the comparison plan in that doc. History ceiling is hard: 12 resident + 8 spilled by default, 40 volumes max, so a true storm total needs a bigger frame budget or an archive reader. No precision claims until the gates there pass.
 - [ ] OPERA dual-pol unlock when 2027 moments land (CC, ZDR, PHI, KDP). Work is decoder mapping in `readOdimPvol` plus a fixture and availability tests. Per-panel auto-disable already handles their absence, so do not fake dual-pol from single-pol before then.
 
 ### Overlays and context
@@ -42,6 +42,7 @@ Research-gated (confirm open shape first, METAR/ECCC style):
 - Shipping synthetic or demo radar frames
 
 ## Recently done
+- Rainfall accumulation engine (Z-R, Marshall-Palmer 300/1.4 with a 53 dBZ hail cap, left-hold integration between volume times on the newest volume's lowest tilt, ground-range remap across changing gate geometries, 0.1 mm per-gate storage). AP/clutter guard in the same change: column-top veto for strong shallow echo, dual-pol CC veto, range and beam-height caps, gap-clamped intervals, per-gate provenance flags and Good/Marginal/Poor/Invalid quality; unscored, so no precision claim — `docs/rainfall-validation.md` records zero scored cases and the comparison plan, nine closed-form core tests, no UI surface yet).
 - Map view undo that records origins (one entry per drag/wheel-gesture/pinch/button press at gesture start instead of destinations per mouse move; first Ctrl+Z restores the pre-action view; passive syncs, programmatic jumps and no-op inputs bank nothing; synthetic drag/wheel/pinch/redo/passive-sync regressions, failure demonstrated first: 10 entries per drag).
 - Fractional wheel/trackpad zoom accumulation (sub-notch angle and pixel-only deltas accumulate to whole cursor-anchored steps instead of truncating to zero; remainder clears at limits and view jumps; synthetic Qt event regressions for sub-steps/pixel/full-notch/reverse/limits/anchor/pan; failure demonstrated on old code first).
 - Bound-overscroll wheel fix (fractions pushing against min/max zoom drop at once, including leftovers from the arriving step, so the first inward notch always responds; symmetric min/max regressions, failure demonstrated first).
