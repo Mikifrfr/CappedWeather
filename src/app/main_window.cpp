@@ -1065,10 +1065,17 @@ MainWindow::MainWindow(QWidget* parent)
     const auto dockState = settings.value(QStringLiteral("window/dockState")).toByteArray();
     if (!dockState.isEmpty()) restoreState(dockState, 1);
     const auto maximumDockWidth = std::max(220, width() - 420);
-    const auto storedDockWidth = std::clamp(
+    pendingDockWidth_ = std::clamp(
         settings.value(QStringLiteral("window/controlDockWidth"), 272).toInt(),
         220, maximumDockWidth);
-    resizeDocks({controlDock_}, {storedDockWidth}, Qt::Horizontal);
+    settingsRestoreComplete_ = true;
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    if (pendingDockWidth_ <= 0 || !controlDock_) return;
+    resizeDocks({controlDock_}, {pendingDockWidth_}, Qt::Horizontal);
+    pendingDockWidth_ = -1;
 }
 
 void MainWindow::applyTheme(const AppTheme theme) {
@@ -3644,6 +3651,7 @@ void MainWindow::restoreSettings() {
 }
 
 void MainWindow::saveSettings() const {
+    if (!settingsRestoreComplete_) return;
     QSettings settings;
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
     settings.setValue(QStringLiteral("window/dockState"), saveState(1));
