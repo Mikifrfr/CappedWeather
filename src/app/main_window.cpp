@@ -2853,7 +2853,7 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
         // base spill so a later scrub still gets ET/VIL. Tag the altitude
         // only when the spill lands: a failed write must not mark stale
         // base data as fresh.
-        if (!spillVolume(*derived, it->spilledPath.toStdString())) return;
+        if (!spillVolumeAtomically(*derived, it->spilledPath, true)) return;
         it->cappiHeightM = cappiHeightM;
         // The mask describes the derived superset, not the base spill it
         // replaced, so refresh it here too — no chunk needed, it is derived

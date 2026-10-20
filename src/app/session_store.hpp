@@ -75,6 +75,18 @@ inline constexpr int kSpilledKeepVolumes = 8;
 
 QString spillFilePath(const QString& radarId, const QString& volumeId);
 
+// Writes the volume to destPath through a unique sibling file renamed into
+// place, so a reader never opens a half-written volume and two writers cannot
+// truncate each other. Spill files are write-once per radar+volume: when
+// destPath already holds the volume (another process got there first) the
+// write is skipped and the existing file is reused. replaceExisting is for the
+// derived-superset rewrite, which must replace a base spill in place.
+bool spillVolumeAtomically(const DecodedChunk& chunk, const QString& destPath,
+                           bool replaceExisting = false);
+// Same write-once staging for a byte copy; this is the case-pack import path,
+// which stages into the shared spill location.
+bool stageFileAtomically(const QString& sourcePath, const QString& destPath);
+
 // Which product kinds at least one ray actually carries, as a bitmask over
 // ProductKind (bit i == ProductKind i). Pure and decoder-only: it needs no chunk
 // residency, so a frame that has spilled to disk can still answer "what do I
