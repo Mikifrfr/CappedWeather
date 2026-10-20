@@ -507,6 +507,93 @@ void testRainfallIncompleteCoverage() {
     assert(grid.summary.quality == RainfallQuality::Marginal);
 }
 
+void testRainfallSentinelConvention() {
+    // qa file, touched deliberately (card t_965bd7e5, science): the
+    // accumulator now consumes DecodedChunk::momentEncoding. Same 16-gate
+    // 40 dBZ volume as the closed-form case above; only gate 5 carries a
+    // sentinel code. NEXRAD Message 31 packs 0 = below threshold and
+    // 1 = range folded / missing; ODIM packs 0 = missing and 1 = below
+    // threshold. A missing gate is a coverage gap and must be flagged; a
+    // below-threshold gate was measured and stayed dry; a chunk that records no
+    // convention (legacy spill file) cannot claim either.
+    const auto volumeWithSentinel = [](const std::uint16_t sentinelCode,
+                                       const MomentEncoding encoding) {
+        auto chunk = rainVolume("KTLX", 40.0);
+        chunk.momentEncoding = encoding;
+        chunk.rays.front()
+            .fields.at(static_cast<std::size_t>(ProductKind::Reflectivity))
+            .at(5) = sentinelCode;
+        return chunk;
+    };
+    constexpr auto nexrad = MomentEncoding::NexradMessage31;
+    constexpr auto odim = MomentEncoding::Odim;
+    constexpr auto unknown = MomentEncoding::Unknown;
+
+    {
+        // Gate 5 is range folded / missing in the older volume (NEXRAD code 1)
+        // and below threshold in the newest (code 0). Both credit zero depth;
+        // only the missing one is a coverage gap. Gate 4 was measured in both:
+        // one 300 s interval at R(40) = 12.2397 mm/h = 1.02 mm -> 10 tenths.
+        const auto missing = volumeWithSentinel(1, nexrad);
+        const auto dry = volumeWithSentinel(0, nexrad);
+        const std::vector<RainfallSample> samples{{&missing, 0.0}, {&dry, 300.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 1);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) != 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 10);
+        assert((grid.rays.front().gates.at(4).flags & RainfallGateIncomplete) == 0);
+    }
+    {
+        // The same gate below threshold in every volume: measured, no echo. Zero
+        // depth and no coverage claim. Four volumes keep the volume-count rule
+        // out of the way, so quality is Good and only a dry gate can be the
+        // reason. Three intervals at R(40) -> 30.599 tenths -> 31 elsewhere.
+        const auto dry = volumeWithSentinel(0, nexrad);
+        const std::vector<RainfallSample> samples{
+            {&dry, 0.0}, {&dry, 300.0}, {&dry, 600.0}, {&dry, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 0);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) == 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.quality == RainfallQuality::Good);
+    }
+    {
+        // ODIM swaps the codes: 0 is the missing gate, 1 is below threshold. If
+        // the accumulator ignored the recorded convention the two cases would
+        // come out the other way round. Encoding only decides the sentinel here;
+        // scale/offset stay per ray.
+        const auto odimMissing = volumeWithSentinel(0, odim);
+        const auto odimDry = volumeWithSentinel(1, odim);
+        const std::vector<RainfallSample> samples{
+            {&odimMissing, 0.0}, {&odimDry, 300.0}, {&odimDry, 600.0}, {&odimDry, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 1);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) != 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.quality == RainfallQuality::Marginal);
+    }
+    {
+        // A chunk with no recorded convention (legacy spill file) cannot tell
+        // the codes apart: keep the old reading, zero depth and no claim.
+        const auto legacy = volumeWithSentinel(1, unknown);
+        const std::vector<RainfallSample> samples{
+            {&legacy, 0.0}, {&legacy, 300.0}, {&legacy, 600.0}, {&legacy, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.incompleteGateCount == 0);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) == 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.quality == RainfallQuality::Good);
+    }
+}
+
 void testRainfallInvalidWindows() {
     {
         const auto grid = accumulateRainfall({}, 370.0);
@@ -3419,6 +3506,7 @@ int main() {
     testRainfallGapClamping();
     testRainfallGeometryRemap();
     testRainfallIncompleteCoverage();
+    testRainfallSentinelConvention();
     testRainfallInvalidWindows();
     testRainfallPartialReferenceRays();
     testStormTracker();

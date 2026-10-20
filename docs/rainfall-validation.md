@@ -80,16 +80,28 @@ application per gate per interval:
 | Vertical, blind | Z >= 40 dBZ but no tilt at that range reached 3000 m (single-tilt volume, short range) | depth kept, `NoVerticalCheck` |
 | Hail | Z > 53 dBZ | rate clamped at 53 dBZ, `HailCapped` |
 | Structural gap | no ray at the azimuth, or the gate lies beyond that sample's ray | no depth, `Incomplete` |
-| Codes 0/1 | below threshold or missing, and the chunk does not say which (see below) | zero depth, no flag, never invented rain |
+| Below threshold | the chunk's recorded convention says this code was below threshold | zero depth, no flag: measured, no echo |
+| Missing | the chunk's recorded convention says this code is missing (nodata / range folded) | zero depth, `Incomplete` |
+| Sentinel, no convention | `momentEncoding == Unknown` (legacy spill file) | zero depth, no flag: the gap cannot be claimed |
 
 Codes 0 and 1 mean "below threshold" and "missing", but the two decoded formats
-disagree on which is which: NEXRAD packs 0 = below threshold and 1 = range
-folded, while `odim_reader` packs 0 = missing and 1 = below threshold. A
-`DecodedChunk` does not record its convention, so both codes are read as "no
-rain measured here". Depth is unaffected (zero either way), but a genuinely
-missing gate can read as no-rain instead of as a coverage gap: the total stays a
-lower bound. That ambiguity is a decoder-side fix, not something the accumulator
-should guess at.
+disagree on which is which: NEXRAD Message 31 packs 0 = below threshold and
+1 = range folded, while ODIM_H5 packs 0 = missing (nodata) and 1 = below
+threshold. `DecodedChunk::momentEncoding` now records which format produced the
+gates and `momentGateState()` classifies one code (contract and fixture evidence:
+`docs/moment-sentinels.md`). `accumulateRainfall` follows it: a below-threshold
+gate is a measured dry gate (zero depth, no flag), a missing gate is a coverage
+gap (zero depth, `Incomplete`, which downgrades the product to Marginal), and a
+chunk with no recorded convention keeps the older, weaker reading — zero depth
+and no flag, because the gap cannot be claimed. Depth is unaffected in all three
+cases (zero either way); what changed is that a gap is now reported instead of
+being silently read as dry.
+
+A volume that reaches products through `MainWindow::acceptDecodedChunk` still
+reports `Unknown` until that merge copies the field (card `t_f84c4bc9`), so the
+live path keeps the legacy reading until that lands. The closed-form test for
+the same gate under both codes is `testRainfallSentinelConvention` in
+`core_tests`.
 
 Product quality (about whether the number may be read as a total):
 
@@ -132,14 +144,10 @@ cannot be trusted for a while:
    keep the gates they touch out of the total. The summary reports how many;
    a small number is normal, a large number means the total covers less ground
    than it appears to.
-8. **Format sentinel ambiguity.** Codes 0/1 are below-threshold and missing, but
-   NEXRAD and ODIM disagree on which is which and the chunk keeps no record, so
-   a missing gate can read as no-rain. Depth is a lower bound where that
-   happens; there is no invented rain.
-9. **C-band OPERA.** Attenuation and lower Nyquist structure differ from S-band;
+8. **C-band OPERA.** Attenuation and lower Nyquist structure differ from S-band;
    the same relation is used, and it has not been compared on European data.
-10. **No gauge truth yet.** Everything above is method criticism, not a measured
-    error. The point of the plan below is to replace it with numbers.
+9. **No gauge truth yet.** Everything above is method criticism, not a measured
+   error. The point of the plan below is to replace it with numbers.
 
 ## Comparison plan
 
@@ -212,3 +220,14 @@ Empty by design. Add one row per scored case; do not delete rows that failed.
 - 2026-10-20 — engine, AP/clutter guard, quality flags and closed-form tests
   added; this record created with zero scored cases. No UI surface yet; the
   display wiring is a follow-up.
+- 2026-10-20 — limitation 8 (format sentinel ambiguity) struck. The decoder now
+  records the sentinel convention on the chunk (`DecodedChunk::momentEncoding`,
+  `momentGateState()`, see `docs/moment-sentinels.md`) and `accumulateRainfall`
+  consumes it: a `Missing` gate raises `Incomplete` (and downgrades quality to
+  Marginal), a `BelowThreshold` gate stays zero depth with no flag, and a chunk
+  with no recorded convention keeps the old reading. Closed-form coverage:
+  `testRainfallSentinelConvention` (same gate missing in one volume, below
+  threshold in the next; ODIM's swapped codes; legacy `Unknown`). The live path
+  reaches products as `Unknown` until `MainWindow::acceptDecodedChunk` copies the
+  field (card `t_f84c4bc9`), so this is a decoder-and-core fix, not yet a live
+  product improvement.

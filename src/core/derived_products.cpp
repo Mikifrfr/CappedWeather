@@ -803,14 +803,26 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
                     continue;
                 }
                 const auto raw = sourceEncoded[sourceGate];
-                // Codes 0 and 1 are "below threshold" and "missing" (or the
-                // reverse: ODIM packs 0 = missing, 1 = below threshold, NEXRAD
-                // the other way). A DecodedChunk does not say which, so the only
-                // honest reading is "no rain measured here": both contribute
-                // zero depth, and neither is claimed as data. Structural gaps
-                // (absent ray, gate beyond the ray) still raise Incomplete;
-                // see docs/rainfall-validation.md.
-                if (raw <= 1) continue;
+                // Codes 0 and 1 mean "below threshold" and "missing", and the
+                // two decoded formats swap which is which, so the chunk's
+                // recorded convention is the only honest source for the
+                // difference (docs/moment-sentinels.md). A below-threshold gate
+                // was measured and saw no echo: zero depth, no flag. A missing
+                // gate is a coverage gap and must say so instead of reading as a
+                // dry gate. A chunk that records no convention (legacy spill
+                // file) keeps the old, weaker reading: zero depth and no claim
+                // either way. None of the three invents rain.
+                switch (momentGateState(ordered[sampleIndex].chunk->momentEncoding, raw)) {
+                case MomentGateState::Valid:
+                    break;
+                case MomentGateState::BelowThreshold:
+                    continue;
+                case MomentGateState::Missing:
+                    incomplete[rayIndex][gate] = 1;
+                    continue;
+                case MomentGateState::Undetermined:
+                    continue;  // legacy chunk: cannot claim a gap
+                }
                 const auto value = nativeValue(raw, sourceRay.scaleByProduct.at(reflectivityIndex),
                                                sourceRay.offsetByProduct.at(reflectivityIndex));
                 if (!value || !std::isfinite(*value)) {
