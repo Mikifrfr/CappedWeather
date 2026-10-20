@@ -129,6 +129,9 @@ std::optional<double> nativeValue(const ProductKind kind, const std::uint8_t enc
         return (static_cast<double>(encoded) - 2.0) / 2.0 - 180.0;
     case ProductKind::EchoTop:
     case ProductKind::VerticallyIntegratedLiquid:
+    // Message 31 has no DPKP block: KDP arrives only from ODIM_H5 volumes, so
+    // a US ray must never invent a specific-differential-phase value.
+    case ProductKind::SpecificDifferentialPhase:
         return std::nullopt;
     }
     return std::nullopt;

@@ -33,7 +33,16 @@ Ready to build (data live now, testable hermetically plus replay):
 - [ ] Dual-pol QPE for NEXRAD. R(Z,ZDR)/R(KDP) accumulations next to Z-R over spill history, same AP/clutter guard requirement as the rainfall item. No trust until gauge/MRMS comparison.
 
 Research-gated (confirm open shape first, METAR/ECCC style):
-- [ ] Nearest-radar mosaic. PROTOTYPED 2026-10-10 (`tools/mosaic_probe.cpp`, scored in `docs/mosaic-seams.md`): same-tilt max/nearest compositing fails on Moore 2013 KTLX+KINX (beams differ ~5 km on the headline storm, both-echo RMSE 10.6 dB, only 73/815 cells beam-match to 4 km). CAPPI matching scored 2026-10-11 on the same pair (`--cappi`: RMSE 9.67, beam-matched cells 5-6 dB, 6.3x more comparable cells; SAILS-duplicate selection caution documented). Second case scored 2026-10-11 (Mayfield KPAH+KVWX from the public unidata archive: baseline RMSE 8.85, CAPPI 7.46-7.51, paired same-cell verdict only +4% at 1500 m and negative at 2500 m). Advection lag search on both cases recovers at most ~0.6 dB with no coherent minimum: the ~8-10 dB floor is resolution/beam physics, not clock or altitude selection. A layer needs per-gate or resolution-aware blending (new research).
+- [ ] Nearest-radar mosaic. CLOSED AS RESEARCH 2026-10-20 (`tools/mosaic_probe.cpp`,
+  `docs/mosaic-seams.md`): same-tilt compositing fails on beam mismatch (Moore
+  both-echo RMSE 10.6 dB, 73/815 cells beam-matched), CAPPI matching is only +4%
+  paired at 1500 m and negative at 2500 m, advection lag search recovers <=0.6 dB
+  with no coherent minimum, and per-gate/footprint blending cuts the paired floor
+  3.7-12.1% at the instrument footprint and 16.2-27.2% at 4x, leaving 5.6-7.5 dB,
+  with 2.4-3.7 dB of coherent difference surviving every scale up to 35 km. The
+  floor is beam altitude, calibration and microphysics, not resolution. A layer
+  needs lowest-beam-wins plus inter-radar bias correction; the mosaic stays a
+  probe.
 
 ## Non-goals (for now)
 - Full GR-style product scripting language

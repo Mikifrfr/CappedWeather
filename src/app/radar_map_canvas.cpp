@@ -136,6 +136,20 @@ QColor interpolatePalette(const std::initializer_list<ColorStop> stops, const do
     return result;
 }
 
+// Probe readout decimals. KDP values live at 0.01-7 deg/km, so a single
+// decimal collapses 0.30 and 0.34 into the same string; correlation
+// coefficient has always carried three. Everything else keeps one.
+int probeDecimals(const ProductKind product) {
+    switch (product) {
+    case ProductKind::CorrelationCoefficient:
+        return 3;
+    case ProductKind::SpecificDifferentialPhase:
+        return 2;
+    default:
+        return 1;
+    }
+}
+
 QColor productColor(const ProductKind product, const double normalized,
                     const RadarMapCanvas::PaletteKind palette, const int opacityPercent,
                     const QVector<RadarMapCanvas::PaletteStop>& custom = {}) {
@@ -152,8 +166,12 @@ QColor productColor(const ProductKind product, const double normalized,
         return color;
     }
     if (palette == RadarMapCanvas::PaletteKind::ColorSafe) {
+        // Signed products share one diverging ramp. KDP belongs here: hail and
+        // melting-layer gates go negative, so a sequential ramp would read as
+        // "more rain" where the physics says less phase shift.
         if (product == ProductKind::Velocity || product == ProductKind::DifferentialReflectivity ||
-            product == ProductKind::DifferentialPhase) {
+            product == ProductKind::DifferentialPhase ||
+            product == ProductKind::SpecificDifferentialPhase) {
             return interpolatePalette({
                 {0.00, QColor("#3b4cc0")}, {0.25, QColor("#78a5d5")},
                 {0.50, QColor("#f1f1f1")}, {0.75, QColor("#e89c75")},
@@ -212,6 +230,20 @@ QColor productColor(const ProductKind product, const double normalized,
                 {-180, QColor("#403078")}, {-120, QColor("#2858a0")}, {-60, QColor("#20a7b0")},
                 {0, QColor("#73c95b")}, {45, QColor("#e0cf48")}, {90, QColor("#ed7b45")},
                 {135, QColor("#b94399")},
+            }, value, alpha);
+        case ProductKind::SpecificDifferentialPhase:
+            // KDP is signed: a neutral band at 0 keeps light-rain KDP quiet,
+            // green/yellow walks the operational heavy-rain range (3-7 deg/km),
+            // and magenta/white is reserved for hail-bearing cores. A sequential
+            // ramp would paint the negative (hail / melting-layer) gates as if
+            // they were weak rain, which is the wrong physical story.
+            return discretePalette({
+                {-10, QColor("#2b2550")}, {-3, QColor("#33589e")},
+                {-0.5, QColor("#7fa7bb")}, {0, QColor("#e2e8ea")},
+                {0.5, QColor("#7fd48a")}, {1.5, QColor("#f0d95a")},
+                {3, QColor("#ef8a3c")}, {5, QColor("#d94a6a")},
+                {8, QColor("#b64aa8")}, {12, QColor("#f0d9ff")},
+                {20, QColor("#ffffff")},
             }, value, alpha);
         case ProductKind::EchoTop:
             return discretePalette({
@@ -283,6 +315,17 @@ QColor productColor(const ProductKind product, const double normalized,
             {0.36, QColor("#9cd65f")}, {0.52, QColor("#f2cf58")},
             {0.68, QColor("#ee7454")}, {0.84, QColor("#bd4ca5")},
             {1.00, QColor("#51418d")},
+        }, normalized, alpha);
+    case ProductKind::SpecificDifferentialPhase:
+        // Same KDP story as the Operational stops, interpolated: the fraction
+        // is (value + 10) / 30, so 0.333 (neutral) is value 0 and the narrow
+        // 0.317..0.367 band keeps the light-rain transition tight.
+        return interpolatePalette({
+            {0.000, QColor("#2b2550")}, {0.233, QColor("#33589e")},
+            {0.317, QColor("#7fa7bb")}, {0.333, QColor("#e2e8ea")},
+            {0.367, QColor("#7fd48a")}, {0.433, QColor("#f0d95a")},
+            {0.500, QColor("#ef8a3c")}, {0.600, QColor("#d94a6a")},
+            {0.733, QColor("#b64aa8")}, {1.000, QColor("#f6ecff")},
         }, normalized, alpha);
     case ProductKind::EchoTop:
         return interpolatePalette({
@@ -5477,7 +5520,7 @@ RadarMapCanvas::ProbeSample RadarMapCanvas::sampleAtGeo(const QPointF& lonLat) c
         if (value.has_value()) {
         const auto unit = QString::fromUtf8(productDescriptor(product_).unit.data());
         sample.valueText = QStringLiteral("%1%2%3")
-                        .arg(*value, 0, 'f', product_ == ProductKind::CorrelationCoefficient ? 3 : 1)
+                        .arg(*value, 0, 'f', probeDecimals(product_))
                         .arg(unit.isEmpty() ? QString{} : QStringLiteral(" "))
                         .arg(unit);
         } else {

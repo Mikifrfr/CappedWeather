@@ -80,6 +80,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <optional>
 #include <vector>
@@ -1004,11 +1005,21 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
     firstHeader->setChecked(true);
     QCoreApplication::processEvents();
     Q_UNUSED(toggledBody);
-    // Product chips mirror the product combo.
+    // Product chips mirror the product combo. 11 rows: KDP is the appended
+    // ODIM-only slot (never inserted, so digit keys and saved panels keep
+    // their meaning). The count lives on kProductCount, not a literal.
     auto* products = window->findChild<QComboBox*>(QStringLiteral("productCombo"));
     const auto chips = window->findChildren<QToolButton*>(QStringLiteral("productChip"));
-    if (chips.size() != 10 || !products || chips.size() != products->count()) {
-        *error = QStringLiteral("product chip grid should have 10 chips, got %1").arg(chips.size());
+    const auto& descriptors = productDescriptors();
+    if (!products || chips.size() != static_cast<int>(kProductCount) ||
+        chips.size() != products->count() ||
+        chips.size() != static_cast<int>(descriptors.size())) {
+        *error = QStringLiteral("product chip grid should have %1 chips (11: KDP appended), got %2 "
+                                "(%3 combo rows, %4 descriptors)")
+                     .arg(static_cast<int>(kProductCount))
+                     .arg(chips.size())
+                     .arg(products ? products->count() : -1)
+                     .arg(descriptors.size());
         return false;
     }
     for (const auto* chip : chips) {
@@ -1016,6 +1027,25 @@ static bool testSidebarRedesign(MainWindow* window, QString* error) {
             *error = QStringLiteral("every product chip needs an icon and hover text");
             return false;
         }
+    }
+    // KDP chip identity, looked up through the combo item data (descriptor
+    // index) so a future append cannot slide it. The tooltip must carry the
+    // full label and unit, not just the 3-letter abbreviation.
+    const int kdpIndex =
+        products->findData(static_cast<int>(ProductKind::SpecificDifferentialPhase));
+    if (kdpIndex < 0 || kdpIndex >= chips.size()) {
+        *error = QStringLiteral("KDP product row is missing from the combo/chip grid");
+        return false;
+    }
+    const auto* kdpChip = chips.at(kdpIndex);
+    if (kdpChip->text() != QStringLiteral("KDP") ||
+        kdpChip->accessibleName() != QStringLiteral("Specific differential phase") ||
+        !kdpChip->toolTip().contains(QStringLiteral("Specific differential phase")) ||
+        !kdpChip->toolTip().contains(QStringLiteral("deg/km"))) {
+        *error = QStringLiteral("KDP chip should read KDP and name 'Specific differential phase' "
+                                "(deg/km) in its tooltip, got '%1' / '%2'")
+                     .arg(kdpChip->text(), kdpChip->toolTip());
+        return false;
     }
     const auto velocityIndex = products->findData(static_cast<int>(ProductKind::Velocity));
     chips.at(velocityIndex)->click();
@@ -2687,6 +2717,219 @@ static bool testProductAvailabilityMask(QString* error) {
     return true;
 }
 
+static bool testKdpProductSlot(MainWindow* window, QString* error) {
+    // KDP is the appended 11th product, and its honest absence is the
+    // acceptance criterion of the whole slot: NEXRAD carries no DPKP, so a
+    // volume without KDP gates must leave the chip and its tab disabled and
+    // say why. Availability is driven through the app's own volume pipeline
+    // (volumeStarted -> chunkDecoded -> volumeReady) with in-memory rays, the
+    // same slots a live source feeds. No network, no fixture on disk, and
+    // every gate keeps scale 0 so the paint path decodes nullopt: this proves
+    // availability wiring, never synthetic storm pixels.
+    auto* products = window->findChild<QComboBox*>(QStringLiteral("productCombo"));
+    auto* bar = window->findChild<QTabBar*>(QStringLiteral("productTabBar"));
+    auto* map = window->findChild<RadarMapCanvas*>(QStringLiteral("radarMap"));
+    const auto chips = window->findChildren<QToolButton*>(QStringLiteral("productChip"));
+    if (!products || !bar || !map || chips.isEmpty()) {
+        *error = QStringLiteral("product combo, tab bar, map, or chips missing");
+        return false;
+    }
+    const auto& descriptors = productDescriptors();
+    const int kdpIndex =
+        products->findData(static_cast<int>(ProductKind::SpecificDifferentialPhase));
+    if (descriptors.size() != kProductCount || kdpIndex < 0 ||
+        kdpIndex != static_cast<int>(kProductCount) - 1 || kdpIndex >= chips.size() ||
+        kdpIndex >= bar->count()) {
+        *error = QStringLiteral("KDP should be the appended row %1, got index %2 "
+                                "(%3 descriptors, %4 chips, %5 tabs)")
+                     .arg(static_cast<int>(kProductCount) - 1)
+                     .arg(kdpIndex)
+                     .arg(descriptors.size())
+                     .arg(chips.size())
+                     .arg(bar->count());
+        return false;
+    }
+    // Shortcut honesty: digit keys 1-9/0 bind the first ten rows only
+    // (main_window.cpp ~962), so "0" must still land on CAPPI and never on
+    // KDP. The 11th product is reachable by chip/tab, deliberately unbound.
+    const int reflectivityIndex =
+        products->findData(static_cast<int>(ProductKind::Reflectivity));
+    const int cappiIndex = products->findData(static_cast<int>(ProductKind::Cappi));
+    if (reflectivityIndex < 0 || cappiIndex != static_cast<int>(kProductCount) - 2) {
+        *error = QStringLiteral("CAPPI should be row %1, got %2")
+                     .arg(static_cast<int>(kProductCount) - 2)
+                     .arg(cappiIndex);
+        return false;
+    }
+    products->setCurrentIndex(reflectivityIndex);
+    QCoreApplication::processEvents();
+    // Window shortcuts need an active window even offscreen, and an editable
+    // station line edit would otherwise swallow a bare digit as text input.
+    window->activateWindow();
+    window->raise();
+    map->setFocus();
+    QCoreApplication::processEvents();
+    QTest::keyClick(window, Qt::Key_0);
+    QCoreApplication::processEvents();
+    if (products->currentIndex() != cappiIndex) {
+        *error = QStringLiteral("digit 0 should select CAPPI (row %1) and may not reach KDP "
+                                "(row %2); got row %3")
+                     .arg(cappiIndex)
+                     .arg(kdpIndex)
+                     .arg(products->currentIndex());
+        return false;
+    }
+    products->setCurrentIndex(reflectivityIndex);
+    QCoreApplication::processEvents();
+
+    // Select a real catalog site and make the primary panel active, so the
+    // injected volume lands on the selected session and
+    // updateProductAvailability() runs on the shown frame.
+    auto* stationCombo = window->findChild<QComboBox*>(QStringLiteral("stationCombo"));
+    const int radarRow = stationCombo ? stationCombo->findData(QStringLiteral("KTLX")) : -1;
+    if (radarRow < 0) {
+        *error = QStringLiteral("KTLX is missing from the station picker");
+        return false;
+    }
+    stationCombo->setCurrentIndex(radarRow);
+    stationCombo->activated(radarRow);
+    QCoreApplication::processEvents();
+    map->activated();
+    QCoreApplication::processEvents();
+    const QString radarId = map->radarId();
+    if (radarId != QStringLiteral("KTLX")) {
+        *error = QStringLiteral("primary panel should follow the selected radar, got '%1'")
+                     .arg(radarId);
+        return false;
+    }
+    if (auto* follow = window->findChild<QToolButton*>(QStringLiteral("followLatestButton"));
+        follow && !follow->isChecked()) {
+        follow->setChecked(true);
+        QCoreApplication::processEvents();
+    }
+    const auto installVolume = [&](const QString& volumeId, const DecodedChunk& chunk,
+                                   const QDateTime& stamp, QString* why) {
+        auto decoded = std::make_shared<DecodedChunk>(chunk);
+        // honesty-allow: frames — minimal in-memory rays with zero scale so
+        // the paint path drops every gate; availability wiring only.
+        const bool started = QMetaObject::invokeMethod(
+            window, "volumeStarted", Qt::DirectConnection, Q_ARG(QString, radarId),
+            Q_ARG(QString, volumeId), Q_ARG(int, 1));
+        const bool delivered =
+            started && QMetaObject::invokeMethod(
+                           window, "chunkDecoded", Qt::DirectConnection,
+                           Q_ARG(QString, radarId), Q_ARG(QString, volumeId),
+                           Q_ARG(QString, QStringLiteral("kdp-test")),
+                           Q_ARG(std::shared_ptr<DecodedChunk>, decoded),
+                           Q_ARG(QDateTime, stamp));
+        const bool ready =
+            delivered && QMetaObject::invokeMethod(
+                             window, "volumeReady", Qt::DirectConnection,
+                             Q_ARG(QString, radarId), Q_ARG(QString, volumeId),
+                             Q_ARG(int, 1), Q_ARG(int, 0), Q_ARG(QDateTime, stamp),
+                             Q_ARG(bool, true));
+        if (!ready) {
+            *why = QStringLiteral("volume pipeline rejected %1 (started=%2, delivered=%3)")
+                       .arg(volumeId, started ? QStringLiteral("yes") : QStringLiteral("no"),
+                            delivered ? QStringLiteral("yes") : QStringLiteral("no"));
+        }
+        return ready;
+    };
+    const auto rayWith = [](const std::vector<ProductKind>& kinds) {
+        DecodedRay ray;
+        for (const auto kind : kinds) {
+            ray.fields.at(static_cast<std::size_t>(kind)) = {100, 200};
+        }
+        return ray;
+    };
+    const auto reasonText = QStringLiteral("the site sent no such moment");
+
+    // 1. Native NEXRAD volume: reflectivity only. KDP is absent, so both
+    //    faces of the product UI must be disabled and explain the absence.
+    DecodedChunk withoutKdp;
+    withoutKdp.radarId = radarId.toStdString();
+    withoutKdp.messageCount = 1;
+    withoutKdp.rays.push_back(rayWith({ProductKind::Reflectivity}));
+    if (!installVolume(QStringLiteral("KTLX-KDP-TEST-REF"), withoutKdp,
+                       QDateTime::currentDateTimeUtc().addSecs(-30), error)) {
+        return false;
+    }
+    if (chips.at(kdpIndex)->isEnabled() || bar->isTabEnabled(kdpIndex)) {
+        *error = QStringLiteral("a volume without KDP gates must disable the KDP chip and tab");
+        return false;
+    }
+    if (!chips.at(kdpIndex)->toolTip().contains(reasonText) ||
+        !bar->tabToolTip(kdpIndex).contains(reasonText)) {
+        *error = QStringLiteral("disabled KDP chip/tab must say why ('%1'); got '%2' / '%3'")
+                     .arg(reasonText, chips.at(kdpIndex)->toolTip(),
+                          bar->tabToolTip(kdpIndex));
+        return false;
+    }
+
+    // 2. ODIM-shaped volume carrying KDP: chip and tab enable, and the
+    //    absence wording disappears. The same volume has no ZDR/RHOHV/PHIDP,
+    //    so those must stay disabled — KDP gates may not light their rows.
+    DecodedChunk withKdp = withoutKdp;
+    withKdp.rays.front()
+        .fields.at(static_cast<std::size_t>(ProductKind::SpecificDifferentialPhase)) = {1000, 2000};
+    if (!installVolume(QStringLiteral("KTLX-KDP-TEST-KDP"), withKdp,
+                       QDateTime::currentDateTimeUtc().addSecs(-20), error)) {
+        return false;
+    }
+    if (!chips.at(kdpIndex)->isEnabled() || !bar->isTabEnabled(kdpIndex)) {
+        *error = QStringLiteral("KDP gates in the volume must enable the KDP chip and tab");
+        return false;
+    }
+    if (chips.at(kdpIndex)->toolTip().contains(reasonText)) {
+        *error = QStringLiteral("an available KDP chip must not carry the absence wording");
+        return false;
+    }
+    for (const auto kind : {ProductKind::DifferentialReflectivity,
+                            ProductKind::CorrelationCoefficient,
+                            ProductKind::DifferentialPhase}) {
+        const int index = products->findData(static_cast<int>(kind));
+        if (index < 0 || chips.at(index)->isEnabled() || bar->isTabEnabled(index)) {
+            *error = QStringLiteral("KDP-only volume lit the %1 chip/tab (row %2)")
+                         .arg(QString::fromUtf8(productDescriptor(kind).shortName.data()))
+                         .arg(index);
+            return false;
+        }
+    }
+
+    // 3. Dual-pol volume without KDP: ZDR/RHOHV/PHIDP enable while KDP falls
+    //    back to disabled. This is the mutation guard against cross-wired
+    //    rows (each moment reads its own field index).
+    DecodedChunk dualPolOnly;
+    dualPolOnly.radarId = radarId.toStdString();
+    dualPolOnly.messageCount = 1;
+    dualPolOnly.rays.push_back(rayWith({ProductKind::Reflectivity,
+                                        ProductKind::DifferentialReflectivity,
+                                        ProductKind::CorrelationCoefficient,
+                                        ProductKind::DifferentialPhase}));
+    if (!installVolume(QStringLiteral("KTLX-KDP-TEST-DUALPOL"), dualPolOnly,
+                       QDateTime::currentDateTimeUtc().addSecs(-10), error)) {
+        return false;
+    }
+    for (const auto kind : {ProductKind::DifferentialReflectivity,
+                            ProductKind::CorrelationCoefficient,
+                            ProductKind::DifferentialPhase}) {
+        const int index = products->findData(static_cast<int>(kind));
+        if (index < 0 || !chips.at(index)->isEnabled() || !bar->isTabEnabled(index)) {
+            *error = QStringLiteral("a dual-pol volume without KDP should keep %1 enabled")
+                         .arg(QString::fromUtf8(productDescriptor(kind).shortName.data()));
+            return false;
+        }
+    }
+    if (chips.at(kdpIndex)->isEnabled() || bar->isTabEnabled(kdpIndex) ||
+        !chips.at(kdpIndex)->toolTip().contains(reasonText)) {
+        *error = QStringLiteral("KDP must fall back to disabled once a later volume lacks it");
+        return false;
+    }
+    products->setCurrentIndex(reflectivityIndex);
+    QCoreApplication::processEvents();
+    return true;
+}
+
 static bool testLegendSpec(QString* error) {
     // Narrow panels skip the 258 px stack cleanly.
     if (RadarMapCanvas::legendVisibleForWidth(0) || RadarMapCanvas::legendVisibleForWidth(273) ||
@@ -2815,7 +3058,8 @@ int main(int argc, char** argv) {
     const auto radarPanels = window.findChildren<RadarMapCanvas*>();
     auto* loadingProgress = window.findChild<QProgressBar*>();
     auto* model = window.findChild<RadarListModel*>();
-    if (!map || !secondMap || !products || products->count() != 10 ||
+    if (!map || !secondMap || !products || products->count() != static_cast<int>(kProductCount) ||
+        products->findData(static_cast<int>(ProductKind::SpecificDifferentialPhase)) < 0 ||
         products->findData(static_cast<int>(ProductKind::EchoTop)) < 0 ||
         products->findData(static_cast<int>(ProductKind::VerticallyIntegratedLiquid)) < 0 ||
         products->findData(static_cast<int>(ProductKind::CompositeReflectivity)) < 0 ||
@@ -5206,6 +5450,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testProductAvailabilityMask(&failure)) {
             std::cerr << "Product availability mask failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testKdpProductSlot(&window, &failure)) {
+            std::cerr << "KDP product slot failed: " << failure.toStdString() << '\n';
             return 1;
         }
         // Restore main-map view that preset/speed probes may have touched.

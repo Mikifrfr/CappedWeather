@@ -34,12 +34,15 @@ constexpr float kVelocityOffset = 129.0F;
 //   RHOHV [0, 1.05]         - product descriptor maximum, 1.6e-5 per step
 //   PHIDP [-180, 360] deg   - ODIM writers publish either range, 0.0082 deg
 //                             per step
+//   KDP   [-32, +32] deg/km - same 64-unit span as ZDR, 1/1024 deg/km per step
 constexpr float kDifferentialReflectivityScale = 1023.9375F;
 constexpr float kDifferentialReflectivityOffset = 32768.0F;
 constexpr float kCorrelationCoefficientScale = 62411.43F;
 constexpr float kCorrelationCoefficientOffset = 2.0F;
 constexpr float kDifferentialPhaseScale = 121.35555F;
 constexpr float kDifferentialPhaseOffset = 21846.0F;
+constexpr float kSpecificDifferentialPhaseScale = 1023.9375F;
+constexpr float kSpecificDifferentialPhaseOffset = 32768.0F;
 constexpr std::uint16_t kEncodedMissing = 0;
 constexpr std::uint16_t kEncodedBelowThreshold = 1;
 constexpr std::uint16_t kEncodedFirstValid = 2;
@@ -48,9 +51,7 @@ constexpr std::uint16_t kEncodedMax = 65534;
 // ODIM dual-pol moments and the product slot each one feeds. The U-prefixed
 // identifiers are the unfiltered variants defined by ODIM_H5 v2.4 (DWD
 // publishes them today); the standard identifier wins when a writer carries
-// both, mirroring DBZH-over-TH. KDP/UKDP is deliberately absent: there is no
-// ProductKind for specific differential phase yet, so a KDP-only dataset is
-// counted as rejected instead of being folded into another product.
+// both, mirroring DBZH-over-TH.
 struct DualPolMomentSpec {
     ProductKind kind;
     const char* quantity;
@@ -65,6 +66,8 @@ constexpr DualPolMomentSpec kDualPolMoments[] = {
      kCorrelationCoefficientOffset},
     {ProductKind::DifferentialPhase, "PHIDP", "UPHIDP", kDifferentialPhaseScale,
      kDifferentialPhaseOffset},
+    {ProductKind::SpecificDifferentialPhase, "KDP", "UKDP", kSpecificDifferentialPhaseScale,
+     kSpecificDifferentialPhaseOffset},
 };
 
 bool hasHdf5Signature(const std::span<const std::byte> bytes) {

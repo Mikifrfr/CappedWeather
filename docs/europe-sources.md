@@ -170,23 +170,42 @@ and the ORD API overview above.
   several `dataM` groups per dataset (NL), provided each dataset carries its
   own where/how.
 
-#### Decoder mapping and packing (`src/core/odim_reader.cpp`)
+#### ODIM dual-pol packing
+
+Every dual-pol moment is re-encoded into the shared 16-bit gate convention
+(0 = missing, 1 = below threshold, 2..65534 = valid), so `nativeValue()`
+decodes ODIM and NEXRAD gates through one path. Each span covers the full
+published physical range, so a real gate is never clipped into a missing
+sentinel:
+
+| quantity | unfiltered alias | physical range | scale | offset | step |
+|---|---|---|---|---|---|
+| ZDR | UZDR | -32..+32 dB | 1023.9375 | 32768.0 | 0.000977 dB |
+| RHOHV | URHOHV | 0..1.05 | 62411.43 | 2.0 | 1.6e-5 |
+| PHIDP | UPHIDP | -180..360 deg | 121.35555 | 21846.0 | 0.0082 deg |
+| KDP | UKDP | -32..+32 deg/km | 1023.9375 | 32768.0 | 0.000977 deg/km |
+
+KDP is ODIM-only: NEXRAD Message 31 has no DPKP block, so the KDP chip greys
+out honestly on US sites until a derived path exists. No public feed measured
+on 2026-10-20 publishes KDP/UKDP yet, so the decode is pinned by the
+spec-shaped fixture and the ODIM_H5 v2.4.2 quantity table, not by a live
+volume. Probed 2026-10-20T16:47Z: the DWD open-data `/sites/` index lists
+`sweep_{pcp,vol}_{z,zdr,rhohv,phidp,v}` and no `sweep_*kdp*` product, and the
+OPERA CloudFerro 24 h listing for NL/DE carries
+`@CCORH_DBZH_PHIDP_RHOHV_SQIH_TH_VRADH_WRADH_ZDR.h5` plus `DBZH`/`TH`/`VRADH`
+objects with zero KDP keys.
+
+#### Decoder mapping (`src/core/odim_reader.cpp`)
 
 - `ZDR`/`UZDR` -> DifferentialReflectivity, `RHOHV`/`URHOHV` ->
-  CorrelationCoefficient, `PHIDP`/`UPHIDP` -> DifferentialPhase. The standard
-  identifier wins when a writer publishes both (DBZH-over-TH rule).
-- Re-encode into the shared 16-bit gate convention (0 = missing, 1 = below
-  threshold). Packing spans are chosen so real gates are not clipped:
-  ZDR [-32, +32] dB at 1/1024 dB, RHOHV [0, 1.05] at 1.6e-5, PHIDP
-  [-180, 360] deg at 0.0082 deg (writers publish either range).
+  CorrelationCoefficient, `PHIDP`/`UPHIDP` -> DifferentialPhase,
+  `KDP`/`UKDP` -> SpecificDifferentialPhase. The standard identifier wins when
+  a writer publishes both (DBZH-over-TH rule).
 - A moment absent from a dataset creates no field at all. The UI availability
   gate greys the chip/tab from `DecodedRay::has(...)`, so single-pol volumes
   behave exactly as before (asserted by
-  `testOdimDualPolAbsentOnSinglePolVolumes`).
-- `KDP`/`UKDP` is not mapped: there is no `ProductKind` slot for specific
-  differential phase, and adding one is a product-spine change (descriptor,
-  chip, palette). A KDP-only dataset is counted in
-  `DecodedChunk::rejectedBlocks` and never folded into another product.
+  `testOdimDualPolAbsentOnSinglePolVolumes`), and a KDP-only sweep fills only
+  the KDP slot (asserted by `testOdimDualPolSpecShapedDataset`).
 
 #### Checklist when real 2027 data lands
 
@@ -196,8 +215,9 @@ and the ORD API overview above.
    extending `kDualPolMoments`; only map what the feed really carries.
 3. Spot-check gates against the producer's gain/offset decode to confirm the
    packing spans still cover the real value range without clipping.
-4. If KDP is exchanged, land the product slot first (manager/render), then
-   add it to `kDualPolMoments` with its own packing span.
+4. KDP/UKDP: the product slot and the packing span exist (see above). What is
+   still missing is a live KDP/UKDP object to score the decode against; until
+   one is measured, the spec-shaped fixture is the only pin.
 
 ### 4. Licensing
 
