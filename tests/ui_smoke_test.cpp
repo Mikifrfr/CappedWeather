@@ -2402,16 +2402,24 @@ static bool testHealthIndicator(MainWindow* window, QString* error) {
 
 static bool testScanAgeBlock(MainWindow* window, QString* error) {
     // SCAN age block replaces the LIVE affordance: honest UTC scan time,
-    // static VCP token, whole-minute age, and ray count — amber only when
-    // stale, never a green dot, and no LIVE wording on any playback widget.
+    // whole-minute age, and ray count — amber only when stale, never a green
+    // dot, and no LIVE wording on any playback widget.
     const auto scanTime = QDateTime(QDate(2026, 5, 20), QTime(14, 22, 10), QTimeZone::UTC);
     const auto fresh = MainWindow::scanAgeLabelText(scanTime, 1080, 150);
-    if (fresh != QStringLiteral("SCAN 14:22:10Z · VCP · 2 min old · 1080 rays")) {
+    if (fresh != QStringLiteral("SCAN 14:22:10Z · 2 min old · 1080 rays")) {
         *error = QStringLiteral("SCAN label format wrong, got '%1'").arg(fresh);
         return false;
     }
+    // An unlabelled VCP token would read as a value that failed to load, so the
+    // label must not mention VCP until the decoder actually parses a pattern.
+    // This guard is what stops the empty token from creeping back in.
+    if (fresh.contains(QStringLiteral("VCP"))) {
+        *error = QStringLiteral("SCAN label must not carry a VCP token without a parsed pattern, got '%1'")
+                     .arg(fresh);
+        return false;
+    }
     const auto stale = MainWindow::scanAgeLabelText(scanTime, 720, 600);
-    if (stale != QStringLiteral("SCAN 14:22:10Z · VCP · 10 min old · 720 rays")) {
+    if (stale != QStringLiteral("SCAN 14:22:10Z · 10 min old · 720 rays")) {
         *error = QStringLiteral("SCAN stale label wrong, got '%1'").arg(stale);
         return false;
     }
@@ -2421,7 +2429,7 @@ static bool testScanAgeBlock(MainWindow* window, QString* error) {
         return false;
     }
     const auto unknownRays = MainWindow::scanAgeLabelText(scanTime, -1, 60);
-    if (unknownRays != QStringLiteral("SCAN 14:22:10Z · VCP · 1 min old · — rays")) {
+    if (unknownRays != QStringLiteral("SCAN 14:22:10Z · 1 min old · — rays")) {
         *error = QStringLiteral("SCAN unknown rays should read '— rays', got '%1'").arg(unknownRays);
         return false;
     }

@@ -109,10 +109,11 @@ public:
     // mapping image pixels to lon/lat so GIS tools load the grab in place.
     static QString frameWorldFile(double north, double south, double east, double west,
                                   int imageWidth, int imageHeight, QString* error);
-    // SCAN age block: "SCAN 14:22:10Z · VCP · 3 min old · 1080 rays".
-    // Honest UTC scan time plus whole-minute age and ray count; the VCP
-    // token is static (the decoder carries no VCP number). Public and
-    // static so the label format is unit-testable. rayCount < 0 renders
+    // SCAN age block: "SCAN 14:22:10Z · 3 min old · 1080 rays".
+    // Honest UTC scan time plus whole-minute age and ray count. No VCP token:
+    // the decoder does not parse a Volume Coverage Pattern yet, and rendering
+    // the label without a value reads like data that failed to load. Public
+    // and static so the label format is unit-testable. rayCount < 0 renders
     // as an em-dash (spilled volume whose disk copy is unreadable).
     static QString scanAgeLabelText(const QDateTime& scanTimeUtc, int rayCount, qint64 ageSeconds);
     // Whole-minute age at which the SCAN block turns amber. Matches the

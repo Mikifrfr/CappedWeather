@@ -3187,7 +3187,10 @@ QString MainWindow::scanAgeLabelText(const QDateTime& scanTimeUtc, const int ray
                                     QStringLiteral("Z")
                               : QStringLiteral("—");
     const auto raysText = rayCount >= 0 ? QString::number(rayCount) : QStringLiteral("—");
-    return QStringLiteral("SCAN %1 · VCP · %2 min old · %3 rays")
+    // No VCP token: the decoder does not carry a Volume Coverage Pattern yet,
+    // and a labelled-but-empty "VCP" reads like a value that failed to load.
+    // The slot returns when level2_decoder.cpp actually parses the pattern.
+    return QStringLiteral("SCAN %1 · %2 min old · %3 rays")
         .arg(timeText, QString::number(age / 60), raysText);
 }
 
