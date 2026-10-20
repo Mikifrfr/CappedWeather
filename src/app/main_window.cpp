@@ -2822,6 +2822,11 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
     if (it->chunk) {
         it->chunk = std::move(derived);
         it->cappiHeightM = cappiHeightM;
+        // A derived volume is a superset (ET/VIL/CREF/CAPPI land in it), so the
+        // cached availability mask has to move with it or CAPPI would stay
+        // disabled after it finished deriving.
+        it->availableProducts = availableProductMask(*it->chunk);
+        it->productsKnown = true;
     } else if (!it->spilledPath.isEmpty()) {
         // Frame spilled mid-derive: persist the derived superset over the
         // base spill so a later scrub still gets ET/VIL. Tag the altitude
@@ -2829,6 +2834,11 @@ void MainWindow::swapDerivedVolume(const QString& radarId, const QString& volume
         // base data as fresh.
         if (!spillVolume(*derived, it->spilledPath.toStdString())) return;
         it->cappiHeightM = cappiHeightM;
+        // The mask describes the derived superset, not the base spill it
+        // replaced, so refresh it here too — no chunk needed, it is derived
+        // from the same rays the spill just serialised.
+        it->availableProducts = availableProductMask(*derived);
+        it->productsKnown = true;
         return;
     } else {
         return;
@@ -2930,6 +2940,13 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
     });
     if (duplicate == session->history.end()) {
         session->history.push_back({volumeId, std::move(volume), receivedAt, chunkCount, failedChunks});
+        // Cache the product mask at install time. Availability is queried once per
+        // displayed frame, and the frame may already be spilled by then, so the
+        // answer has to survive without the chunk resident.
+        if (const auto& installed = session->history.back().chunk) {
+            session->history.back().availableProducts = availableProductMask(*installed);
+            session->history.back().productsKnown = true;
+        }
     } else {
         // Already published (e.g. a late duplicate delivery): the frame in
         // history wins, refresh the display and stop. Never showFrame() for
@@ -3344,15 +3361,33 @@ void MainWindow::updateProductAvailability() {
     const auto session = activeSession();
     const auto hasFrame = session && session->frameIndex >= 0 &&
                           session->frameIndex < static_cast<int>(session->history.size());
-    const auto frameChunkForAvailability =
-        hasFrame ? frameChunk(*session, static_cast<std::size_t>(session->frameIndex)) : nullptr;
+    // Availability comes from the frame's cached product mask, computed when the
+    // volume was installed. It used to call frameChunk(), which synchronously
+    // faults a spilled volume back from disk and then spills another frame to
+    // make room — once per animated frame, so playback thrashed the disk just to
+    // decide which chips to enable. The mask is derived from the same decoded
+    // rays and survives spilling, so it answers the same question with no I/O.
+    std::uint16_t mask = 0;
+    bool known = false;
+    if (hasFrame) {
+        auto& frame = session->history[static_cast<std::size_t>(session->frameIndex)];
+        if (!frame.productsKnown) {
+            // Frame installed before the mask existed, or installed empty: derive
+            // it once from a chunk that is already resident. Never fault from disk
+            // here — an unknown mask keeps every product enabled, which is the
+            // pre-existing behaviour for a frame we cannot inspect.
+            if (const auto& chunk = frame.chunk) {
+                frame.availableProducts = availableProductMask(*chunk);
+                frame.productsKnown = true;
+            }
+        }
+        mask = frame.availableProducts;
+        known = frame.productsKnown;
+    }
     int firstAvailable = -1;
     for (int row = 0; row < productCombo_->count(); ++row) {
         const auto product = static_cast<ProductKind>(productCombo_->itemData(row).toInt());
-        const auto available = !hasFrame || !frameChunkForAvailability ||
-                               std::any_of(frameChunkForAvailability->rays.cbegin(),
-                                           frameChunkForAvailability->rays.cend(),
-                                           [product](const DecodedRay& ray) { return ray.has(product); });
+        const auto available = !known || (mask & (1U << static_cast<unsigned>(product))) != 0;
         if (auto* item = itemModel->item(row)) item->setEnabled(available);
         if (available && firstAvailable < 0) firstAvailable = row;
     }

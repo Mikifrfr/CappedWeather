@@ -32,6 +32,16 @@ struct RadarFrame {
     // height on display: a mismatch re-derives in the background instead
     // of showing a silently wrong altitude.
     double cappiHeightM = std::numeric_limits<double>::quiet_NaN();
+    // Which product kinds this volume carries, cached when the volume is
+    // installed. Product availability is asked once per displayed frame, and
+    // asking frameChunk() for it faults a spilled volume back from disk on the
+    // UI thread (then spills another to make room) — disk thrash during
+    // playback. The mask is derived from decoded rays only, so it stays valid
+    // while the frame is spilled. productsKnown separates "carries nothing"
+    // (mask 0, known) from "never computed" (unknown: callers keep everything
+    // enabled rather than guess).
+    std::uint16_t availableProducts = 0;
+    bool productsKnown = false;
 };
 
 struct RadarSession {
@@ -64,6 +74,14 @@ struct RadarSession {
 inline constexpr int kSpilledKeepVolumes = 8;
 
 QString spillFilePath(const QString& radarId, const QString& volumeId);
+
+// Which product kinds at least one ray actually carries, as a bitmask over
+// ProductKind (bit i == ProductKind i). Pure and decoder-only: it needs no chunk
+// residency, so a frame that has spilled to disk can still answer "what do I
+// carry" without a synchronous volume read. Zero means no product is present,
+// which is a real answer for an empty volume — use RadarFrame::productsKnown to
+// tell that apart from a mask that was never computed.
+std::uint16_t availableProductMask(const DecodedChunk& chunk);
 
 // Scrub hit on a spilled frame faults back in synchronously and re-enforces
 // the budget. Null when missing/unreadable (path cleared so we stop retrying).

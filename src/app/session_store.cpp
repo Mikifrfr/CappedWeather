@@ -36,6 +36,20 @@ QString spillFilePath(const QString& radarId, const QString& volumeId) {
            QStringLiteral(".cwdv");
 }
 
+std::uint16_t availableProductMask(const DecodedChunk& chunk) {
+    // Union over rays: a moment counts as present when any ray carries gates for
+    // it, which is the same predicate the availability loop used to run inline
+    // (DecodedRay::has is exactly "fields[kind] is non-empty"). Keeping it in one
+    // place means the cached mask and the old per-frame scan cannot drift.
+    std::uint16_t mask = 0;
+    for (const auto& ray : chunk.rays) {
+        for (std::size_t index = 0; index < ray.fields.size(); ++index) {
+            if (!ray.fields[index].empty()) mask |= static_cast<std::uint16_t>(1U << index);
+        }
+    }
+    return mask;
+}
+
 std::shared_ptr<DecodedChunk> sessionFrameChunk(RadarSession& session, std::size_t index,
                                                int maximumHistoryFrames) {
     if (index >= session.history.size()) return nullptr;

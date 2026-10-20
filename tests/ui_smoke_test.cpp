@@ -2617,6 +2617,74 @@ static bool testTimelineStrip(QString* error) {
     return true;
 }
 
+static bool testProductAvailabilityMask(QString* error) {
+    // Availability must be answerable from a frame that has already spilled to
+    // disk. Asking frameChunk() for it synchronously faults a whole volume back
+    // and spills another to make room — once per animated frame. The mask is
+    // captured at install time instead, so these assertions are the contract the
+    // UI now relies on.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    if (availableProductMask(chunk) != 0) {
+        *error = QStringLiteral("empty chunk should carry no products");
+        return false;
+    }
+    DecodedRay reflectivityOnly;
+    reflectivityOnly.fields[static_cast<std::size_t>(ProductKind::Reflectivity)] = {100, 200};
+    DecodedRay velocityRay;
+    velocityRay.fields[static_cast<std::size_t>(ProductKind::Velocity)] = {50};
+    // A moment counts as present when ANY ray carries it, not when all do.
+    chunk.rays = {reflectivityOnly, velocityRay};
+    const auto both = availableProductMask(chunk);
+    const auto refBit = static_cast<std::uint16_t>(1U << static_cast<unsigned>(ProductKind::Reflectivity));
+    const auto velBit = static_cast<std::uint16_t>(1U << static_cast<unsigned>(ProductKind::Velocity));
+    const auto zdrBit = static_cast<std::uint16_t>(
+        1U << static_cast<unsigned>(ProductKind::DifferentialReflectivity));
+    if ((both & refBit) == 0 || (both & velBit) == 0) {
+        *error = QStringLiteral("mask should union across rays (REF+VEL), got 0x%1")
+                     .arg(both, 0, 16);
+        return false;
+    }
+    if ((both & zdrBit) != 0) {
+        *error = QStringLiteral("mask must not claim a moment no ray carries, got 0x%1")
+                     .arg(both, 0, 16);
+        return false;
+    }
+    // A ray carrying gates for a moment counts even when every gate is a
+    // missing-value sentinel: the moment is present, the values are not.
+    DecodedRay sentinels;
+    sentinels.fields[static_cast<std::size_t>(ProductKind::CorrelationCoefficient)] = {0, 1};
+    chunk.rays = {sentinels};
+    const auto ccBit = static_cast<std::uint16_t>(
+        1U << static_cast<unsigned>(ProductKind::CorrelationCoefficient));
+    if ((availableProductMask(chunk) & ccBit) == 0) {
+        *error = QStringLiteral("a moment with only sentinel gates is still carried");
+        return false;
+    }
+    // The stored mask is what a spilled frame reads: chunk gone, mask intact.
+    RadarFrame spilled;
+    spilled.volumeId = QStringLiteral("KTLX20260520_142210_V06");
+    spilled.availableProducts = both;
+    spilled.productsKnown = true;
+    spilled.chunk.reset();
+    spilled.spilledPath = QStringLiteral("gone-on-purpose.cwdv");
+    if (!spilled.chunk && !spilled.productsKnown) {
+        *error = QStringLiteral("frame should still answer availability while spilled");
+        return false;
+    }
+    if ((spilled.availableProducts & refBit) == 0) {
+        *error = QStringLiteral("spilled frame lost its REF bit");
+        return false;
+    }
+    // Unknown (never computed) must not silently mean "nothing available".
+    const RadarFrame unknown;
+    if (unknown.productsKnown) {
+        *error = QStringLiteral("a fresh frame must start with an unknown mask");
+        return false;
+    }
+    return true;
+}
+
 static bool testLegendSpec(QString* error) {
     // Narrow panels skip the 258 px stack cleanly.
     if (RadarMapCanvas::legendVisibleForWidth(0) || RadarMapCanvas::legendVisibleForWidth(273) ||
@@ -5130,6 +5198,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testLegendSpec(&failure)) {
             std::cerr << "Legend spec failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testProductAvailabilityMask(&failure)) {
+            std::cerr << "Product availability mask failed: " << failure.toStdString() << '\n';
             return 1;
         }
         // Restore main-map view that preset/speed probes may have touched.
