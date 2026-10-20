@@ -125,4 +125,67 @@ bool installPrefetchedChunk(RadarSession& session, const QString& volumeId,
     return true;
 }
 
+std::vector<RainfallFrameSnapshot> rainfallFrameSnapshot(const RadarSession& session,
+                                                         const int maximumVolumes) {
+    std::vector<RainfallFrameSnapshot> frames;
+    const auto total = static_cast<int>(session.history.size());
+    if (total <= 0) return frames;
+    const auto limit = std::max(1, maximumVolumes);
+    const auto first = std::max(0, total - limit);
+    frames.reserve(static_cast<std::size_t>(total - first));
+    for (int index = first; index < total; ++index) {
+        const auto& frame = session.history.at(static_cast<std::size_t>(index));
+        RainfallFrameSnapshot snapshot;
+        snapshot.volumeId = frame.volumeId;
+        snapshot.dataTime = frame.dataTime;
+        snapshot.chunk = frame.chunk;
+        snapshot.spilledPath = frame.spilledPath;
+        frames.push_back(std::move(snapshot));
+    }
+    return frames;
+}
+
+RainfallHistoryResult accumulateRainfallHistory(const std::vector<RainfallFrameSnapshot>& frames,
+                                                const double radarElevationMeters,
+                                                const RainfallConfig& config) {
+    RainfallHistoryResult result;
+    result.frameCount = static_cast<int>(frames.size());
+    if (frames.empty()) return result;
+
+    // Faulted-in spills have to outlive the accumulation call: RainfallSample
+    // borrows the chunk, so this vector is the owner for the duration.
+    std::vector<std::shared_ptr<DecodedChunk>> faulted;
+    std::vector<RainfallSample> samples;
+    faulted.reserve(frames.size());
+    samples.reserve(frames.size());
+    for (const auto& frame : frames) {
+        // No frame time means no honest interval: the spill format cannot
+        // supply one and mtime is not a scan clock. Skip, never guess.
+        if (!frame.dataTime.isValid()) continue;
+        std::shared_ptr<DecodedChunk> chunk = frame.chunk;
+        if (!chunk) {
+            if (frame.spilledPath.isEmpty()) continue;
+            chunk = loadSpilledVolume(frame.spilledPath.toStdString());
+            if (!chunk) {
+                ++result.unreadableSpillCount;
+                continue;
+            }
+            faulted.push_back(chunk);
+        }
+        RainfallSample sample;
+        sample.chunk = chunk.get();
+        sample.secondsSinceEpoch = static_cast<double>(frame.dataTime.toSecsSinceEpoch());
+        samples.push_back(sample);
+        if (!result.oldestVolumeTime.isValid() || frame.dataTime < result.oldestVolumeTime)
+            result.oldestVolumeTime = frame.dataTime;
+        if (!result.newestVolumeTime.isValid() || frame.dataTime > result.newestVolumeTime)
+            result.newestVolumeTime = frame.dataTime;
+        result.radarId = chunk->radarId.empty() ? result.radarId
+                                                : QString::fromStdString(chunk->radarId);
+    }
+    result.grid = accumulateRainfall(samples, radarElevationMeters,
+                                     std::numeric_limits<double>::quiet_NaN(), config);
+    return result;
+}
+
 }  // namespace cappedweather

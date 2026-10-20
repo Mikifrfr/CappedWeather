@@ -1934,6 +1934,40 @@ void MainWindow::buildUi() {
     displayGroup->addLayout(scanRow);
     displayPageLayout->addSpacing(2);
 
+    // Rainfall (Z-R estimate). A history product, not a measurement: the block
+    // leads with the product name and its peak, then the window it actually
+    // covered, then the quality flag with the dominant caveat. Nothing here is
+    // allowed to read as observed rainfall — that framing is enforced by the
+    // three text builders, which are unit-tested.
+    auto* rainfallGroup = makeGroup(displayPageLayout, QStringLiteral("Rainfall (Z-R estimate)"),
+                                    QStringLiteral("rainfall"));
+    rainfallEstimateLabel_ = new QLabel(QStringLiteral("Z-R estimate — no radar selected"), controlBody);
+    rainfallEstimateLabel_->setObjectName(QStringLiteral("rainfallEstimateLabel"));
+    rainfallEstimateLabel_->setWordWrap(true);
+    rainfallEstimateLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rainfallGroup->addWidget(rainfallEstimateLabel_);
+    rainfallCoverageLabel_ = new QLabel(QString{}, controlBody);
+    rainfallCoverageLabel_->setObjectName(QStringLiteral("rainfallCoverageLabel"));
+    rainfallCoverageLabel_->setWordWrap(true);
+    rainfallCoverageLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rainfallGroup->addWidget(rainfallCoverageLabel_);
+    rainfallQualityLabel_ = new QLabel(QString{}, controlBody);
+    rainfallQualityLabel_->setObjectName(QStringLiteral("rainfallQualityLabel"));
+    rainfallQualityLabel_->setWordWrap(true);
+    rainfallQualityLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rainfallGroup->addWidget(rainfallQualityLabel_);
+    auto* rainfallRow = new QHBoxLayout();
+    rainfallRow->addStretch(1);
+    rainfallDetailsButton_ = new QToolButton(controlBody);
+    rainfallDetailsButton_->setObjectName(QStringLiteral("rainfallDetailsButton"));
+    rainfallDetailsButton_->setText(QStringLiteral("Details"));
+    rainfallDetailsButton_->setToolTip(
+        QStringLiteral("Window, coverage, peak gate and the per-flag provenance counts behind the estimate"));
+    connect(rainfallDetailsButton_, &QToolButton::clicked, this, &MainWindow::showRainfallDetails);
+    rainfallRow->addWidget(rainfallDetailsButton_);
+    rainfallGroup->addLayout(rainfallRow);
+    displayPageLayout->addSpacing(2);
+
     // Alert tuning lives next to the inbox it governs, on the Alerts tab.
     auto* notifyCaption = new QLabel(QStringLiteral("Notify me about new items"), controlBody);
     notifyCaption->setObjectName(QStringLiteral("groupCaption"));
@@ -2578,6 +2612,9 @@ void MainWindow::radarSelected(const QModelIndex& index) {
     updateStationSummary();
     updateUnifiedStatus();
     if (!existed) clearDownloadedFor(radarId);
+    // The readout follows the selection: a radar with a cached window shows its
+    // estimate immediately, a fresh one says how many volumes it still needs.
+    scheduleRainfallEstimate();
     session->requestActive = true;
     requestLatestFor(radarId);
     if (!session->history.empty()) {
@@ -3007,6 +3044,10 @@ void MainWindow::finalizeVolumeReady(const QString& radarId, const QString& volu
         updateStationSummary();
         updateUnifiedStatus();
     }
+    // A volume landed in this session: the active radar's Z-R window changed.
+    // Signature-guarded and one worker at a time, so this is free for
+    // background radars in mixed layouts.
+    if (radarId == selectedRadarId_) scheduleRainfallEstimate();
     if (session->historyRequested && !session->historyLoadStarted) {
         QTimer::singleShot(0, this, [this, radarId] {
             const auto current = sessionFor(radarId, false);
@@ -3196,6 +3237,114 @@ void MainWindow::rebuildTiltCombo() {
     rebuildTiltGrid();
 }
 
+namespace {
+
+// "15 min" for a rainfall window readout. Sub-minute spans say "<1 min"
+// instead of rounding down to a zero that would look like no coverage.
+QString rainfallMinutesText(const double seconds) {
+    if (!(seconds > 0.0)) return QStringLiteral("0 min");
+    if (seconds < 60.0) return QStringLiteral("<1 min");
+    return QStringLiteral("%1 min").arg(qRound(seconds / 60.0));
+}
+
+// Share of rain-bearing gates a flag touched: gates that carry depth plus the
+// gates the guard excluded (which would otherwise have carried depth). Zero
+// safe and capped at 100 — a flag on a gate with no depth is still counted.
+QString rainfallFlagShareText(const std::size_t flagged, const RainfallSummary& summary) {
+    const auto bearing = summary.depthGateCount + summary.clutterSuspectGateCount +
+                         summary.nonMeteorologicalGateCount;
+    if (bearing == 0) return QStringLiteral("—");
+    const auto percent = std::min<std::size_t>(100, (flagged * 100 + bearing / 2) / bearing);
+    return QStringLiteral("%1%").arg(percent);
+}
+
+}  // namespace
+
+QString MainWindow::rainfallEstimateLine(const RainfallSummary& summary) {
+    // Never a bare number: the product name travels with every value, and an
+    // unscorable window says so instead of showing 0.0 mm (which would read as
+    // a measured dry spell).
+    if (!summary.valid || summary.quality == RainfallQuality::Invalid)
+        return QStringLiteral("Z-R estimate — unavailable");
+    return QStringLiteral("Z-R estimate — peak %1 mm")
+        .arg(QString::number(summary.maximumMillimeters, 'f', 1));
+}
+
+QString MainWindow::rainfallCoverageLine(const RainfallSummary& summary) {
+    if (!summary.valid || summary.quality == RainfallQuality::Invalid)
+        return QStringLiteral("No window scored");
+    return QStringLiteral("%1 credited of %2 window · %3 volumes")
+        .arg(rainfallMinutesText(summary.coveredSeconds), rainfallMinutesText(summary.windowSeconds))
+        .arg(summary.sampleCount);
+}
+
+QString MainWindow::rainfallQualityLine(const RainfallSummary& summary) {
+    // Quality flag plus its dominant caveat, never just a colour or a word.
+    // Priority inside Marginal: a clamped gap shortens credited time first,
+    // then the guard's blind spots, then rays missing an interval, then a short
+    // window. The pop-out carries the full per-flag table either way.
+    switch (summary.quality) {
+        case RainfallQuality::Invalid: {
+            QString reason = QStringLiteral("no usable reflectivity geometry");
+            if (summary.sampleCount < 2) {
+                reason = QStringLiteral("fewer than 2 usable volumes");
+            } else if (!(summary.windowSeconds > 0.0)) {
+                reason = QStringLiteral("no time span between volumes");
+            } else if (!(summary.coveredSeconds > 0.0)) {
+                reason = QStringLiteral("no credited integration time");
+            }
+            return QStringLiteral("Quality: Invalid — %1").arg(reason);
+        }
+        case RainfallQuality::Poor: {
+            const auto share = summary.windowSeconds > 0.0
+                                   ? summary.coveredSeconds / summary.windowSeconds
+                                   : 0.0;
+            if (share < 0.5) {
+                return QStringLiteral("Quality: Poor — only %1% of the window covered")
+                    .arg(qRound(100.0 * share));
+            }
+            const auto excluded =
+                summary.clutterSuspectGateCount + summary.nonMeteorologicalGateCount;
+            return QStringLiteral("Quality: Poor — clutter or non-meteorological echo on %1 of echo gates")
+                .arg(rainfallFlagShareText(excluded, summary));
+        }
+        case RainfallQuality::Marginal: {
+            if (summary.gapClampedIntervalCount > 0) {
+                return QStringLiteral("Quality: Marginal — %1 gap-clamped interval%2 (missing volumes)")
+                    .arg(summary.gapClampedIntervalCount)
+                    .arg(summary.gapClampedIntervalCount == 1 ? QString{}
+                                                              : QStringLiteral("s"));
+            }
+            if (summary.noVerticalCheckGateCount > 0) {
+                return QStringLiteral(
+                           "Quality: Marginal — %1 gates (%2 of echo gates) where the column guard could not run")
+                    .arg(summary.noVerticalCheckGateCount)
+                    .arg(rainfallFlagShareText(summary.noVerticalCheckGateCount, summary));
+            }
+            if (summary.incompleteGateCount > 0) {
+                return QStringLiteral(
+                           "Quality: Marginal — %1 gates (%2 of echo gates) missing at least one volume")
+                    .arg(summary.incompleteGateCount)
+                    .arg(rainfallFlagShareText(summary.incompleteGateCount, summary));
+            }
+            return QStringLiteral("Quality: Marginal — %1 volumes, a short window")
+                .arg(summary.sampleCount);
+        }
+        case RainfallQuality::Good:
+            break;
+    }
+    // Good is only reached with no gap, no blind spot and no missing ray, so the
+    // only thing left to state is whether the whole span was credited.
+    const auto fullyCredited = summary.windowSeconds > 0.0 &&
+                               summary.coveredSeconds >= summary.windowSeconds - 0.5;
+    const auto coverage = fullyCredited
+                              ? QStringLiteral("window fully credited")
+                              : QStringLiteral("%1% of the window credited")
+                                    .arg(qRound(100.0 * summary.coveredSeconds /
+                                                std::max(1e-9, summary.windowSeconds)));
+    return QStringLiteral("Quality: Good — %1, guard ran where it mattered").arg(coverage);
+}
+
 QString MainWindow::scanAgeLabelText(const QDateTime& scanTimeUtc, const int rayCount,
                                      const qint64 ageSeconds) {
     const auto age = std::max<qint64>(0, ageSeconds);
@@ -3233,6 +3382,130 @@ void MainWindow::refreshScanAgeLabel() {
             .arg(session->followLatest && isLatest
                      ? QStringLiteral("Following the newest volume (L)")
                      : QStringLiteral("Not following — press L for the newest volume")));
+}
+
+void MainWindow::scheduleRainfallEstimate() {
+    // Cheap by design: showFrame(), volume installs, selection changes and
+    // archive loads all funnel here, so the only cost is a signature compare.
+    // A resident/spilled swap does not change the signature because a spilled
+    // frame is still scored — it is faulted in on the worker, by path.
+    const auto session = activeSession();
+    QString signature;
+    if (!session) {
+        signature = QStringLiteral("no-session");
+    } else if (session->history.empty()) {
+        signature = session->radarId + QStringLiteral("|empty");
+    } else {
+        signature = QStringLiteral("%1|%2|%3")
+                        .arg(session->radarId)
+                        .arg(session->history.size())
+                        .arg(session->history.back().volumeId);
+    }
+    if (signature == rainfallSignature_) return;
+    rainfallSignature_ = signature;
+    if (rainfallInFlight_) {
+        rainfallDirty_ = true;  // one job at a time; re-run when it lands
+        return;
+    }
+    startRainfallCompute();
+}
+
+void MainWindow::startRainfallCompute() {
+    const auto session = activeSession();
+    if (!session || session->history.size() < 2) {
+        rainfallLatest_ = {};
+        rainfallJobRadarId_.clear();
+        refreshRainfallLabels();
+        return;
+    }
+    // Antenna altitude is part of the beam-height guard: without it the guard
+    // would judge beam heights from sea level for a mountain site.
+    double radarElevationMeters = 0.0;
+    if (model_) {
+        const auto row = model_->rowForRadar(session->radarId);
+        if (row >= 0) radarElevationMeters = model_->siteAt(row).antennaElevationMeters;
+    }
+    const auto frames = std::make_shared<std::vector<RainfallFrameSnapshot>>(
+        rainfallFrameSnapshot(*session, 40));
+    const QString radarId = session->radarId;
+    const QPointer<MainWindow> guard(this);
+    rainfallJobRadarId_ = radarId;
+    rainfallInFlight_ = true;
+    QThreadPool::globalInstance()->start([guard, frames, radarElevationMeters, radarId] {
+        // Volume-sized work: one column pass per volume. Off the GUI thread so
+        // playback and scrubbing never wait on it.
+        auto result = std::make_shared<RainfallHistoryResult>(
+            accumulateRainfallHistory(*frames, radarElevationMeters));
+        if (!guard) return;
+        QMetaObject::invokeMethod(
+            guard.data(),
+            [guard, result] {
+                if (!guard) return;
+                guard->applyRainfallEstimate(std::move(*result));
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::applyRainfallEstimate(RainfallHistoryResult result) {
+    rainfallInFlight_ = false;
+    const auto session = activeSession();
+    const auto currentRadarId = session ? session->radarId : QString{};
+    if (rainfallJobRadarId_ != currentRadarId) {
+        // The selection moved while this window was integrating: the grid
+        // belongs to a radar the user is no longer looking at. Drop it and
+        // score the current window instead of painting a stale number.
+        rainfallDirty_ = false;
+        startRainfallCompute();
+        return;
+    }
+    rainfallLatest_ = std::move(result);
+    refreshRainfallLabels();
+    populateRainfallDialog();
+    if (rainfallDirty_) {
+        rainfallDirty_ = false;
+        startRainfallCompute();
+    }
+}
+
+void MainWindow::refreshRainfallLabels() {
+    if (!rainfallEstimateLabel_ || !rainfallCoverageLabel_ || !rainfallQualityLabel_) return;
+    const auto session = activeSession();
+    const auto& grid = rainfallLatest_.grid;
+    const auto& summary = grid.summary;
+    QString estimate;
+    QString coverage;
+    QString quality;
+    if (!session) {
+        estimate = QStringLiteral("Z-R estimate — no radar selected");
+        coverage = QStringLiteral("Pick a station to score the volumes it holds.");
+    } else if (session->history.size() < 2) {
+        estimate = QStringLiteral("Z-R estimate — %1 of 2 volumes loaded")
+                       .arg(session->history.size());
+        coverage = QStringLiteral("Needs two volumes with scan times before it can integrate.");
+    } else if ((!rainfallLatest_.radarId.isEmpty() && rainfallLatest_.radarId != session->radarId) ||
+               (summary.sampleCount == 0 && rainfallInFlight_)) {
+        // Either the previous grid belongs to another radar or this window has
+        // not been scored yet: say so instead of leaving a foreign number up.
+        estimate = QStringLiteral("Z-R estimate — scoring %1 volumes…")
+                       .arg(session->history.size());
+        coverage = QStringLiteral("Window and coverage land when the pass finishes.");
+    } else {
+        estimate = rainfallEstimateLine(summary);
+        coverage = rainfallCoverageLine(summary);
+        quality = rainfallQualityLine(summary);
+    }
+    rainfallEstimateLabel_->setText(estimate);
+    rainfallEstimateLabel_->setToolTip(
+        QStringLiteral("Z-R relation on the lowest tilt of each volume in the window. The newest "
+                       "volume is not credited (left hold), so this is a lower-bound estimate, "
+                       "never an observed rainfall total."));
+    rainfallCoverageLabel_->setText(coverage);
+    rainfallQualityLabel_->setText(quality);
+    rainfallQualityLabel_->setVisible(!quality.isEmpty());
+    // No enable/disable on Details: the pop-out is where the reason ("needs two
+    // volumes with scan times") is spelled out, so hiding the button would hide
+    // the answer instead of giving it.
 }
 
 void MainWindow::showFrame(const int index) {
@@ -3352,6 +3625,7 @@ void MainWindow::showFrame(const int index) {
     updatePanelAttribution();
     refreshCrossSection();
     refreshScanDialog();
+    scheduleRainfallEstimate();
     scheduleSpillPrefetch();
 }
 
@@ -4562,6 +4836,9 @@ void MainWindow::showCommandPalette() {
              });
     addEntry(QStringLiteral("View: data-saver preset"), QStringLiteral("Flaky-cellular chase mode"),
              [this] { applyDataSaverPreset(); });
+    addEntry(QStringLiteral("Analysis: rainfall estimate details"),
+             QStringLiteral("Z-R window, coverage and provenance flags"),
+             [this] { showRainfallDetails(); });
     addEntry(QStringLiteral("Export: snapshot PNG"), QStringLiteral("Shortcut Ctrl+S"),
              [this] { exportSnapshot(); });
     addEntry(QStringLiteral("Export: timeline GIF"), QStringLiteral("Cancellable, with progress"),
@@ -5708,6 +5985,178 @@ void MainWindow::populateScanDialog() {
     }
 }
 
+void MainWindow::showRainfallDetails() {
+    if (rainfallDialog_) {
+        populateRainfallDialog();
+        rainfallDialog_->show();
+        rainfallDialog_->raise();
+        rainfallDialog_->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setModal(false);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->resize(760, 500);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
+    rainfallDialogSummary_ = new QLabel(dialog);
+    rainfallDialogSummary_->setObjectName(QStringLiteral("rainfallDialogSummary"));
+    rainfallDialogSummary_->setWordWrap(true);
+    rainfallDialogSummary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(rainfallDialogSummary_);
+    rainfallFlagTable_ = new QTableWidget(dialog);
+    rainfallFlagTable_->setObjectName(QStringLiteral("rainfallFlagTable"));
+    rainfallFlagTable_->setColumnCount(3);
+    rainfallFlagTable_->setHorizontalHeaderLabels({QStringLiteral("Provenance flag"),
+                                                   QStringLiteral("Gates"),
+                                                   QStringLiteral("Share of echo gates")});
+    rainfallFlagTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    rainfallFlagTable_->horizontalHeader()->setStretchLastSection(true);
+    rainfallFlagTable_->verticalHeader()->setVisible(false);
+    rainfallFlagTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    rainfallFlagTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    layout->addWidget(rainfallFlagTable_, 1);
+    rainfallDialogNotes_ = new QLabel(dialog);
+    rainfallDialogNotes_->setObjectName(QStringLiteral("rainfallDialogNotes"));
+    rainfallDialogNotes_->setWordWrap(true);
+    rainfallDialogNotes_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(rainfallDialogNotes_);
+    auto* buttons = new QHBoxLayout();
+    buttons->addStretch(1);
+    auto* refreshButton = new QToolButton(dialog);
+    refreshButton->setText(QStringLiteral("Refresh"));
+    connect(refreshButton, &QToolButton::clicked, this, [this] {
+        if (!rainfallInFlight_) startRainfallCompute();
+    });
+    buttons->addWidget(refreshButton);
+    auto* closeButton = new QToolButton(dialog);
+    closeButton->setText(QStringLiteral("Close"));
+    connect(closeButton, &QToolButton::clicked, dialog, &QDialog::close);
+    buttons->addWidget(closeButton);
+    layout->addLayout(buttons);
+    rainfallDialog_ = dialog;
+    connect(dialog, &QObject::destroyed, this, [this] {
+        rainfallDialogSummary_ = nullptr;
+        rainfallFlagTable_ = nullptr;
+        rainfallDialogNotes_ = nullptr;
+    });
+    populateRainfallDialog();
+    dialog->show();
+}
+
+void MainWindow::populateRainfallDialog() {
+    if (!rainfallDialog_ || !rainfallDialogSummary_ || !rainfallFlagTable_ ||
+        !rainfallDialogNotes_)
+        return;
+    const auto session = activeSession();
+    const auto& grid = rainfallLatest_.grid;
+    const auto& summary = grid.summary;
+    const auto radarId = !rainfallLatest_.radarId.isEmpty()
+                             ? rainfallLatest_.radarId
+                             : (session ? session->radarId : QString{});
+    rainfallDialog_->setWindowTitle(
+        radarId.isEmpty() ? QStringLiteral("Z-R rainfall estimate")
+                          : QStringLiteral("Z-R rainfall estimate — %1").arg(radarId));
+    if (!summary.valid || summary.quality == RainfallQuality::Invalid) {
+        rainfallDialogSummary_->setText(
+            rainfallEstimateLine(summary) + QLatin1Char('\n') + rainfallCoverageLine(summary) +
+            QLatin1Char('\n') + rainfallQualityLine(summary));
+        rainfallFlagTable_->setRowCount(0);
+        rainfallDialogNotes_->setText(QStringLiteral(
+            "Nothing is scored until at least two volumes with scan times are in the window. "
+            "A volume's scan time comes from the frame itself; the spill file cannot supply "
+            "one. Guidance only, never warnings."));
+        return;
+    }
+    rainfallDialogSummary_->setText(
+        rainfallEstimateLine(summary) + QLatin1Char('\n') + rainfallCoverageLine(summary) +
+        QLatin1Char('\n') + rainfallQualityLine(summary));
+
+    struct FlagRow {
+        const char* label;
+        std::size_t count;
+    };
+    const FlagRow rows[] = {
+        {"Clutter suspect — strong echo with no column above 3 km", summary.clutterSuspectGateCount},
+        {"Non-meteorological — dual-pol CC below 0.80", summary.nonMeteorologicalGateCount},
+        {"Hail capped — reflectivity above 53 dBZ, rate clamped", summary.hailCappedGateCount},
+        {"Beam above 2 km MSL — depth kept, weak provenance", summary.beamHighGateCount},
+        {"Beyond the 230 km QPE range — no depth", summary.rangeLimitedGateCount},
+        {"Missing at least one volume — no depth for it", summary.incompleteGateCount},
+        {"Column guard could not run — depth kept, untested", summary.noVerticalCheckGateCount},
+        {"Gap-clamped interval — credited 600 s maximum", summary.gapClampedGateCount},
+        {"Depth saturated — hit the storage cap", summary.depthSaturatedGateCount},
+    };
+    const auto rowCount = static_cast<int>(std::size(rows));
+    rainfallFlagTable_->setRowCount(rowCount);
+    for (int row = 0; row < rowCount; ++row) {
+        auto* nameItem = new QTableWidgetItem(QString::fromUtf8(rows[row].label));
+        auto* countItem = new QTableWidgetItem(QString::number(rows[row].count));
+        countItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        auto* shareItem = new QTableWidgetItem(
+            rainfallFlagShareText(rows[row].count, summary));
+        shareItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        rainfallFlagTable_->setItem(row, 0, nameItem);
+        rainfallFlagTable_->setItem(row, 1, countItem);
+        rainfallFlagTable_->setItem(row, 2, shareItem);
+    }
+
+    QString peakText = QStringLiteral("Peak gate: —");
+    if (summary.haveMaximum) {
+        double azimuth = std::numeric_limits<double>::quiet_NaN();
+        for (const auto& ray : grid.rays) {
+            if (ray.referenceRayIndex == summary.maximumRayIndex) {
+                azimuth = ray.azimuthDegrees;
+                break;
+            }
+        }
+        const auto rangeMeters = static_cast<double>(grid.firstGateMeters) +
+                                 static_cast<double>(summary.maximumGateIndex) *
+                                     static_cast<double>(grid.gateSpacingMeters);
+        peakText = QStringLiteral("Peak gate: %1 / %2 km (ray %3, gate %4)")
+                       .arg(std::isnan(azimuth)
+                                ? QStringLiteral("—")
+                                : QStringLiteral("%1°").arg(azimuth, 0, 'f', 0),
+                            QString::number(rangeMeters / 1000.0, 'f', 1))
+                       .arg(summary.maximumRayIndex)
+                       .arg(summary.maximumGateIndex);
+    }
+    const auto timeText = [](const QDateTime& time) {
+        return time.isValid() ? time.toUTC().toString(QStringLiteral("HH:mm:ss")) +
+                                    QStringLiteral("Z")
+                              : QStringLiteral("—");
+    };
+    QStringList notes;
+    notes << peakText;
+    notes << QStringLiteral("Mean over scored gates: %1 mm across %2 gates · reference grid %3 m first gate, %4 m spacing, %5° elevation")
+                 .arg(QString::number(summary.meanMillimeters, 'f', 2))
+                 .arg(summary.depthGateCount)
+                 .arg(grid.firstGateMeters)
+                 .arg(grid.gateSpacingMeters)
+                 .arg(QString::number(grid.referenceElevationDegrees, 'f', 1));
+    notes << QStringLiteral("Window: %1 → %2 · %3 volumes · %4 credited intervals · %5 gap-clamped")
+                 .arg(timeText(rainfallLatest_.oldestVolumeTime),
+                      timeText(rainfallLatest_.newestVolumeTime))
+                 .arg(summary.sampleCount)
+                 .arg(summary.intervalCount)
+                 .arg(summary.gapClampedIntervalCount);
+    notes << QStringLiteral("Frames handed in: %1 · rejected samples: %2 · unreadable spills: %3")
+                 .arg(rainfallLatest_.frameCount)
+                 .arg(summary.rejectedSampleCount)
+                 .arg(rainfallLatest_.unreadableSpillCount);
+    notes << QStringLiteral(
+        "Relation: R = (Z/300)^(1/1.4) mm/h on each volume's lowest tilt, 5 dBZ floor, 53 dBZ "
+        "hail cap, 230 km range cap, beam trusted to 2 km MSL and refused above 4 km, column-top "
+        "clutter veto, ground-range remap across changing gate geometries.");
+    notes << QStringLiteral(
+        "Not validated: zero cases scored against gauges or MRMS (docs/rainfall-validation.md). "
+        "Guidance only, never warnings. Left hold credits nothing after the newest volume, so "
+        "this is a lower bound; codes 0/1 read as no rain where the format does not say which "
+        "is which.");
+    rainfallDialogNotes_->setText(notes.join(QLatin1Char('\n')));
+}
+
 void MainWindow::importCustomPalette() {
     const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Import radar palette"), {},
                                                    QStringLiteral("Palette files (*.txt *.pal *.csv);;All files (*)"));
@@ -6611,6 +7060,9 @@ void MainWindow::prepareArchiveCase(const int requestedFrames) {
         session->historyLoadStarted = false;
         session->playWhenHistoryReady = false;
     }
+    // History was wiped for the incoming archive: clear the readout rather than
+    // leaving the previous case's estimate on screen.
+    scheduleRainfallEstimate();
     updatePlaybackControls();
 }
 
