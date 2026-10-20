@@ -4,10 +4,16 @@
 // (bias/RMSE/|d|>5 dB share), and beam-height mismatch where both see echo.
 // --cappi HMSL swaps the matched tilt for altitude-matched sampling (each
 // radar's tilt closest to HMSL MSL per cell) to score CAPPI compositing.
-// Same decode + geometry as the live canvas (decodeLevel2Archive,
-// rangeAndBearing, gateIndexForSlantRange, nativeValue), so the numbers
-// describe production sampling, not a toy model. Deterministic: fixed grid,
-// no network, exit 0 with a report, nonzero on misuse or decode failure.
+// --footprint own|common averages every gate whose beam volume overlaps the
+// cell instead of one gate (resolution-aware blending, with --footprint-scale
+// to widen the window) and --blocks splits the paired delta's variance by
+// scale, so an averaging win can be told apart from real agreement: a delta
+// that is spatially white is representativeness error, a coherent one is
+// altitude, calibration or microphysics. Same decode + geometry as the live
+// canvas (`decodeLevel2Archive`, `rangeAndBearing`, `gateIndexForSlantRange`,
+// `nativeValue`), so the numbers describe production sampling, not a toy
+// model. Deterministic: fixed grid, no network, exit 0 with a report,
+// nonzero on misuse or decode failure.
 
 #include "app/archive_level2.hpp"
 #include "core/level2_decoder.hpp"
@@ -51,6 +57,88 @@ struct CellSample {
     double dbz = std::numeric_limits<double>::quiet_NaN();
     double beamMslMeters = std::numeric_limits<double>::quiet_NaN();
 };
+
+// Per-gate footprint average: every gate whose beam volume overlaps the
+// cell's cross-track / along-track window, equal weight. Censored gates
+// (0/1 = missing/below detection) are counted but never averaged, so the
+// mean is the detected-part mean and the valid share says how much of the
+// volume that was. No interpolation, no fill.
+struct FootprintSample {
+    bool valid = false;
+    double dbz = std::numeric_limits<double>::quiet_NaN();
+    double beamMslMeters = std::numeric_limits<double>::quiet_NaN();
+    long long gatesValid = 0;
+    long long gatesTotal = 0;
+    double distanceMeters = 0.0;
+};
+
+// Half-widths of one gate's beam volume projected on the ground: cross-track
+// from the azimuth beamwidth at this range, along-track from gate spacing.
+struct FootprintExtent {
+    double along = 0.0;
+    double radial = 0.0;
+};
+
+// Range/bearing to the cell plus the nearest ray in a tilt index. Shared by
+// the point and footprint samplers so both apply identical azimuth QC.
+struct RayHit {
+    bool ok = false;
+    std::size_t rayIndex = 0;
+    double distanceMeters = 0.0;
+    double bearingDegrees = 0.0;
+    double slantMeters = 0.0;
+    double azimuthDiffDegrees = 0.0;
+};
+
+RayHit locateRay(const VolumeView& view,
+                 const std::vector<std::pair<double, std::size_t>>& index, double lat,
+                 double lon) {
+    using namespace cappedweather;
+    RayHit hit;
+    if (index.empty()) return hit;
+    const auto location = rangeAndBearing({view.siteLat, view.siteLon}, {lat, lon});
+    if (!std::isfinite(location.distanceMeters) || location.distanceMeters < 1000.0 ||
+        location.distanceMeters > 460000.0)
+        return hit;
+    const auto circularDifference = [azimuth = location.bearingDegrees](double candidate) {
+        const double direct = std::abs(candidate - azimuth);
+        return std::min(direct, 360.0 - direct);
+    };
+    const auto candidate =
+        std::lower_bound(index.cbegin(), index.cend(), location.bearingDegrees,
+                         [](const auto& indexed, double target) { return indexed.first < target; });
+    auto nearest = candidate == index.cend() ? index.cbegin() : candidate;
+    auto nearestDiff = circularDifference(nearest->first);
+    const auto previous =
+        candidate == index.cbegin() ? std::prev(index.cend()) : std::prev(candidate);
+    if (circularDifference(previous->first) < nearestDiff) {
+        nearest = previous;
+        nearestDiff = circularDifference(previous->first);
+    }
+    const auto& ray = view.chunk.rays.at(nearest->second);
+    hit.ok = true;
+    hit.rayIndex = nearest->second;
+    hit.distanceMeters = location.distanceMeters;
+    hit.bearingDegrees = location.bearingDegrees;
+    hit.azimuthDiffDegrees = nearestDiff;
+    hit.slantMeters = slantRangeForSurfaceDistance(location.distanceMeters, ray.elevationDegrees);
+    return hit;
+}
+
+// A radar only samples this cell if a real ray points at its azimuth.
+bool rayCoversBearing(const cappedweather::DecodedRay& ray, double azimuthDiffDegrees) {
+    return azimuthDiffDegrees <= std::max(1.5, ray.azimuthResolutionDegrees * 1.5);
+}
+
+FootprintExtent footprintForRay(const cappedweather::DecodedRay& ray, double surfaceDistanceMeters) {
+    constexpr std::size_t kProduct = static_cast<std::size_t>(cappedweather::ProductKind::Reflectivity);
+    FootprintExtent extent;
+    extent.along = 0.5 * ray.azimuthResolutionDegrees * 3.14159265358979323846 / 180.0 *
+                   surfaceDistanceMeters;
+    extent.radial =
+        0.5 * static_cast<double>(ray.gateSpacingByProduct.at(kProduct));
+    return extent;
+}
 
 bool loadVolume(const std::string& path, const std::string& radarId, double targetElev,
                 VolumeView& out, std::string& error) {
@@ -178,43 +266,84 @@ bool sampleTiltRays(const VolumeView& view,
                     const std::vector<std::pair<double, std::size_t>>& index, double lat,
                     double lon, double& beamMslMeters, double& dbz) {
     using namespace cappedweather;
-    if (index.empty()) return false;
-    const auto location =
-        rangeAndBearing({view.siteLat, view.siteLon}, {lat, lon});
-    if (!std::isfinite(location.distanceMeters) || location.distanceMeters < 1000.0 ||
-        location.distanceMeters > 460000.0)
-        return false;
-    const auto circularDifference = [azimuth = location.bearingDegrees](double candidate) {
-        const double direct = std::abs(candidate - azimuth);
-        return std::min(direct, 360.0 - direct);
-    };
-    const auto candidate =
-        std::lower_bound(index.cbegin(), index.cend(), location.bearingDegrees,
-                         [](const auto& indexed, double target) { return indexed.first < target; });
-    auto nearest = candidate == index.cend() ? index.cbegin() : candidate;
-    auto nearestDiff = circularDifference(nearest->first);
-    const auto previous =
-        candidate == index.cbegin() ? std::prev(index.cend()) : std::prev(candidate);
-    if (circularDifference(previous->first) < nearestDiff) {
-        nearest = previous;
-        nearestDiff = circularDifference(previous->first);
-    }
+    const auto hit = locateRay(view, index, lat, lon);
+    if (!hit.ok) return false;
     constexpr std::size_t kProduct = static_cast<std::size_t>(ProductKind::Reflectivity);
-    const auto& ray = view.chunk.rays.at(nearest->second);
-    if (nearestDiff > std::max(1.5, ray.azimuthResolutionDegrees * 1.5)) return false;
-    const auto slant =
-        slantRangeForSurfaceDistance(location.distanceMeters, ray.elevationDegrees);
-    const auto gate = gateIndexForSlantRange(slant, ray.firstGateByProduct.at(kProduct),
-                                            ray.gateSpacingByProduct.at(kProduct),
-                                            ray.fields.at(kProduct).size());
+    const auto& ray = view.chunk.rays.at(hit.rayIndex);
+    if (!rayCoversBearing(ray, hit.azimuthDiffDegrees)) return false;
+    const auto gate = gateIndexForSlantRange(hit.slantMeters, ray.firstGateByProduct.at(kProduct),
+                                             ray.gateSpacingByProduct.at(kProduct),
+                                             ray.fields.at(kProduct).size());
     if (!gate) return false;
     const auto value = nativeValue(ray.fields.at(kProduct).at(*gate),
                                    ray.scaleByProduct.at(kProduct), ray.offsetByProduct.at(kProduct));
     if (!value.has_value()) return false;
-    const BeamGeometry beam = standardBeamGeometry(slant, ray.elevationDegrees);
+    const BeamGeometry beam = standardBeamGeometry(hit.slantMeters, ray.elevationDegrees);
     beamMslMeters = view.siteMslMeters + beam.heightAboveRadarMeters;
     dbz = *value;
     return true;
+}
+
+// Footprint average inside one tilt: every gate whose beam volume overlaps
+// the cell, equal weight. Uses the same azimuth QC as the point sampler, so
+// the only difference between the two is the averaging window.
+FootprintSample sampleFootprint(const VolumeView& view,
+                                const std::vector<std::pair<double, std::size_t>>& index,
+                                double lat, double lon, double alongHalfMeters,
+                                double radialHalfMeters) {
+    using namespace cappedweather;
+    constexpr std::size_t kProduct = static_cast<std::size_t>(ProductKind::Reflectivity);
+    FootprintSample out;
+    const auto hit = locateRay(view, index, lat, lon);
+    if (!hit.ok) return out;
+    const auto& anchor = view.chunk.rays.at(hit.rayIndex);
+    if (!rayCoversBearing(anchor, hit.azimuthDiffDegrees)) return out;
+    out.distanceMeters = hit.distanceMeters;
+    out.beamMslMeters =
+        view.siteMslMeters + standardBeamGeometry(hit.slantMeters, anchor.elevationDegrees)
+                                 .heightAboveRadarMeters;
+    // Cross-track window in degrees at the cell's range. Beyond 180 deg the
+    // window covers every ray, which is the honest limit of the model.
+    const double halfAzDegrees =
+        std::min(180.0, (alongHalfMeters / std::max(hit.distanceMeters, 1.0)) * 180.0 /
+                            3.14159265358979323846);
+    double sum = 0.0;
+    long long valid = 0, total = 0;
+    for (const auto& [azimuth, rayIndex] : index) {
+        const double direct = std::abs(azimuth - hit.bearingDegrees);
+        if (std::min(direct, 360.0 - direct) > halfAzDegrees) continue;
+        const auto& ray = view.chunk.rays.at(rayIndex);
+        const auto& field = ray.fields.at(kProduct);
+        const double spacing = static_cast<double>(ray.gateSpacingByProduct.at(kProduct));
+        if (!(spacing > 0.0)) continue;
+        const auto slant =
+            slantRangeForSurfaceDistance(hit.distanceMeters, ray.elevationDegrees);
+        const auto center =
+            gateIndexForSlantRange(slant, ray.firstGateByProduct.at(kProduct),
+                                   ray.gateSpacingByProduct.at(kProduct), field.size());
+        if (!center) continue;
+        const long long halfGates =
+            std::max(0LL, static_cast<long long>(std::floor(radialHalfMeters / spacing + 1e-9)));
+        const long long lo = static_cast<long long>(*center) - halfGates;
+        const long long hi = static_cast<long long>(*center) + halfGates;
+        for (long long gate = lo; gate <= hi; ++gate) {
+            if (gate < 0 || gate >= static_cast<long long>(field.size())) continue;
+            ++total;
+            const auto value = nativeValue(field.at(static_cast<std::size_t>(gate)),
+                                           ray.scaleByProduct.at(kProduct),
+                                           ray.offsetByProduct.at(kProduct));
+            if (!value.has_value()) continue;
+            sum += *value;
+            ++valid;
+        }
+    }
+    out.gatesTotal = total;
+    out.gatesValid = valid;
+    if (valid > 0) {
+        out.valid = true;
+        out.dbz = sum / static_cast<double>(valid);
+    }
+    return out;
 }
 
 CellSample sampleVolume(const VolumeView& view, double lat, double lon, double echoThresholdDbz) {
@@ -228,12 +357,22 @@ CellSample sampleVolume(const VolumeView& view, double lat, double lon, double e
     return sample;
 }
 
-// CAPPI sampler: across every tilt, the gate whose beam center rides
-// closest to targetMslMeters. Same azimuth/gate/QC rules as the matched
-// tilt path, so differences come from altitude matching, not sampling.
-CellSample sampleCappi(const VolumeView& view, double lat, double lon, double echoThresholdDbz,
-                       double targetMslMeters) {
-    CellSample sample;
+// Tilt selection shared by the point and footprint CAPPI samplers: the tilt
+// whose beam rides closest to target MSL at this cell. Carries the tilt index
+// and the cell's footprint extent so averaging happens in the same tilt the
+// point sample would have used.
+struct CappiPick {
+    bool ok = false;
+    const std::vector<std::pair<double, std::size_t>>* index = nullptr;
+    double beamMslMeters = std::numeric_limits<double>::quiet_NaN();
+    double dbz = std::numeric_limits<double>::quiet_NaN();
+    double distanceMeters = 0.0;
+    FootprintExtent extent;
+};
+
+CappiPick selectCappiTilt(const VolumeView& view, double lat, double lon,
+                          double targetMslMeters) {
+    CappiPick pick;
     double bestMiss = std::numeric_limits<double>::infinity();
     for (const auto& [elev, index] : view.tiltRays) {
         (void)elev;
@@ -243,12 +382,85 @@ CellSample sampleCappi(const VolumeView& view, double lat, double lon, double ec
         const double miss = std::abs(beamMsl - targetMslMeters);
         if (miss < bestMiss) {
             bestMiss = miss;
-            sample.beamMslMeters = beamMsl;
-            sample.dbz = dbz;
-            sample.hasEcho = dbz >= echoThresholdDbz;
+            pick.ok = true;
+            pick.index = &index;
+            pick.beamMslMeters = beamMsl;
+            pick.dbz = dbz;
+            const auto hit = locateRay(view, index, lat, lon);
+            pick.distanceMeters = hit.distanceMeters;
+            if (hit.ok) {
+                pick.extent = footprintForRay(view.chunk.rays.at(hit.rayIndex),
+                                              hit.distanceMeters);
+            }
         }
     }
+    return pick;
+}
+
+CellSample sampleCappi(const VolumeView& view, double lat, double lon, double echoThresholdDbz,
+                       double targetMslMeters) {
+    CellSample sample;
+    const auto pick = selectCappiTilt(view, lat, lon, targetMslMeters);
+    if (!pick.ok) return sample;
+    sample.beamMslMeters = pick.beamMslMeters;
+    sample.dbz = pick.dbz;
+    sample.hasEcho = pick.dbz >= echoThresholdDbz;
     return sample;
+}
+
+// Scale decomposition of the paired delta. If the disagreement is
+// representativeness error (sub-footprint noise) it is spatially white, so
+// block means lose variance as 1/n and between-block variance tracks the
+// white-noise prediction. Coherent structure (calibration, altitude,
+// registration) keeps between-block variance above that prediction. This is
+// the honest test for "does averaging just hide the mismatch".
+void printBlockTable(const std::vector<int>& ix, const std::vector<int>& iy,
+                     const std::vector<double>& delta, const char* label) {
+    if (delta.empty()) {
+        std::printf("scale decomposition (%s): no both-echo cells\n", label);
+        return;
+    }
+    std::printf("scale decomposition (%s): delta=A-B on both-echo cells\n", label);
+    std::printf("  block_n blocks rmse_blocks within_var between_var white_pred between/white\n");
+    for (const int n : {1, 2, 4, 8, 16}) {
+        struct Bin {
+            long long n = 0;
+            double sum = 0.0;
+            double sumSq = 0.0;
+        };
+        std::map<std::pair<int, int>, Bin> bins;
+        for (std::size_t i = 0; i < delta.size(); ++i) {
+            auto& bin = bins[{ix[i] / n, iy[i] / n}];
+            ++bin.n;
+            bin.sum += delta[i];
+            bin.sumSq += delta[i] * delta[i];
+        }
+        long long total = 0;
+        double grandSum = 0.0;
+        for (const auto& entry : bins) {
+            total += entry.second.n;
+            grandSum += entry.second.sum;
+        }
+        if (total == 0) continue;
+        const double grand = grandSum / static_cast<double>(total);
+        double within = 0.0, between = 0.0, whitePredicted = 0.0;
+        for (const auto& entry : bins) {
+            const auto& bin = entry.second;
+            const double mean = bin.sum / static_cast<double>(bin.n);
+            double variance = bin.sumSq / static_cast<double>(bin.n) - mean * mean;
+            if (variance < 0.0) variance = 0.0;
+            const double share = static_cast<double>(bin.n) / static_cast<double>(total);
+            within += variance * share;
+            between += share * (mean - grand) * (mean - grand);
+            whitePredicted += variance / static_cast<double>(total);
+        }
+        std::printf("  %2d %6zu %.2f %.2f %.2f %.2f %.2f\n", n, bins.size(),
+                    std::sqrt(between + grand * grand), within, between, whitePredicted,
+                    whitePredicted > 0.0 ? between / whitePredicted : 0.0);
+    }
+    std::printf(
+        "  (white_pred = between_var expected if the delta were spatially white given the "
+        "measured within-block variance)\n");
 }
 
 }  // namespace
@@ -261,6 +473,16 @@ int main(int argc, char** argv) {
     double advectKm = std::numeric_limits<double>::quiet_NaN();
     double centerLat = std::numeric_limits<double>::quiet_NaN();
     double centerLon = std::numeric_limits<double>::quiet_NaN();
+    // Per-gate / resolution-aware blending modes. own = each radar averaged
+    // over its own beam footprint; common = both averaged over the coarser of
+    // the two footprints at that cell, the fair matched-scale comparison.
+    enum class FootprintMode { None, Own, Common };
+    FootprintMode footprintMode = FootprintMode::None;
+    // Multiplies the instrument footprint half-widths. 1 = the sampling
+    // footprint itself (ray spacing x gate spacing); 2-3 covers the physical
+    // 0.925 deg beam, which is wider than the 0.5 deg super-res sampling.
+    double footprintScale = 1.0;
+    bool blockTable = false;
     for (int i = 1; i < argc;) {
         const std::string flag = argv[i];
         const auto need = [&](std::string& out) {
@@ -304,6 +526,28 @@ int main(int argc, char** argv) {
             if (!needDouble(*out)) return EXIT_FAILURE;
             continue;
         }
+        if (flag == "--footprint") {
+            std::string text;
+            if (!need(text)) return EXIT_FAILURE;
+            if (text == "own") {
+                footprintMode = FootprintMode::Own;
+            } else if (text == "common") {
+                footprintMode = FootprintMode::Common;
+            } else {
+                std::fprintf(stderr, "mosaic_probe: --footprint needs own|common\n");
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+        if (flag == "--footprint-scale") {
+            if (!needDouble(footprintScale)) return EXIT_FAILURE;
+            continue;
+        }
+        if (flag == "--blocks") {
+            blockTable = true;
+            ++i;
+            continue;
+        }
         std::fprintf(stderr, "mosaic_probe: unknown flag %s\n", flag.c_str());
         return EXIT_FAILURE;
     }
@@ -314,7 +558,23 @@ int main(int argc, char** argv) {
                      "--clat LAT --clon LON [--elev 0.5 --box 2 --step 0.02 --thresh 10]\n"
                      "  --cappi HMSL: sample each radar's tilt closest to HMSL MSL instead of one\n"
                      "  matched tilt (altitude-matched compositing probe)\n"
-                     "  --advect KM: lag table shifting radar B up to KM km (needs --cappi)\n");
+                     "  --advect KM: lag table shifting radar B up to KM km (needs --cappi)\n"
+                     "  --footprint own|common: average every gate whose beam volume overlaps\n"
+                     "  the cell instead of one gate (needs --cappi; common = both radars at the\n"
+                     "  coarser footprint, the matched-scale comparison)\n"
+                     "  --blocks: scale decomposition of the paired delta (white vs coherent)\n"
+                     "  --footprint-scale N: multiply the instrument footprint (default 1; 2-3\n"
+                     "  approximates the physical 0.925 deg beam)\n");
+        return EXIT_FAILURE;
+    }
+    if (!(footprintScale > 0.0) || footprintScale > 16.0) {
+        std::fprintf(stderr, "mosaic_probe: --footprint-scale needs (0, 16]\n");
+        return EXIT_FAILURE;
+    }
+    if (footprintMode != FootprintMode::None && !std::isfinite(cappiMslMeters)) {
+        std::fprintf(stderr,
+                     "mosaic_probe: --footprint averages inside the CAPPI-selected tilt and "
+                     "needs --cappi HMSL\n");
         return EXIT_FAILURE;
     }
     if (std::isfinite(cappiMslMeters) && cappiMslMeters <= 0.0) {
@@ -327,6 +587,11 @@ int main(int argc, char** argv) {
     }
     if (std::isfinite(advectKm) && !std::isfinite(cappiMslMeters)) {
         std::fprintf(stderr, "mosaic_probe: --advect currently rides --cappi sampling\n");
+        return EXIT_FAILURE;
+    }
+    if (std::isfinite(advectKm) && footprintMode != FootprintMode::None) {
+        std::fprintf(stderr,
+                     "mosaic_probe: --advect scores point CAPPI; run it without --footprint\n");
         return EXIT_FAILURE;
     }
 
@@ -373,13 +638,87 @@ int main(int argc, char** argv) {
         double sumSq = 0.0;
     };
     std::vector<SeamBin> seamBins{{1000.0}, {2000.0}, {4000.0}, {1e12}};
+    // Footprint-mode accumulators: identical-cell 3-way paired deltas (point
+    // CAPPI vs own-footprint vs common-footprint), the >=90%-valid variant
+    // that censoring cannot flatter, and the geometry actually averaged.
+    std::vector<double> pairedPoint, pairedOwn, pairedCommon;
+    std::vector<double> strictPoint, strictOwn, strictCommon;
+    long long fpOwnBoth = 0, fpCommonBoth = 0, ownSamplesA = 0, ownSamplesB = 0;
+    double ownAlongA = 0.0, ownRadialA = 0.0, ownAlongB = 0.0, ownRadialB = 0.0;
+    long long gatesA = 0, gatesTotalA = 0, gatesB = 0, gatesTotalB = 0;
+    std::vector<int> blockIx, blockIy;
+    std::vector<double> blockDelta;
     for (double lat = centerLat - boxHalfDeg; lat <= centerLat + boxHalfDeg + 1e-9; lat += stepDeg) {
         for (double lon = centerLon - boxHalfDeg; lon <= centerLon + boxHalfDeg + 1e-9;
              lon += stepDeg) {
-            const auto sa = cappi ? sampleCappi(a, lat, lon, threshDbz, cappiMslMeters)
-                                  : sampleVolume(a, lat, lon, threshDbz);
-            const auto sb = cappi ? sampleCappi(b, lat, lon, threshDbz, cappiMslMeters)
-                                  : sampleVolume(b, lat, lon, threshDbz);
+            // Point CAPPI pick is shared by every mode: it fixes the tilt
+            // (the altitude match) that a footprint average then samples
+            // inside, so footprint numbers differ from the point baseline
+            // only by the averaging window.
+            CappiPick pickA, pickB;
+            CellSample pointA, pointB, sa, sb;
+            FootprintSample ownA, ownB, commonA, commonB;
+            if (cappi) {
+                pickA = selectCappiTilt(a, lat, lon, cappiMslMeters);
+                pickB = selectCappiTilt(b, lat, lon, cappiMslMeters);
+                pointA = CellSample{pickA.ok && pickA.dbz >= threshDbz, pickA.dbz,
+                                    pickA.beamMslMeters};
+                pointB = CellSample{pickB.ok && pickB.dbz >= threshDbz, pickB.dbz,
+                                    pickB.beamMslMeters};
+            } else {
+                pointA = sampleVolume(a, lat, lon, threshDbz);
+                pointB = sampleVolume(b, lat, lon, threshDbz);
+            }
+            sa = pointA;
+            sb = pointB;
+            if (footprintMode != FootprintMode::None) {
+                if (pickA.ok && pickA.index) {
+                    ownA = sampleFootprint(a, *pickA.index, lat, lon,
+                                           pickA.extent.along * footprintScale,
+                                           pickA.extent.radial * footprintScale);
+                }
+                if (pickB.ok && pickB.index) {
+                    ownB = sampleFootprint(b, *pickB.index, lat, lon,
+                                           pickB.extent.along * footprintScale,
+                                           pickB.extent.radial * footprintScale);
+                }
+                const double alongCommon =
+                    footprintScale * std::max(pickA.extent.along, pickB.extent.along);
+                const double radialCommon =
+                    footprintScale * std::max(pickA.extent.radial, pickB.extent.radial);
+                if (pickA.ok && pickA.index) {
+                    commonA = sampleFootprint(a, *pickA.index, lat, lon, alongCommon, radialCommon);
+                    ownAlongA += pickA.extent.along;
+                    ownRadialA += pickA.extent.radial;
+                    if (ownA.valid) ++ownSamplesA;
+                }
+                if (pickB.ok && pickB.index) {
+                    commonB = sampleFootprint(b, *pickB.index, lat, lon, alongCommon, radialCommon);
+                    ownAlongB += pickB.extent.along;
+                    ownRadialB += pickB.extent.radial;
+                    if (ownB.valid) ++ownSamplesB;
+                }
+                const bool useCommon = footprintMode == FootprintMode::Common;
+                const auto& fa = useCommon ? commonA : ownA;
+                const auto& fb = useCommon ? commonB : ownB;
+                sa = CellSample{fa.valid && fa.dbz >= threshDbz, fa.dbz, fa.beamMslMeters};
+                sb = CellSample{fb.valid && fb.dbz >= threshDbz, fb.dbz, fb.beamMslMeters};
+                if (ownA.valid && ownB.valid && ownA.dbz >= threshDbz && ownB.dbz >= threshDbz) {
+                    ++fpOwnBoth;
+                }
+                if (commonA.valid && commonB.valid && commonA.dbz >= threshDbz &&
+                    commonB.dbz >= threshDbz) {
+                    ++fpCommonBoth;
+                }
+                if (fa.valid) {
+                    gatesA += fa.gatesValid;
+                    gatesTotalA += fa.gatesTotal;
+                }
+                if (fb.valid) {
+                    gatesB += fb.gatesValid;
+                    gatesTotalB += fb.gatesTotal;
+                }
+            }
             // Outside both coverages (no gate from either radar): not data.
             if (std::isnan(sa.dbz) && std::isnan(sb.dbz)) continue;
             ++cells;
@@ -404,6 +743,38 @@ int main(int argc, char** argv) {
                         pairedCappi.push_back(std::abs(delta));
                         pairedCells.push_back({lat, lon, sa.dbz, sb.dbz});
                     }
+                }
+                if (footprintMode != FootprintMode::None && pointA.hasEcho && pointB.hasEcho &&
+                    ownA.valid && ownB.valid && ownA.dbz >= threshDbz && ownB.dbz >= threshDbz &&
+                    commonA.valid && commonB.valid && commonA.dbz >= threshDbz &&
+                    commonB.dbz >= threshDbz) {
+                    // Identical cells for all three estimators: no population
+                    // shift can flatter the footprint numbers. Signed deltas
+                    // so RMSE and bias both come out of the same sample.
+                    const double pointDelta = pickA.dbz - pickB.dbz;
+                    const double ownDelta = ownA.dbz - ownB.dbz;
+                    const double commonDelta = commonA.dbz - commonB.dbz;
+                    pairedPoint.push_back(pointDelta);
+                    pairedOwn.push_back(ownDelta);
+                    pairedCommon.push_back(commonDelta);
+                    const double shareA = commonA.gatesTotal > 0
+                                              ? static_cast<double>(commonA.gatesValid) / commonA.gatesTotal
+                                              : 0.0;
+                    const double shareB = commonB.gatesTotal > 0
+                                              ? static_cast<double>(commonB.gatesValid) / commonB.gatesTotal
+                                              : 0.0;
+                    if (shareA >= 0.9 && shareB >= 0.9) {
+                        strictPoint.push_back(pointDelta);
+                        strictOwn.push_back(ownDelta);
+                        strictCommon.push_back(commonDelta);
+                    }
+                }
+                if (blockTable) {
+                    blockIx.push_back(static_cast<int>(
+                        std::llround((lon - (centerLon - boxHalfDeg)) / stepDeg)));
+                    blockIy.push_back(static_cast<int>(
+                        std::llround((lat - (centerLat - boxHalfDeg)) / stepDeg)));
+                    blockDelta.push_back(delta);
                 }
                 for (auto& bin : seamBins) {
                     if (std::abs(beamDelta) <= bin.maxBeamDelta) {
@@ -447,6 +818,68 @@ int main(int argc, char** argv) {
             std::printf("  %s n=0\n", edges[i]);
         }
     }
+    if (blockTable) {
+        printBlockTable(blockIx, blockIy, blockDelta,
+                        footprintMode == FootprintMode::None  ? "point cappi"
+                        : footprintMode == FootprintMode::Own ? "own footprint"
+                                                              : "common footprint");
+    }
+    if (footprintMode != FootprintMode::None) {
+        std::printf("footprint scale: %.2fx instrument footprint\n", footprintScale);
+        std::printf("footprint mode: %s\n",
+                    footprintMode == FootprintMode::Common
+                        ? "common (both radars at the coarser footprint at each cell)"
+                        : "own (each radar over its own beam volume)");
+        std::printf("  own extent (mean, km): %s along %.2f radial %.2f | %s along %.2f radial "
+                    "%.2f\n",
+                    a.radarId.c_str(), ownSamplesA ? ownAlongA / ownSamplesA / 1000.0 : 0.0,
+                    ownSamplesA ? ownRadialA / ownSamplesA / 1000.0 : 0.0, b.radarId.c_str(),
+                    ownSamplesB ? ownAlongB / ownSamplesB / 1000.0 : 0.0,
+                    ownSamplesB ? ownRadialB / ownSamplesB / 1000.0 : 0.0);
+        std::printf("  gates summed: %s %lld valid %.1f%% | %s %lld valid %.1f%%\n",
+                    a.radarId.c_str(), gatesTotalA,
+                    gatesTotalA > 0 ? 100.0 * gatesA / gatesTotalA : 0.0, b.radarId.c_str(),
+                    gatesTotalB, gatesTotalB > 0 ? 100.0 * gatesB / gatesTotalB : 0.0);
+        std::printf("  both-echo cells by estimator: own %lld common %lld\n", fpOwnBoth,
+                    fpCommonBoth);
+        const auto printThreeWay = [](const char* tag, const std::vector<double>& point,
+                                      const std::vector<double>& own,
+                                      const std::vector<double>& common) {
+            const std::size_t n = std::min({point.size(), own.size(), common.size()});
+            if (n == 0) {
+                std::printf("  paired %s n=0\n", tag);
+                return;
+            }
+            double pointSq = 0.0, ownSq = 0.0, commonSq = 0.0;
+            double pointSum = 0.0, ownSum = 0.0, commonSum = 0.0;
+            long long ownWins = 0, commonWins = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                pointSq += point[i] * point[i];
+                ownSq += own[i] * own[i];
+                commonSq += common[i] * common[i];
+                pointSum += point[i];
+                ownSum += own[i];
+                commonSum += common[i];
+                if (std::abs(own[i]) < std::abs(point[i])) ++ownWins;
+                if (std::abs(common[i]) < std::abs(point[i])) ++commonWins;
+            }
+            const double pointRmse = std::sqrt(pointSq / static_cast<double>(n));
+            const double ownRmse = std::sqrt(ownSq / static_cast<double>(n));
+            const double commonRmse = std::sqrt(commonSq / static_cast<double>(n));
+            const double denom = pointRmse > 0.0 ? pointRmse : 1.0;
+            std::printf(
+                "  paired %s (n=%zu): point rmse %.2f bias %+.2f | own rmse %.2f (%+.1f%%) | "
+                "common rmse %.2f (%+.1f%%)\n",
+                tag, n, pointRmse, pointSum / static_cast<double>(n), ownRmse,
+                100.0 * (ownRmse - pointRmse) / denom, commonRmse,
+                100.0 * (commonRmse - pointRmse) / denom);
+            std::printf("  paired %s winrate vs point: own %.1f%% common %.1f%%\n", tag,
+                        100.0 * ownWins / static_cast<double>(n),
+                        100.0 * commonWins / static_cast<double>(n));
+        };
+        printThreeWay("all", pairedPoint, pairedOwn, pairedCommon);
+        printThreeWay(">=90%valid", strictPoint, strictOwn, strictCommon);
+    }
     if (cappi) {
         // Same-population verdict: paired RMSE on identical cells plus the
         // share where altitude matching strictly wins. Immune to the
@@ -459,9 +892,14 @@ int main(int argc, char** argv) {
             cappiSq += pairedCappi[i] * pairedCappi[i];
             if (pairedCappi[i] < pairedBase[i]) ++wins;
         }
-        std::printf("paired same-cell (n=%zu): base rmse %.2f cappi rmse %.2f winrate %.1f%%\n", n,
-                    n > 0 ? std::sqrt(baseSq / n) : 0.0, n > 0 ? std::sqrt(cappiSq / n) : 0.0,
-                    n > 0 ? 100.0 * wins / n : 0.0);
+        // Footprint mode prints its own 3-way table against the point CAPPI
+        // baseline; this one would relabel footprint errors as "cappi".
+        if (footprintMode == FootprintMode::None) {
+            std::printf(
+                "paired same-cell (n=%zu): base rmse %.2f cappi rmse %.2f winrate %.1f%%\n", n,
+                n > 0 ? std::sqrt(baseSq / n) : 0.0, n > 0 ? std::sqrt(cappiSq / n) : 0.0,
+                n > 0 ? 100.0 * wins / n : 0.0);
+        }
         // Advection lag search: resample radar B shifted by (dx,dy) km and
         // re-score the paired cells. If the residual is time sync, the
         // minimum sits near storm-motion x volume separation, and its
