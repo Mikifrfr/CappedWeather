@@ -3044,6 +3044,10 @@ void MainWindow::acceptDecodedChunk(const QString& radarId, const QString& volum
     const auto session = sessionFor(radarId, false);
     if (!session || !decoded || volumeId != session->pendingVolumeId) return;
     session->pendingVolume.messageCount += decoded->messageCount;
+    // All chunks of one volume come from one format, so the last chunk's
+    // sentinel convention is the volume's. Dropping it left every assembled
+    // volume at Unknown, where a coverage gap reads as a dry gate downstream.
+    session->pendingVolume.momentEncoding = decoded->momentEncoding;
     session->pendingVolume.rejectedMessages += decoded->rejectedMessages;
     session->pendingVolume.rejectedBlocks += decoded->rejectedBlocks;
     session->pendingVolume.rays.insert(session->pendingVolume.rays.end(),
