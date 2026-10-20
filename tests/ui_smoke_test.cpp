@@ -2270,6 +2270,8 @@ static bool testProbeClearsOnLeave(QString* error) {
     canvas.setSelectedRadar(QStringLiteral("TATL"));
     canvas.setProduct(ProductKind::Reflectivity);
     canvas.setElevationFilter(1);
+    // honesty-allow: frames — one 1000-gate ray so the cursor probe has a
+    // finite dBZ readout; proves the hover/debounce path, no storm structure.
     canvas.setDecodedChunk({"TATL", {ray}, 1}, QDateTime::currentDateTimeUtc());
     canvas.setView(QPointF(-84.2620, 33.6470), 8);
     canvas.show();
@@ -5017,6 +5019,8 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     map->setSelectedRadar(QStringLiteral("TATL"));
     map->setProduct(ProductKind::Reflectivity);
     map->setElevationFilter(1);
+    // honesty-allow: frames — same single-ray probe fixture as above; the echo
+    // hover, palette/opacity paint and GLM fusion checks need one finite gate.
     map->setDecodedChunk({"TATL", {ray}, 1}, QDateTime::currentDateTimeUtc());
     LightningCellSnapshot lightning;
     lightning.kind = JumpEventKind::JumpUpdate;
@@ -5594,7 +5598,9 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     const auto* restoredDock = restoredWindow.findChild<QDockWidget*>(QStringLiteral("controlDock"));
     if (!restoredDock || std::abs(restoredDock->width() - savedDockWidth) > 12) {
         std::cerr << "Radar sidebar width was not restored: saved=" << savedDockWidth
-                  << " restored=" << (restoredDock ? restoredDock->width() : -1) << '\n';
+                  << " restored=" << (restoredDock ? restoredDock->width() : -1)
+                  << " window=" << restoredWindow.width() << 'x' << restoredWindow.height()
+                  << '\n';
         return 1;
     }
     restoredWindow.close();
