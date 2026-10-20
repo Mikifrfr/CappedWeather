@@ -57,9 +57,11 @@ volumes.
   SCAN sites sweep elevations across minutes (FR staggers a volume over
   ~5 min), so assembly buckets by 5-minute scan cycle, not exact timestamp.
 - Moments available now: DBZH (QC reflectivity), TH (unfiltered
-  reflectivity), VRADH (radial velocity). Dual-pol (CC, ZDR, PHI, KDP)
-  is announced for 2027+. This maps exactly onto the existing TDWR
-  pattern: three base moments, dual-pol auto-disabled.
+  reflectivity), VRADH (radial velocity), plus dual-pol on some providers
+  (NL PVOL carries ZDR/RHOHV/PHIDP today; DWD publishes U-prefixed
+  dual-pol sweeps). The decoder maps ZDR/RHOHV/PHIDP when a volume carries
+  them and leaves them absent otherwise, so the per-panel availability gate
+  still greys them out on single-pol sites. See "OPERA dual-pol" below.
 - Velocity folds at the scan's own Nyquist (`how/NI` per dataset, e.g.
   HRGOL 6.1/8.3/16.0 m/s by tilt), not the panel default. Rays carry
   their dataset NI into `DecodedRay` and unfolding uses it; unfolding
@@ -99,9 +101,103 @@ volumes.
 - `https://opendata.dwd.de/weather/radar/composite/` → `wn/ pg/ rv/
   vii/ rs/ hg/ hx/ dmax/ hymecng/`, 5-minute `WN<date>.tar.bz2` files.
 - `.../radolan/`, `.../sites/`, `.../mesocyclones/`, `.../konrad3d/`
-  also live. Formats are DWD-specific (BUFR, RADOLAN binary,
-  run-length products): NOT ODIM. Only worth it if OPERA misses a
-  German site or for mesocyclone markers later.
+  also live. The `sites/` products (`dx/ px/ ...`) are DWD-specific
+  binary/BUFR, but the `sweep_*` products are ODIM_H5/V2_2 with the
+  ODIM-DWD-E extension: `sweep_vol_zdr|rhohv|phidp` carry one dual-pol
+  moment per object, `sweep_pcp_*` the 0.8 deg precipitation scan. Worth
+  using for German dual-pol and as real ODIM fixtures. See below.
+
+### 3a. OPERA dual-pol: what exists today and what 2027 adds (probed 2026-10-20)
+
+Earlier notes here said dual-pol "does not exist yet in the live feed". That is
+true only of the *centrally exchanged* OPERA dataset; the feed this app already
+reads carries it from some providers:
+
+- ORD documentation, probed 2026-10-20: "Currently, EUMETNET OPERA does not
+  exchange dual-polarisation data. These are planned for inclusion in the
+  coming years within the OPERA data exchange, after which they will also be
+  supplied through the ORD API."
+  `https://eumetnet.github.io/openradardata-documentation/1-ORD-API-overview/`
+- OPERA status talk (J. Liikala, EUMETNET; slide 3): 97 % of active radars are
+  dual-pol, dual-pol variables to be exchanged in summer 2026 (demo), dual-pol
+  algorithms scheduled 2027-2028.
+  `https://gebrada.upc.es/resources/docs/inline/2.1-vonlerber.pdf`
+- The S3 bucket the app reads (`openradar-24h`) already carries NL dual-pol:
+  every NL PVOL object (nldhl, nlhrw) is named
+  `@CCORH_DBZH_PHIDP_RHOHV_SQIH_TH_VRADH_WRADH_ZDR.h5`, and each of its 16
+  datasets holds ZDR, PHIDP and RHOHV data groups next to DBZH/TH/VRADH.
+  Verified live 2026-10-20T15:35Z on
+  `2026/10/20/NL/nlhrw/PVOL/nlhrw@20261020T1535@0.3_..._90.0@CCORH_DBZH_PHIDP_RHOHV_SQIH_TH_VRADH_WRADH_ZDR.h5`
+  (30 181 151 bytes): dataset6 (0.8 deg, 360 rays x 838 gates) carries nine
+  moments, `how/startazA` has 360 entries = `where/nrays`.
+- DWD open data publishes per-moment dual-pol sweeps in ODIM_H5/V2_2
+  (ODIM-DWD-E), one moment per object, e.g.
+  `https://opendata.dwd.de/weather/radar/sites/sweep_pcp_zdr/neu/unfiltered/`
+  with `quantity=UZDR` (gain 1/1024 dB, offset -32, 360 rays x 600 gates);
+  `sweep_pcp_rhohv` (URHOHV) and `sweep_pcp_phidp` (UPHIDP) are the same shape.
+  The committed fixtures are the 2026-10-20T15:35:33Z objects for NOD `deneu`
+  (CC BY 4.0, DWD open data; size + sha256 first 16 hex):
+  `odim_deneu_uzdr.h5` 450 383 B 7ca167bd6abfdff8,
+  `odim_deneu_urhohv.h5` 455 769 B 08c972e71600cdc5,
+  `odim_deneu_uphidp.h5` 467 823 B f2094797a1402ad7.
+  `odim_specshape_dualpol_3ray.h5` (36 000 B, 238f1dd062f7db0f) is the
+  hand-built 3-ray layout fixture from `make_odim_dualpol_specshape.py`, not
+  an observation.
+
+#### Assumed 2027 layout (what the decoder relies on)
+
+Sources: ODIM_H5 v2.4.2, EUMETNET, Jan 2026,
+`https://www.eumetnet.eu/wp-content/uploads/2026/01/ODIM_H5_v2.4.2_final.pdf`
+and the ORD API overview above.
+
+- Quantity identifiers (v2.4.2 Table 16): `ZDR`/`UZDR` [dB],
+  `RHOHV`/`URHOHV` [-], `PHIDP`/`UPHIDP` [deg], `KDP`/`UKDP` [deg/km]. The
+  U-prefixed names are the *unfiltered* variants of the same moment, not
+  different products.
+- Each moment is a `datasetN/dataM` group with its own `what`: `quantity`,
+  `gain`, `offset`, `nodata`, `undetect`; `value = raw * gain + offset`.
+- `where` (`elangle`, `nbins`, `nrays`, `rstart`, `rscale`, `a1gate`) and
+  `how` (`startazA`, `stopazA`, ...) live on the dataset, not on the moment.
+  Table 8 defines `startazA`/`stopazA` as one-dimensional double arrays in
+  degrees whose size "corresponds with the value of where/nrays for that
+  dataset". So all moments in one dataset share the ray grid and one azimuth
+  array; the reader indexes the moment ray directly (nearest-azimuth +
+  slant-range resampling only as a fallback for writers that break this).
+  `a1gate` stays a range index and never offsets azimuths.
+- The ORD overview warns providers may send "full volumes or on a scan-by-scan
+  basis, with radar variables either combined in a single file or distributed
+  across multiple files". Both shapes decode: one object per moment (DWD) and
+  several `dataM` groups per dataset (NL), provided each dataset carries its
+  own where/how.
+
+#### Decoder mapping and packing (`src/core/odim_reader.cpp`)
+
+- `ZDR`/`UZDR` -> DifferentialReflectivity, `RHOHV`/`URHOHV` ->
+  CorrelationCoefficient, `PHIDP`/`UPHIDP` -> DifferentialPhase. The standard
+  identifier wins when a writer publishes both (DBZH-over-TH rule).
+- Re-encode into the shared 16-bit gate convention (0 = missing, 1 = below
+  threshold). Packing spans are chosen so real gates are not clipped:
+  ZDR [-32, +32] dB at 1/1024 dB, RHOHV [0, 1.05] at 1.6e-5, PHIDP
+  [-180, 360] deg at 0.0082 deg (writers publish either range).
+- A moment absent from a dataset creates no field at all. The UI availability
+  gate greys the chip/tab from `DecodedRay::has(...)`, so single-pol volumes
+  behave exactly as before (asserted by
+  `testOdimDualPolAbsentOnSinglePolVolumes`).
+- `KDP`/`UKDP` is not mapped: there is no `ProductKind` slot for specific
+  differential phase, and adding one is a product-spine change (descriptor,
+  chip, palette). A KDP-only dataset is counted in
+  `DecodedChunk::rejectedBlocks` and never folded into another product.
+
+#### Checklist when real 2027 data lands
+
+1. Decode one volume and assert `dataM/data.shape == (where/nrays,
+   where/nbins)` and `len(how/startazA) == where/nrays` for every dataset.
+2. Print the quantity strings actually used (ZDR vs UZDR, KDP presence) before
+   extending `kDualPolMoments`; only map what the feed really carries.
+3. Spot-check gates against the producer's gain/offset decode to confirm the
+   packing spans still cover the real value range without clipping.
+4. If KDP is exchanged, land the product slot first (manager/render), then
+   add it to `kDualPolMoments` with its own packing span.
 
 ### 4. Licensing
 

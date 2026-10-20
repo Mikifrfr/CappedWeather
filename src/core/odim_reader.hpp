@@ -15,7 +15,16 @@ namespace cappedweather {
 //
 // Moment mapping: DBZH -> Reflectivity, VRADH -> Velocity. TH (unfiltered
 // reflectivity) backs Reflectivity only when an elevation carries no DBZH.
-// Dual-polarization quantities are skipped: OPERA serves them from 2027+.
+// Dual-pol moments feed the existing product slots when a dataset carries
+// them: ZDR/UZDR -> DifferentialReflectivity, RHOHV/URHOHV ->
+// CorrelationCoefficient, PHIDP/UPHIDP -> DifferentialPhase (standard
+// identifier wins when a writer publishes both). A moment the volume does not
+// carry stays absent: no field is created, so the per-panel availability gate
+// keeps it disabled instead of showing an empty sweep. KDP/UKDP has no
+// ProductKind yet and its dataset is counted as rejected rather than folded
+// into another product. OPERA's central dual-pol exchange is a 2027 item, but
+// DWD open-data sweeps and the NL PVOL objects on the OPERA bucket already
+// publish these moments today; see docs/europe-sources.md.
 // Elevations are numbered sequentially sorted by angle because ODIM carries
 // no stable tilt numbering across sites. Gate encoding reuses the NEXRAD
 // 16-bit convention (0 = missing, 1 = below threshold) with matching
