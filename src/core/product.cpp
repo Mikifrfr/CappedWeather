@@ -16,6 +16,10 @@ const std::vector<ProductDescriptor> kProducts{
     {ProductKind::VerticallyIntegratedLiquid, "VIL", "Vertically integrated liquid", "kg/m2", 0.0, 100.0},
     {ProductKind::CompositeReflectivity, "CREF", "Composite reflectivity", "dBZ", -32.0, 95.0},
     {ProductKind::Cappi, "CAPPI", "Constant-altitude PPI", "dBZ", -32.0, 95.0},
+    // Appended, not inserted: descriptor order is the combo/tab/chip order and
+    // the persisted row index, so existing products keep their digit keys.
+    // Deliberately unbound to a shortcut: KDP is ODIM-only (no NEXRAD DPKP).
+    {ProductKind::SpecificDifferentialPhase, "KDP", "Specific differential phase", "deg/km", -10.0, 20.0},
 };
 }
 

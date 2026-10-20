@@ -69,18 +69,27 @@ void check(const bool condition, const char* expression, const char* file, const
 #define assert(expression) check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 void testProducts() {
-    assert(productDescriptors().size() == 10);
+    assert(productDescriptors().size() == 11);
     assert(productDescriptor(ProductKind::Reflectivity).unit == "dBZ");
     assert(productDescriptor(ProductKind::CorrelationCoefficient).maximum == 1.05);
     assert(productDescriptor(ProductKind::EchoTop).unit == "kft MSL");
     assert(productDescriptor(ProductKind::VerticallyIntegratedLiquid).unit == "kg/m2");
     assert(productDescriptor(ProductKind::CompositeReflectivity).unit == "dBZ");
     assert(productDescriptor(ProductKind::Cappi).unit == "dBZ");
+    // KDP is the 11th product, appended after Cappi so no persisted row index
+    // moves, and unbound to a digit key (ODIM-only moment, no NEXRAD block).
+    const auto& kdp = productDescriptor(ProductKind::SpecificDifferentialPhase);
+    assert(kdp.shortName == "KDP");
+    assert(kdp.label == "Specific differential phase");
+    assert(kdp.unit == "deg/km");
+    assert(kdp.minimum == -10.0);
+    assert(kdp.maximum == 20.0);
     assert(isDerivedProduct(ProductKind::EchoTop));
     assert(isDerivedProduct(ProductKind::VerticallyIntegratedLiquid));
     assert(isDerivedProduct(ProductKind::CompositeReflectivity));
     assert(isDerivedProduct(ProductKind::Cappi));
     assert(!isDerivedProduct(ProductKind::Reflectivity));
+    assert(!isDerivedProduct(ProductKind::SpecificDifferentialPhase));
 }
 
 DecodedRay syntheticDerivedRay(const float azimuth, const std::uint8_t elevationNumber,
@@ -1999,6 +2008,9 @@ void testOptionalRealChunk() {
     const auto isTdwr = radarId.starts_with('T') && radarId != "TJUA";
     if (!isTdwr) {
         for (const auto kind : productDescriptors()) {
+            // Message 31 has no DPKP block; KDP arrives only from ODIM_H5
+            // volumes, so a US chunk must never be expected to carry it.
+            if (kind.kind == ProductKind::SpecificDifferentialPhase) continue;
             assert(std::any_of(decoded.rays.begin(), decoded.rays.end(), [kind](const DecodedRay& ray) {
                 return ray.has(kind.kind);
             }));
@@ -2601,7 +2613,8 @@ void testOdimDualPolSpecShapedDataset() {
     // NOT an observation. odim_specshape_dualpol_3ray.h5 is a minimal ODIM_H5
     // container constructed byte by byte (see make_odim_dualpol_specshape.py):
     // dataset1 holds DBZH+ZDR+RHOHV+PHIDP in one sweep, dataset2 holds the
-    // U-prefixed (unfiltered) aliases, dataset3 holds UKDP only.
+    // U-prefixed (unfiltered) aliases, dataset3 holds UKDP only (raw 100 at
+    // gain 0.01 -> 1.0 deg/km).
     if (!odimReaderAvailable()) return;
     const auto bytes = readFixtureBytes("odim_specshape_dualpol_3ray.h5");
     if (bytes.empty()) {
@@ -2611,13 +2624,14 @@ void testOdimDualPolSpecShapedDataset() {
     std::string error;
     const auto chunk = readOdimPvol(bytes, "specc", &error);
     assert(chunk.has_value());
-    // The KDP-only dataset has no product slot: counted and dropped.
-    assert(chunk->rejectedBlocks == 1);
-    assert(chunk->rays.size() == 6);
+    // Every dataset now has a product slot, including the KDP-only one.
+    assert(chunk->rejectedBlocks == 0);
+    assert(chunk->rays.size() == 9);
     const auto refIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
     const auto zdrIndex = static_cast<std::size_t>(ProductKind::DifferentialReflectivity);
     const auto ccIndex = static_cast<std::size_t>(ProductKind::CorrelationCoefficient);
     const auto phiIndex = static_cast<std::size_t>(ProductKind::DifferentialPhase);
+    const auto kdpIndex = static_cast<std::size_t>(ProductKind::SpecificDifferentialPhase);
     auto decoded = [&](const std::size_t ray, const std::size_t index, const std::size_t gate) {
         const auto& r = chunk->rays.at(ray);
         return nativeValue(r.fields.at(index).at(gate), r.scaleByProduct.at(index),
@@ -2681,8 +2695,49 @@ void testOdimDualPolSpecShapedDataset() {
     }
     assert(std::fabs(chunk->rays.at(4).azimuthDegrees - 190.0F) < 0.01F);
     assert(std::fabs(chunk->rays.at(5).azimuthDegrees - 310.0F) < 0.01F);
+    // Neither dataset1 nor dataset2 carries KDP, so its slot must stay empty:
+    // absence is absence, never a zero-filled moment.
+    for (std::size_t ray = 0; ray < 6; ++ray) {
+        assert(!chunk->rays.at(ray).has(ProductKind::SpecificDifferentialPhase));
+    }
+    // dataset3: UKDP-only sweep, elangle 3.5, startazA 20/140/260. It decodes
+    // now that ProductKind::SpecificDifferentialPhase exists.
+    for (std::size_t ray = 6; ray < 9; ++ray) {
+        const auto& r = chunk->rays.at(ray);
+        assert(r.elevationNumber == 3);
+        assert(std::fabs(r.elevationDegrees - 3.5F) < 0.001F);
+        assert(r.gateCount == 4);
+        assert(r.has(ProductKind::SpecificDifferentialPhase));
+        // Honest absence: a UKDP-only container puts gates ONLY into the KDP
+        // slot; nothing smears into DBZH/ZDR/RHOHV/PHIDP/VEL.
+        assert(!r.has(ProductKind::Reflectivity));
+        assert(!r.has(ProductKind::Velocity));
+        assert(!r.has(ProductKind::DifferentialReflectivity));
+        assert(!r.has(ProductKind::CorrelationCoefficient));
+        assert(!r.has(ProductKind::DifferentialPhase));
+        // UKDP: gain 0.01 offset 0 -> raw 100 = 1.0 deg/km, raw 200 = 2.0.
+        // Packing step is 1/1023.9375 = 0.000977 deg/km, so half a step is
+        // 0.00049: anything coarser would mean the gate was clipped.
+        const auto kdp0 = decoded(ray, kdpIndex, 0);
+        assert(kdp0.has_value());
+        assert(std::fabs(*kdp0 - 1.0) < 0.00049);
+        // raw 0 is undetect (below threshold), raw 65535 is nodata: both are
+        // missing, never a clipped -32/+32 value.
+        assert(!decoded(ray, kdpIndex, 1).has_value());
+        assert(!decoded(ray, kdpIndex, 2).has_value());
+        const auto kdp3 = decoded(ray, kdpIndex, 3);
+        assert(kdp3.has_value());
+        assert(std::fabs(*kdp3 - 2.0) < 0.00049);
+        // Gates are real codes in the shared 16-bit convention, not sentinels.
+        assert(r.fields.at(kdpIndex).at(0) >= 2);
+        assert(r.fields.at(kdpIndex).at(3) >= 2);
+    }
+    assert(std::fabs(chunk->rays.at(7).azimuthDegrees - 200.0F) < 0.01F);
+    assert(std::fabs(chunk->rays.at(8).azimuthDegrees - 320.0F) < 0.01F);
     std::cout << "odim dual-pol spec-shaped: rays=" << chunk->rays.size()
-              << " rejected_datasets=" << chunk->rejectedBlocks << "\n";
+              << " rejected_datasets=" << chunk->rejectedBlocks
+              << " kdp_gate0=" << *decoded(6, kdpIndex, 0)
+              << " kdp_gate3=" << *decoded(6, kdpIndex, 3) << "\n";
 }
 
 void testSlantRangeVerticalBeam() {

@@ -5,7 +5,8 @@ This fixture is NOT radar data and must never be presented as such. It is a
 minimal, hand-constructed ODIM_H5 container whose only job is to pin the
 decoder's *layout* handling: several moment data groups inside one dataset,
 the U-prefixed (unfiltered) quantity aliases, and a dataset whose only moment
-is one the app has no product slot for (KDP).
+is the unfiltered specific differential phase (UKDP), which feeds
+ProductKind::SpecificDifferentialPhase.
 
 Gate values are chosen constants, not observations. Every physical value the
 test asserts is derived from what/gain/what/offset below, so the test proves
@@ -119,9 +120,10 @@ def main():
             ("UPHIDP", 0.01, -180.0, 65535.0, 0.0, uphidp),
         ])
 
-        # dataset3: only KDP. There is no ProductKind for specific
-        # differential phase yet, so this dataset must be rejected (counted,
-        # not silently folded into another product).
+        # dataset3: only KDP, under the unfiltered UKDP identifier. This is the
+        # honest-absence case: the sweep must decode into the KDP slot alone,
+        # never into DBZH/ZDR/RHOHV/PHIDP. gain 0.01, offset 0 -> raw 100 =
+        # 1.0 deg/km, raw 200 = 2.0, raw 0 = undetect, raw 65535 = nodata.
         ukdp = [[100, 0, 65535, 200]] * NRAYS
         dataset(root, 3, 3.5, [20.0, 140.0, 260.0], [
             ("UKDP", 0.01, 0.0, 65535.0, 0.0, ukdp),

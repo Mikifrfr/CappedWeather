@@ -17,9 +17,13 @@ enum class ProductKind {
     VerticallyIntegratedLiquid,
     CompositeReflectivity,
     Cappi,
+    // 11th slot, appended (never inserted): the enum value is a raw index
+    // into DecodedRay::fields, the spill payload and the persisted
+    // panels/productN setting, so inserting would silently remap saved panels.
+    SpecificDifferentialPhase,
 };
 
-inline constexpr std::size_t kProductCount = 10;
+inline constexpr std::size_t kProductCount = 11;
 
 struct ProductDescriptor {
     ProductKind kind;
