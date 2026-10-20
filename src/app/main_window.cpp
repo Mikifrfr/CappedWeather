@@ -6,6 +6,7 @@
 #include "app/http_client.hpp"
 #include "app/radar_map_canvas.hpp"
 #include "app/radar_list_model.hpp"
+#include "app/scan_age.hpp"
 #include "app/session_store.hpp"
 #include "app/session_prefetch.hpp"
 #include "app/weather_overlay_source.hpp"
@@ -3227,23 +3228,10 @@ void MainWindow::rebuildTiltCombo() {
 
 QString MainWindow::scanAgeLabelText(const QDateTime& scanTimeUtc, const int rayCount,
                                      const qint64 ageSeconds, const int volumeCoveragePattern) {
-    const auto age = std::max<qint64>(0, ageSeconds);
-    const auto timeText =
-        scanTimeUtc.isValid() ? scanTimeUtc.toUTC().toString(QStringLiteral("HH:mm:ss")) +
-                                    QStringLiteral("Z")
-                              : QStringLiteral("—");
-    const auto raysText = rayCount >= 0 ? QString::number(rayCount) : QStringLiteral("—");
-    // The VCP token only appears when the volume actually carries a pattern the
-    // decoder can vouch for. 0 means "no pattern" (or radials that disagree,
-    // volumeCoveragePatternConflicting), and rendering a labelled-but-empty
-    // "VCP" reads like a value that failed to load.
-    if (volumeCoveragePattern > 0) {
-        return QStringLiteral("SCAN %1 · VCP %2 · %3 min old · %4 rays")
-            .arg(timeText, QString::number(volumeCoveragePattern), QString::number(age / 60),
-                 raysText);
-    }
-    return QStringLiteral("SCAN %1 · %2 min old · %3 rays")
-        .arg(timeText, QString::number(age / 60), raysText);
+    // One-line forwarder: the policy (wording, clamp, VCP-token rule, em dash)
+    // lives in app/scan_age.cpp, this symbol stays because the UI suite pins it.
+    return cappedweather::scanAgeText(scanTimeUtc, rayCount, ageSeconds, volumeCoveragePattern)
+        .label;
 }
 
 MainWindow::ScanAgeState MainWindow::ScanAgeState::fromFrame(const cappedweather::RadarFrame& frame,
@@ -3264,12 +3252,14 @@ MainWindow::ScanAgeState MainWindow::ScanAgeState::fromFrame(const cappedweather
 void MainWindow::renderScanAgeBlock(QLabel* const label, const ScanAgeState& state,
                                     const qint64 ageSeconds) {
     if (!label) return;
-    label->setText(scanAgeLabelText(state.scanTimeUtc, state.rayCount, ageSeconds,
-                                    state.volumeCoveragePattern));
+    // One call produces both the wording and the stale flag, so the amber tint
+    // can never describe a different age than the text does.
+    const auto text = cappedweather::scanAgeText(state.scanTimeUtc, state.rayCount, ageSeconds,
+                                                 state.volumeCoveragePattern);
+    label->setText(text.label);
     // Amber when stale, default palette otherwise. Never green: the block
     // reports scan age, not liveness.
-    label->setStyleSheet(ageSeconds >= kScanStaleSeconds ? QStringLiteral("color: #e0c14a;")
-                                                         : QString{});
+    label->setStyleSheet(text.stale ? QStringLiteral("color: #e0c14a;") : QString{});
 }
 
 void MainWindow::refreshScanAgeLabel() {
@@ -3482,9 +3472,9 @@ void MainWindow::updatePlaybackControls() {
     speedCombo_->setEnabled(canAnimate);
     followLatestButton_->setEnabled(hasFrames);
     if (!hasFrames) {
-        frameLabel_->setText(QStringLiteral("Waiting for latest scan"));
+        frameLabel_->setText(cappedweather::scanAgeEmptyStateText());
         frameLabel_->setStyleSheet(QString{});
-        frameLabel_->setToolTip(QStringLiteral("Pick a station to load the latest scan"));
+        frameLabel_->setToolTip(cappedweather::scanAgeEmptyStateTooltip());
         scanAgeState_ = {};
     } else if (!canAnimate && session && !session->historyRequested) {
         frameSlider_->setToolTip(QStringLiteral("Click to load historical volumes"));

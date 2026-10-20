@@ -5,6 +5,7 @@
 #include "core/srh.hpp"
 #include "core/hail_swath.hpp"
 #include "app/alert_center.hpp"
+#include "app/scan_age.hpp"
 #include "app/session_store.hpp"
 #include "app/theme.hpp"
 #include "app/weather_overlay_source.hpp"
@@ -110,13 +111,9 @@ public:
     static QString frameWorldFile(double north, double south, double east, double west,
                                   int imageWidth, int imageHeight, QString* error);
     // SCAN age block: "SCAN 14:22:10Z · VCP 212 · 3 min old · 1080 rays".
-    // Honest UTC scan time, the Volume Coverage Pattern the decoder parsed out
-    // of the volume's RVOL constant block, whole-minute age and ray count. A
-    // volume that carries no vouchable pattern (or whose radials disagree, i.e.
-    // volumeCoveragePatternConflicting) passes 0 and renders no VCP token at
-    // all — a labelled-but-empty "VCP" reads like a value that failed to load.
-    // Public and static so the label format is unit-testable. rayCount < 0
-    // renders as an em-dash (spilled volume whose disk copy is unreadable).
+    // The wording, the clamp and the VCP-token rule live in app/scan_age.hpp;
+    // this symbol stays because tests/ui_smoke_test.cpp pins it. Public and
+    // static so the label format is unit-testable.
     static QString scanAgeLabelText(const QDateTime& scanTimeUtc, int rayCount, qint64 ageSeconds,
                                     int volumeCoveragePattern = 0);
     // SCAN age block contents for one history frame: what the console actually
@@ -138,9 +135,10 @@ public:
     // Public and static so the UI harness can assert frame -> label against
     // the real widget (no session, no archive lane, no network).
     static void renderScanAgeBlock(QLabel* label, const ScanAgeState& state, qint64 ageSeconds);
-    // Whole-minute age at which the SCAN block turns amber. Matches the
-    // radar-health Online bound (data older than 5 min is stale, not live).
-    static constexpr qint64 kScanStaleSeconds = 300;
+    // Whole-minute age at which the SCAN block turns amber. Forwards
+    // cappedweather::kScanStaleSeconds so the threshold has one home and this
+    // symbol still exists for the suite that compiles against it.
+    static constexpr qint64 kScanStaleSeconds = cappedweather::kScanStaleSeconds;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

@@ -263,6 +263,8 @@ if(CAPPEDWEATHER_BUILD_APP)
         #   * it has no dependency on main_window.cpp or any UI source, so it
         #     keeps building while the spine is mid-edit by another card.
         add_library(cappedweather_ui_logic STATIC
+            src/app/scan_age.cpp
+            src/app/scan_age.hpp
             src/app/ui_logic/anchor.cpp
             src/app/ui_logic/anchor.hpp
         )
