@@ -59,10 +59,13 @@ which code it saw.
   reads it when present. Files written before this change end at the last ray
   and load as `Unknown` — no version bump, old spill files stay readable. A
   chunk with `Unknown` is never upgraded by inference.
-- Not yet propagated: `MainWindow::acceptDecodedChunk` merges chunks into
-  `session->pendingVolume` and does not copy `momentEncoding`. Until it does,
-  the assembled volume that reaches products is `Unknown`. Assigned to the
-  manager (see card comment).
+- `MainWindow::acceptDecodedChunk` copies it into `session->pendingVolume` with
+  the other per-chunk fields, so the assembled volume that reaches
+  `appendDerivedProducts`/`accumulateRainfall` carries the convention. All
+  chunks of one volume come from one format, so the last chunk wins.
+  `tests/ui_smoke_test.cpp::testMomentEncodingMerge` drives the real
+  `volumeStarted`/`chunkDecoded`/`volumeReady` signals and reads the published
+  frame back: two ODIM chunks stay `Odim`, an unencoded volume stays `Unknown`.
 
 ## Evidence
 
