@@ -108,8 +108,34 @@ bool DecodedRay::has(const ProductKind kind) const {
     return !fields.at(productIndex(kind)).empty();
 }
 
+std::optional<MomentSentinelCodes> momentSentinelCodes(const MomentEncoding encoding) noexcept {
+    switch (encoding) {
+    case MomentEncoding::NexradMessage31:
+        return MomentSentinelCodes{0, 1};
+    case MomentEncoding::Odim:
+        return MomentSentinelCodes{1, 0};
+    case MomentEncoding::Unknown:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+MomentGateState momentGateState(const MomentEncoding encoding, const std::uint16_t encoded) noexcept {
+    const auto codes = momentSentinelCodes(encoding);
+    if (!codes) {
+        // No recorded convention: keep the historical reading, both codes are
+        // "no data" and the two cannot be separated.
+        return encoded <= 1 ? MomentGateState::Undetermined : MomentGateState::Valid;
+    }
+    if (encoded == codes->missing) return MomentGateState::Missing;
+    if (encoded == codes->belowThreshold) return MomentGateState::BelowThreshold;
+    return MomentGateState::Valid;
+}
+
 std::optional<double> nativeValue(const ProductKind kind, const std::uint8_t encoded) {
-    // Message 31 uses 0/1 as missing or below-threshold values. The remaining
+    // Message 31 packs 0 = below threshold and 1 = range folded; both are "no
+    // measurement" for the value path. momentGateState() separates them for
+    // callers that need to tell a dry gate from a coverage gap. The remaining
     // fields use the WSR-88D 8-bit moment encodings.
     if (encoded <= 1) {
         return std::nullopt;
@@ -147,6 +173,8 @@ std::optional<double> nativeValue(const std::uint16_t encoded, const float scale
 DecodedChunk decodeMessage31Chunk(const std::span<const std::byte> bytes, std::string radarId) {
     DecodedChunk result;
     result.radarId = std::move(radarId);
+    // Message 31 sentinel order: 0 = below threshold, 1 = range folded.
+    result.momentEncoding = MomentEncoding::NexradMessage31;
 
     // Volume-level pattern: every radial's RVOL block repeats it, so a volume
     // assembled from several records (or several radials) reports one number

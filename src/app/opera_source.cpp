@@ -170,8 +170,14 @@ QVector<QVector<QPair<QString, QDateTime>>> OperaSource::trimScanGroups(
 DecodedChunk OperaSource::mergeScanParts(std::vector<DecodedChunk> parts,
                                          const std::string& radarId) {    DecodedChunk merged;
     merged.radarId = radarId;
+    // Parts come from the same ODIM file, but a merge that sees two different
+    // conventions must report Unknown rather than pick one.
+    if (!parts.empty()) merged.momentEncoding = parts.front().momentEncoding;
     std::vector<DecodedRay> all;
     for (auto& part : parts) {
+        if (part.momentEncoding != merged.momentEncoding) {
+            merged.momentEncoding = MomentEncoding::Unknown;
+        }
         merged.messageCount += part.messageCount;
         merged.rejectedMessages += part.rejectedMessages;
         merged.rejectedBlocks += part.rejectedBlocks;

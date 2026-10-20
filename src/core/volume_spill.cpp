@@ -119,6 +119,14 @@ bool spillVolume(const DecodedChunk& chunk, const std::string& path) {
         }
     }
     if (!writeLe(file, chunk.volumeCoveragePattern)) return false;
+    // Optional one-byte trailer: the chunk's moment sentinel convention, written
+    // after the pattern v2 appended. Files written before this existed end at
+    // the last ray (v1) or after the pattern (v2) and load as Unknown (both 0
+    // and 1 read as no data, the old behaviour), so the version stays 2 and old
+    // spill files remain readable.
+    if (chunk.momentEncoding != MomentEncoding::Unknown) {
+        if (!writeLe(file, static_cast<std::uint8_t>(chunk.momentEncoding))) return false;
+    }
     file.close();
     return static_cast<bool>(file);
 }
@@ -183,7 +191,15 @@ std::shared_ptr<DecodedChunk> loadSpilledVolume(const std::string& path) {
         chunk->rays.push_back(std::move(ray));
     }
     if (version >= 2 && !readLe(cursor, end, chunk->volumeCoveragePattern)) return nullptr;
-    if (cursor != end) return nullptr; // trailing garbage: not our file
+    // Optional trailer from the sentinel-convention extension: one byte after
+    // the last ray (v1) or after the pattern (v2). Anything else after that is
+    // trailing garbage: this is not our file.
+    if (cursor != end) {
+        if (end - cursor != 1) return nullptr;
+        const auto encoding = std::to_integer<std::uint8_t>(*cursor);
+        if (encoding > static_cast<std::uint8_t>(MomentEncoding::Odim)) return nullptr;
+        chunk->momentEncoding = static_cast<MomentEncoding>(encoding);
+    }
     return chunk;
 }
 
