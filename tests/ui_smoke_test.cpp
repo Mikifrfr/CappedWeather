@@ -5518,7 +5518,9 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     const auto* restoredDock = restoredWindow.findChild<QDockWidget*>(QStringLiteral("controlDock"));
     if (!restoredDock || std::abs(restoredDock->width() - savedDockWidth) > 12) {
         std::cerr << "Radar sidebar width was not restored: saved=" << savedDockWidth
-                  << " restored=" << (restoredDock ? restoredDock->width() : -1) << '\n';
+                  << " restored=" << (restoredDock ? restoredDock->width() : -1)
+                  << " window=" << restoredWindow.width() << 'x' << restoredWindow.height()
+                  << '\n';
         return 1;
     }
     restoredWindow.close();
