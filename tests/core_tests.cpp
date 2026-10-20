@@ -44,6 +44,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <atomic>
 #include <mutex>
@@ -232,6 +233,374 @@ void testDerivedSupportGate() {
         chunk.rays.back() = syntheticDerivedRay(90.0F, 2, 5.0F, 10.0);
         assert(chunkSupportsDerivedProducts(chunk));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Z-R rainfall accumulation over volume history
+// ---------------------------------------------------------------------------
+
+DecodedRay syntheticRainRay(const float azimuth, const std::uint8_t elevationNumber,
+                            const float elevationDegrees, const int firstGateMeters,
+                            const int gateSpacingMeters, const std::size_t gateCount,
+                            const double reflectivityDbz, const bool echo = true) {
+    DecodedRay ray;
+    ray.azimuthDegrees = azimuth;
+    ray.azimuthResolutionDegrees = 1.0F;
+    ray.elevationNumber = elevationNumber;
+    ray.elevationDegrees = elevationDegrees;
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto encoded =
+        echo ? static_cast<std::uint16_t>(std::lround(reflectivityDbz * 2.0 + 66.0))
+             : static_cast<std::uint16_t>(0);
+    ray.fields.at(index).assign(gateCount, encoded);
+    ray.firstGateByProduct.at(index) = static_cast<std::int16_t>(firstGateMeters);
+    ray.gateSpacingByProduct.at(index) = static_cast<std::uint16_t>(gateSpacingMeters);
+    ray.scaleByProduct.at(index) = 2.0F;
+    ray.offsetByProduct.at(index) = 66.0F;
+    return ray;
+}
+
+void attachRainCorrelation(DecodedRay& ray, const double correlationCoefficient) {
+    const auto index = static_cast<std::size_t>(ProductKind::CorrelationCoefficient);
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto count = ray.fields.at(reflectivityIndex).size();
+    ray.fields.at(index).assign(
+        count, static_cast<std::uint16_t>(std::lround(correlationCoefficient * 100.0)));
+    ray.firstGateByProduct.at(index) = ray.firstGateByProduct.at(reflectivityIndex);
+    ray.gateSpacingByProduct.at(index) = ray.gateSpacingByProduct.at(reflectivityIndex);
+    ray.scaleByProduct.at(index) = 100.0F;
+    ray.offsetByProduct.at(index) = 0.0F;
+}
+
+// Lowest tilt at 0.5 deg over ground 10-25 km (gateCount 16) plus a 30 deg tilt
+// that samples the same ground range up to ~60 km, so the column guard can
+// actually look above 3 km. Radar altitude is the caller's problem.
+DecodedChunk rainVolume(const std::string& radarId, const double reflectivityDbz,
+                        const std::size_t gateCount = 16, const double topReflectivityDbz = 40.0,
+                        const bool echo = true) {
+    DecodedChunk chunk;
+    chunk.radarId = radarId;
+    chunk.rays.push_back(
+        syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, gateCount, reflectivityDbz, echo));
+    chunk.rays.push_back(
+        syntheticRainRay(90.0F, 2, 30.0F, 10000, 1000, 60, topReflectivityDbz, true));
+    return chunk;
+}
+
+void testZrRateRelation() {
+    // Marshall-Palmer Z = 300 R^1.4: R(30) = 2.363 mm/h, R(40) = 12.240 mm/h.
+    const auto at30 = zrRateMillimetersPerHour(30.0);
+    const auto at40 = zrRateMillimetersPerHour(40.0);
+    assert(at30 && std::abs(*at30 - 2.363115) < 1e-4);
+    assert(at40 && std::abs(*at40 - 12.239693) < 1e-4);
+    // 10 dB is a factor 5.18 in rate for b = 1.4, not the 10 of a linear Z-R.
+    assert(std::abs(*at40 / *at30 - 5.179) < 1e-3);
+    // Convective variant is wetter for the same Z.
+    const auto convective = zrRateMillimetersPerHour(40.0, 300.0, 1.5);
+    assert(convective && *convective < *at40);
+    assert(!zrRateMillimetersPerHour(std::numeric_limits<double>::quiet_NaN()));
+    assert(!zrRateMillimetersPerHour(30.0, 0.0, 1.4));
+    assert(!zrRateMillimetersPerHour(30.0, 300.0, 0.0));
+}
+
+void testRainfallAccumulationClosedForm() {
+    // Four volumes 5 min apart, uniform 40 dBZ, echo to 30 deg. Three credited
+    // intervals of 300 s: 3 * 12.2397 mm/h * (300/3600) h = 3.06 mm.
+    const auto chunk = rainVolume("KTLX", 40.0);
+    const std::vector<RainfallSample> samples{
+        {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(grid.summary.sampleCount == 4);
+    assert(grid.summary.rejectedSampleCount == 0);
+    assert(grid.summary.intervalCount == 3);
+    assert(std::abs(grid.summary.coveredSeconds - 900.0) < 1e-6);
+    assert(std::abs(grid.summary.windowSeconds - 900.0) < 1e-6);
+    assert(grid.rays.size() == 1);
+    assert(grid.rays.front().gates.size() == 16);
+    assert(grid.summary.depthGateCount == 16);
+    // 3 * 12.239693 * 300/360 = 30.599 tenths -> 31.
+    for (const auto& gate : grid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 31);
+    }
+    assert(std::abs(grid.summary.maximumMillimeters - 3.1) < 1e-9);
+    assert(std::abs(grid.summary.meanMillimeters - 3.1) < 1e-9);
+    assert(grid.summary.haveMaximum);
+    assert(grid.summary.maximumGateIndex >= 0);
+    assert(grid.summary.quality == RainfallQuality::Good);
+    // Ordering is internal: the same samples reversed must give the same total.
+    const std::vector<RainfallSample> reversed{samples.rbegin(), samples.rend()};
+    const auto same = accumulateRainfall(reversed, 370.0);
+    assert(same.rays.front().gates.front().depthTenthsMillimeters == 31);
+}
+
+void testRainfallClutterGuard() {
+    // 45 dBZ on the lowest tilt with nothing above it: ground clutter or AP.
+    // The volume did look above 3 km, so "no echo up there" is a measurement.
+    DecodedChunk clutter;
+    clutter.radarId = "KTLX";
+    clutter.rays.push_back(syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, 16, 45.0));
+    clutter.rays.push_back(syntheticRainRay(90.0F, 2, 30.0F, 10000, 1000, 60, 0.0, false));
+    const std::vector<RainfallSample> clutterSamples{
+        {&clutter, 0.0}, {&clutter, 300.0}, {&clutter, 600.0}, {&clutter, 900.0}};
+    const auto guarded = accumulateRainfall(clutterSamples, 370.0);
+    assert(guarded.summary.valid);
+    for (const auto& gate : guarded.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 0);
+        assert((gate.flags & RainfallGateClutterSuspect) != 0);
+        assert((gate.flags & RainfallGateNonMeteorological) == 0);
+    }
+    assert(guarded.summary.clutterSuspectGateCount == 16);
+    assert(guarded.summary.depthGateCount == 0);
+    // Excluding every candidate gate is not a usable total.
+    assert(guarded.summary.quality == RainfallQuality::Poor);
+
+    // Same reflectivity with a real column above it: keep the rain.
+    const auto storm = rainVolume("KTLX", 45.0);
+    const std::vector<RainfallSample> stormSamples{
+        {&storm, 0.0}, {&storm, 300.0}, {&storm, 600.0}, {&storm, 900.0}};
+    const auto kept = accumulateRainfall(stormSamples, 370.0);
+    assert(kept.summary.clutterSuspectGateCount == 0);
+    // R(45) * 3 * 300 s = 69.6 tenths.
+    assert(kept.rays.front().gates.front().depthTenthsMillimeters == 70);
+    assert(kept.summary.quality == RainfallQuality::Good);
+
+    // Single-tilt volume: the vertical guard cannot run. The depth survives but
+    // the gate says so and the product cannot claim Good.
+    DecodedChunk blind;
+    blind.radarId = "KTLX";
+    blind.rays.push_back(syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, 16, 45.0));
+    const std::vector<RainfallSample> blindSamples{
+        {&blind, 0.0}, {&blind, 300.0}, {&blind, 600.0}, {&blind, 900.0}};
+    const auto unchecked = accumulateRainfall(blindSamples, 370.0);
+    assert(unchecked.summary.noVerticalCheckGateCount == 16);
+    assert(unchecked.summary.clutterSuspectGateCount == 0);
+    assert(unchecked.rays.front().gates.front().depthTenthsMillimeters == 70);
+    assert(unchecked.summary.quality == RainfallQuality::Marginal);
+}
+
+void testRainfallDualPolVeto() {
+    // 24 gates over ground 10-33 km, CC 0.98 everywhere except gate 3 (0.55).
+    DecodedChunk mixed = rainVolume("KTLX", 45.0, 24);
+    attachRainCorrelation(mixed.rays.front(), 0.98);
+    mixed.rays.front()
+        .fields.at(static_cast<std::size_t>(ProductKind::CorrelationCoefficient))
+        .at(3) = static_cast<std::uint16_t>(55);
+    const std::vector<RainfallSample> samples{
+        {&mixed, 0.0}, {&mixed, 300.0}, {&mixed, 600.0}, {&mixed, 900.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(grid.summary.nonMeteorologicalGateCount == 1);
+    assert(grid.rays.front().gates.at(3).depthTenthsMillimeters == 0);
+    assert((grid.rays.front().gates.at(3).flags & RainfallGateNonMeteorological) != 0);
+    assert(grid.rays.front().gates.at(2).depthTenthsMillimeters == 70);
+    assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 70);
+    // One exclusion in 24 candidates is 4.2%: below the Poor threshold.
+    assert(grid.summary.quality == RainfallQuality::Good);
+}
+
+void testRainfallBeamHeightGuard() {
+    // 1-230 km on the lowest tilt, 30 dBZ everywhere. Gates whose beam climbs
+    // above 4 km cannot be rain; between 2 and 4 km the depth counts but the
+    // gate is flagged, because a 4 km beam is not a surface rain gauge.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticRainRay(45.0F, 1, 0.5F, 1000, 1000, 230, 30.0));
+    const std::vector<RainfallSample> samples{
+        {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(grid.rays.size() == 1);
+    const auto& gates = grid.rays.front().gates;
+    assert(gates.size() == 230);
+    std::size_t contributing = 0;
+    std::size_t flagged = 0;
+    for (std::size_t gate = 0; gate < gates.size(); ++gate) {
+        const auto slant = gateCenterSlantRange(1000, 1000, gate);
+        const auto heightMsl =
+            standardBeamGeometry(slant, 0.5).heightAboveRadarMeters + 370.0;
+        const bool contributes = heightMsl <= 4000.0;
+        const bool flagExpected = heightMsl > 2000.0;
+        if (contributes) ++contributing;
+        if (flagExpected) ++flagged;
+        assert((gates[gate].depthTenthsMillimeters > 0) == contributes);
+        assert(((gates[gate].flags & RainfallGateBeamHigh) != 0) == flagExpected);
+        assert((gates[gate].flags & RainfallGateRangeLimited) == 0);
+        if (contributes) {
+            // R(30) * 3 * 300 s = 5.9 tenths.
+            assert(gates[gate].depthTenthsMillimeters == 6);
+        }
+    }
+    assert(contributing > 100);
+    assert(flagged > 0);
+    assert(grid.summary.depthGateCount == contributing);
+    assert(grid.summary.beamHighGateCount == flagged);
+    // The far edge of a 230 km ray is above 4 km: no depth, flagged.
+    assert(gates.back().depthTenthsMillimeters == 0);
+    assert((gates.back().flags & RainfallGateBeamHigh) != 0);
+}
+
+void testRainfallGapClamping() {
+    // Two volumes 20 min apart: volumes are missing in between. Crediting the
+    // whole gap at the older rate would double the depth.
+    const auto chunk = rainVolume("KTLX", 40.0);
+    const std::vector<RainfallSample> samples{{&chunk, 0.0}, {&chunk, 1200.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(std::abs(grid.summary.windowSeconds - 1200.0) < 1e-6);
+    assert(std::abs(grid.summary.coveredSeconds - 600.0) < 1e-6);
+    assert(grid.summary.gapClampedIntervalCount == 1);
+    assert(grid.summary.quality == RainfallQuality::Marginal);
+    // R(40) * 600 s = 20.4 tenths, not the 40.8 an unclamped gap would invent.
+    assert(grid.rays.front().gates.front().depthTenthsMillimeters == 20);
+    assert((grid.rays.front().gates.front().flags & RainfallGateGapClamped) != 0);
+    assert(grid.summary.gapClampedGateCount == 16);
+
+    // A closing clock only helps inside the same cap: 600 s clamped plus a
+    // real 300 s trailing interval = 900 s credited, 30.6 tenths.
+    const auto trailing = accumulateRainfall(samples, 370.0, 1500.0);
+    assert(trailing.summary.gapClampedIntervalCount == 1);
+    assert(std::abs(trailing.summary.coveredSeconds - 900.0) < 1e-6);
+    assert(trailing.rays.front().gates.front().depthTenthsMillimeters == 31);
+}
+
+void testRainfallGeometryRemap() {
+    // Source volumes use 500 m gates, the newest uses 1000 m: the accumulation
+    // must follow ground range, not gate index, and the newest volume owns the
+    // output grid.
+    DecodedChunk fine;
+    fine.radarId = "KTLX";
+    fine.rays.push_back(syntheticRainRay(90.0F, 1, 0.5F, 10000, 500, 31, 40.0));
+    fine.rays.push_back(syntheticRainRay(90.0F, 2, 30.0F, 10000, 500, 120, 40.0));
+    const auto coarse = rainVolume("KTLX", 40.0);
+    const std::vector<RainfallSample> samples{
+        {&fine, 0.0}, {&fine, 300.0}, {&fine, 600.0}, {&coarse, 900.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(grid.firstGateMeters == 10000);
+    assert(grid.gateSpacingMeters == 1000);
+    assert(grid.rays.front().gates.size() == 16);
+    assert(grid.summary.depthGateCount == 16);
+    assert(grid.summary.incompleteGateCount == 0);
+    for (const auto& gate : grid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 31);
+        assert((gate.flags & RainfallGateIncomplete) == 0);
+    }
+}
+
+void testRainfallIncompleteCoverage() {
+    // The middle volume's lowest tilt stops at 17 km: the far gates lose one
+    // interval and must say so instead of quietly reading as a full total.
+    DecodedChunk truncated;
+    truncated.radarId = "KTLX";
+    truncated.rays.push_back(syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, 8, 40.0));
+    truncated.rays.push_back(syntheticRainRay(90.0F, 2, 30.0F, 10000, 1000, 60, 40.0));
+    const auto full = rainVolume("KTLX", 40.0);
+    const std::vector<RainfallSample> samples{
+        {&full, 0.0}, {&truncated, 300.0}, {&full, 600.0}, {&full, 900.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(grid.summary.incompleteGateCount == 8);
+    assert(grid.rays.front().gates.at(0).depthTenthsMillimeters == 31);
+    assert(grid.rays.front().gates.at(15).depthTenthsMillimeters == 20);
+    assert((grid.rays.front().gates.at(15).flags & RainfallGateIncomplete) != 0);
+    assert(grid.summary.quality == RainfallQuality::Marginal);
+}
+
+void testRainfallInvalidWindows() {
+    {
+        const auto grid = accumulateRainfall({}, 370.0);
+        assert(!grid.summary.valid);
+        assert(grid.summary.quality == RainfallQuality::Invalid);
+        assert(grid.rays.empty());
+    }
+    {
+        const auto chunk = rainVolume("KTLX", 40.0);
+        const std::vector<RainfallSample> samples{{&chunk, 0.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(!grid.summary.valid);
+        assert(grid.summary.sampleCount == 1);
+        assert(grid.rays.empty());
+    }
+    {
+        // Duplicate and null samples leave no interval at all.
+        const auto chunk = rainVolume("KTLX", 40.0);
+        const std::vector<RainfallSample> samples{
+            {&chunk, 500.0}, {&chunk, 500.0}, {nullptr, 600.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(!grid.summary.valid);
+        assert(grid.summary.sampleCount == 1);
+        assert(grid.summary.rejectedSampleCount == 2);
+    }
+    {
+        // Rain below the 5 dBZ floor is measured, not missing: zero depth and
+        // no Incomplete flag.
+        const auto chunk = rainVolume("KTLX", 3.0);
+        const std::vector<RainfallSample> samples{
+            {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.summary.valid);
+        assert(grid.summary.depthGateCount == 0);
+        assert(grid.summary.incompleteGateCount == 0);
+        assert(std::abs(grid.summary.maximumMillimeters) < 1e-9);
+        assert(grid.summary.quality == RainfallQuality::Good);
+    }
+    {
+        // Code 1 is "missing" in one format and "below threshold" in the other,
+        // and the chunk does not say which. It must never become invented rain,
+        // and it must not be claimed as a coverage gap at that gate either.
+        auto chunk = rainVolume("KTLX", 40.0);
+        chunk.rays.front()
+            .fields.at(static_cast<std::size_t>(ProductKind::Reflectivity))
+            .at(5) = 1;
+        const std::vector<RainfallSample> samples{
+            {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+        const auto grid = accumulateRainfall(samples, 370.0);
+        assert(grid.rays.front().gates.at(5).depthTenthsMillimeters == 0);
+        assert((grid.rays.front().gates.at(5).flags & RainfallGateIncomplete) == 0);
+        assert(grid.rays.front().gates.at(4).depthTenthsMillimeters == 31);
+        assert(grid.summary.incompleteGateCount == 0);
+    }
+    {
+        // A relation or interval cap that cannot produce a number fails closed
+        // instead of emitting zeros that look like "no rain".
+        const auto chunk = rainVolume("KTLX", 40.0);
+        const std::vector<RainfallSample> samples{
+            {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+        RainfallConfig broken;
+        broken.zrA = 0.0;
+        const auto grid = accumulateRainfall(samples, 370.0,
+                                             std::numeric_limits<double>::quiet_NaN(), broken);
+        assert(!grid.summary.valid);
+        assert(grid.summary.quality == RainfallQuality::Invalid);
+        assert(grid.rays.empty());
+    }
+}
+
+void testRainfallPartialReferenceRays() {
+    // Rays inside one reference tilt need not share a gate count. The map for
+    // each ray must follow that ray's own length; a short first ray must not
+    // truncate the long one.
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, 10, 40.0));
+    chunk.rays.push_back(syntheticRainRay(91.0F, 1, 0.5F, 10000, 1000, 16, 40.0));
+    chunk.rays.push_back(syntheticRainRay(90.0F, 2, 30.0F, 10000, 1000, 60, 40.0));
+    chunk.rays.push_back(syntheticRainRay(91.0F, 2, 30.0F, 10000, 1000, 60, 40.0));
+    const std::vector<RainfallSample> samples{
+        {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    const auto grid = accumulateRainfall(samples, 370.0);
+    assert(grid.summary.valid);
+    assert(grid.rays.size() == 2);
+    assert(grid.rays.at(0).gates.size() == 10);
+    assert(grid.rays.at(1).gates.size() == 16);
+    for (const auto& ray : grid.rays) {
+        for (const auto& gate : ray.gates) {
+            assert(gate.depthTenthsMillimeters == 31);
+            assert((gate.flags & RainfallGateIncomplete) == 0);
+        }
+    }
+    assert(grid.summary.depthGateCount == 26);
 }
 
 static RadarStormFeature syntheticFeature(const double lat, const double lon, const double dbz,
@@ -3013,6 +3382,16 @@ int main() {
     testCrefIsColumnMax();
     testCappiInterpolatesAndClamps();
     testDerivedSupportGate();
+    testZrRateRelation();
+    testRainfallAccumulationClosedForm();
+    testRainfallClutterGuard();
+    testRainfallDualPolVeto();
+    testRainfallBeamHeightGuard();
+    testRainfallGapClamping();
+    testRainfallGeometryRemap();
+    testRainfallIncompleteCoverage();
+    testRainfallInvalidWindows();
+    testRainfallPartialReferenceRays();
     testStormTracker();
     testVolumeBrick();
     testVolumeSpillRoundTrip();
