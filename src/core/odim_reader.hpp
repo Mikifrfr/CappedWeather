@@ -18,8 +18,10 @@ namespace cappedweather {
 // Dual-polarization quantities are skipped: OPERA serves them from 2027+.
 // Elevations are numbered sequentially sorted by angle because ODIM carries
 // no stable tilt numbering across sites. Gate encoding reuses the NEXRAD
-// 16-bit convention (0 = missing, 1 = below threshold) with matching
-// scale/offset pairs, so downstream math is untouched.
+// 16-bit scale/offset pairs so downstream math is untouched, but the sentinel
+// order is the reverse of Message 31's: 0 = missing (nodata), 1 = below
+// threshold (undetect). The chunk records MomentEncoding::Odim so consumers
+// can decode the two codes instead of guessing the format.
 //
 // Returns nullopt with *error set when the buffer is not a readable PVOL.
 // Requires HDF5 at build time; without it every call fails closed, see

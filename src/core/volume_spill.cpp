@@ -113,6 +113,13 @@ bool spillVolume(const DecodedChunk& chunk, const std::string& path) {
             if (!writeLe(file, ray.offsetByProduct[product])) return false;
         }
     }
+    // Optional one-byte trailer: the chunk's moment sentinel convention. Files
+    // written before this existed end at the last ray and load as Unknown (both
+    // 0 and 1 read as no data, the old behaviour), so the version stays 1 and
+    // old spill files remain readable.
+    if (chunk.momentEncoding != MomentEncoding::Unknown) {
+        if (!writeLe(file, static_cast<std::uint8_t>(chunk.momentEncoding))) return false;
+    }
     file.close();
     return static_cast<bool>(file);
 }
@@ -176,7 +183,14 @@ std::shared_ptr<DecodedChunk> loadSpilledVolume(const std::string& path) {
         }
         chunk->rays.push_back(std::move(ray));
     }
-    if (cursor != end) return nullptr; // trailing garbage: not our file
+    // Optional trailer from the sentinel-convention extension. Anything else
+    // after the last ray is trailing garbage: this is not our file.
+    if (cursor != end) {
+        if (end - cursor != 1) return nullptr;
+        const auto encoding = std::to_integer<std::uint8_t>(*cursor);
+        if (encoding > static_cast<std::uint8_t>(MomentEncoding::Odim)) return nullptr;
+        chunk->momentEncoding = static_cast<MomentEncoding>(encoding);
+    }
     return chunk;
 }
 

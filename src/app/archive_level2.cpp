@@ -41,6 +41,14 @@ QString headerRadarId(const QByteArray& bytes, const QString& hint) {
 }
 
 void mergeDecoded(DecodedChunk& destination, DecodedChunk source) {
+    // One Archive-II volume holds one format, but never let a mixed merge claim
+    // a convention it cannot guarantee: Unknown falls back to the historical
+    // "<= 1 is no data" reading downstream.
+    if (destination.messageCount == 0 && destination.rays.empty()) {
+        destination.momentEncoding = source.momentEncoding;
+    } else if (source.momentEncoding != destination.momentEncoding) {
+        destination.momentEncoding = MomentEncoding::Unknown;
+    }
     destination.messageCount += source.messageCount;
     destination.rejectedMessages += source.rejectedMessages;
     destination.rejectedBlocks += source.rejectedBlocks;
