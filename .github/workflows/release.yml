@@ -5,6 +5,9 @@ name: Release
 # for vcpkg + Qt + linuxdeploy. Produces, per tag v*:
 #   Windows: CappedWeather-<ver>-Windows-AMD64.exe (NSIS) + .zip (portable)
 #   Linux:   CappedWeather-<ver>-Linux-x86_64.tgz (AppDir, run ./AppDir/AppRun)
+#   macOS:   CappedWeather-<ver>-macOS-arm64-preview.tgz (.app, ad-hoc signed,
+#            not notarized). PREVIEW until it has been launched on a Mac and
+#            shown a first echo from a real station; see docs/packaging-macos.md.
 # AGPL-3.0-or-later source for any binary is the tag itself.
 
 on:
@@ -110,4 +113,109 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: CappedWeather-*Linux*.tgz
+          generate_release_notes: true
+
+  macos:
+    # Apple Silicon: the vcpkg triplet and CMAKE_OSX_ARCHITECTURES are pinned
+    # to arm64 (a universal build would need every dependency built twice and
+    # lipo'd, which vcpkg has no triplet for). The runner class is asserted
+    # below so a change back to Intel fails loudly instead of cross-compiling.
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      QT_VERSION: 6.8.3
+      QT_PREFIX: ${{ github.workspace }}/Qt
+      VCPKG_TRIPLET: arm64-osx
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert an Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Install Qt 6.8.3 (macOS + Multimedia)
+        run: |
+          set -eu
+          # A venv, not `pip install --user`: Homebrew's python3 enforces
+          # PEP 668 and refuses user-site installs on the runner image.
+          python3 -m venv "$RUNNER_TEMP/aqt"
+          "$RUNNER_TEMP/aqt/bin/pip" install --quiet --upgrade pip aqtinstall
+          "$RUNNER_TEMP/aqt/bin/aqt" install-qt mac desktop "$QT_VERSION" clang_64 \
+            -m qtmultimedia -O "$QT_PREFIX"
+          echo "CMAKE_PREFIX_PATH=$QT_PREFIX/$QT_VERSION/macos" >> "$GITHUB_ENV"
+
+      - name: Install netCDF-C + HDF5 via vcpkg
+        run: |
+          set -eu
+          VCPKG="${VCPKG_INSTALLATION_ROOT:-}"
+          if [ -z "$VCPKG" ] || [ ! -x "$VCPKG/vcpkg" ]; then
+            VCPKG="$HOME/vcpkg"
+            if [ ! -x "$VCPKG/vcpkg" ]; then
+              git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG"
+              "$VCPKG/bootstrap-vcpkg.sh" -disableMetrics
+            fi
+          fi
+          echo "VCPKG_ROOT=$VCPKG" >> "$GITHUB_ENV"
+          "$VCPKG/vcpkg" install netcdf-c:"$VCPKG_TRIPLET" hdf5:"$VCPKG_TRIPLET"
+
+      - name: Configure (fail-fast on missing live-data deps)
+        run: |
+          set -eu
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+            -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Test (offscreen)
+        run: ctest --test-dir build -C Release --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Assemble .app bundle + tarball
+        run: sh packaging/macos-bundle.sh build
+
+      - name: Smoke-test the bundle (launch the packaged app offscreen)
+        run: |
+          set -eu
+          APP="$(ls -d dist/*.app | head -n 1)"
+          BIN="$APP/Contents/MacOS/CappedWeather"
+          # The packaged runtime must get past dyld and stay up: a missing or
+          # unbundled dylib kills it in under a second with a non-zero code.
+          QT_QPA_PLATFORM=offscreen "$BIN" > smoke.log 2>&1 &
+          pid=$!
+          rc=0
+          for _ in $(seq 1 25); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              wait "$pid" || rc=$?
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          fi
+          cat smoke.log
+          echo "bundle exit code: $rc (0 = exited on its own or stopped by this step; anything else is a crash)"
+          test "$rc" = 0 || test "$rc" = 143
+
+      - name: Upload the bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CappedWeather-macOS-arm64-preview
+          path: CappedWeather-*macOS*.tgz
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CappedWeather-*macOS*.tgz
           generate_release_notes: true

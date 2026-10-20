@@ -18,8 +18,9 @@ Grab the latest build from the [Releases page](https://github.com/Mikifrfr/Cappe
 
 - **Windows**: `CappedWeather-*-Windows-*.exe` is a one-click NSIS installer (Start-menu shortcut, bundled Qt + BZip2 + netCDF + HDF5). Prefer portable? `CappedWeather-*-Windows-*.zip`: unzip and run `CappedWeather.exe`, no install needed.
 - **Linux**: `CappedWeather-v*-Linux-x86_64.tgz`: extract and run `./AppDir/AppRun` (built on Ubuntu 22.04, runs on newer distros too).
+- **macOS (preview, Apple Silicon)**: `CappedWeather-*-macOS-arm64-preview.tgz`: extract `CappedWeather.app`, then right-click > Open (`xattr -dr com.apple.quarantine CappedWeather.app` also works). The bundle is ad-hoc signed but not notarized, so a plain double-click is refused on first launch. This one is **not a supported release yet**: the tag job builds and smoke-launches it offscreen, but no one has launched it on a Mac and confirmed a first echo from a real station ([checklist](docs/packaging-macos.md)). It keeps the `-preview` suffix until that happens; report what breaks.
 
-Release assets are built from tags (`v*`) by `.github/workflows/release.yml` with full Qt + netCDF + HDF5 on both OS. Sources for any binary are the matching tag (AGPL-3.0-or-later, see `LICENSE`).
+Release assets are built from tags (`v*`) by `.github/workflows/release.yml` with full Qt + netCDF + HDF5 on every OS. Sources for any binary are the matching tag (AGPL-3.0-or-later, see `LICENSE`).
 
 ## Quick start
 
@@ -82,14 +83,14 @@ ctest --test-dir build -C Release --output-on-failure
 
 The desktop app additionally needs:
 
-| | Windows | Linux (Ubuntu 22.04) |
-|---|---|---|
-| Qt | 6.8 via `aqt` (`CMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64`) | 6.8 via `aqt` |
-| Codecs | BZip2 (zlib optional) | `libbz2-dev` (`zlib1g-dev` optional) |
-| Live lightning | `netcdf-c` via vcpkg | `libnetcdf-dev` |
-| European volumes | `hdf5` via vcpkg | `libhdf5-dev` |
+| | Windows | Linux (Ubuntu 22.04) | macOS (arm64, preview) |
+|---|---|---|---|
+| Qt | 6.8 via `aqt` (`CMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64`) | 6.8 via `aqt` | 6.8 via `aqt` (`CMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/macos`) |
+| Codecs | BZip2 (zlib optional) | `libbz2-dev` (`zlib1g-dev` optional) | SDK BZip2/zlib |
+| Live lightning | `netcdf-c` via vcpkg | `libnetcdf-dev` | `netcdf-c` via vcpkg (`arm64-osx`) |
+| European volumes | `hdf5` via vcpkg | `libhdf5-dev` | `hdf5` via vcpkg (`arm64-osx`) |
 
-Production builds fail fast without netCDF/HDF5 (`CAPPEDWEATHER_REQUIRE_NETCDF/HDF5=ON`); stub-only dev builds opt out with `=OFF`. See `.github/workflows/release.yml` for the exact release recipe. Live-network smoke tests in `tests/` hit only real public NOAA/NWS endpoints.
+Production builds fail fast without netCDF/HDF5 (`CAPPEDWEATHER_REQUIRE_NETCDF/HDF5=ON`); stub-only dev builds opt out with `=OFF`. See `.github/workflows/release.yml` for the exact release recipe. Windows packages come from CPack (NSIS + ZIP), Linux from `packaging/linux-appdir.sh` (linuxdeploy AppDir), macOS from `packaging/macos-bundle.sh` (macdeployqt + `install_name_tool` fixups + ad-hoc signature). Live-network smoke tests in `tests/` hit only real public NOAA/NWS endpoints; `build/cappedweather_live_gui_probe <out.png>` is the first-echo check used to promote a mac artifact out of preview.
 
 ## Data sources
 

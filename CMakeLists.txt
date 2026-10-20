@@ -393,6 +393,17 @@ if(CAPPEDWEATHER_BUILD_APP)
             WIN32_EXECUTABLE TRUE
             MACOSX_BUNDLE TRUE
         )
+        if(APPLE)
+            # Info.plist metadata for the .app bundle. packaging/macos-bundle.sh
+            # adds the icon, the LICENSE and an ad-hoc signature after install;
+            # the Qt runtime comes from the deploy script below.
+            set_target_properties(CappedWeather PROPERTIES
+                MACOSX_BUNDLE_BUNDLE_NAME "CappedWeather"
+                MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.mikifrfr.cappedweather"
+                MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+                MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+            )
+        endif()
 
         if(WIN32 AND (CAPPEDWEATHER_NETCDF_TARGET OR CAPPEDWEATHER_HDF5_TARGET))
             set(_cw_runtime_dirs "${CAPPEDWEATHER_QT_ROOT}/bin")
@@ -431,7 +442,10 @@ if(CAPPEDWEATHER_BUILD_APP)
     endif()
 endif()
 
-if(NOT WIN32)
+# Linux desktop integration only: launchers read the .desktop file and the
+# XDG icon. macOS ships a .app bundle (which carries its own icon) and Windows
+# an NSIS installer, so these would be dead weight in those prefixes.
+if(UNIX AND NOT APPLE)
     install(FILES packaging/CappedWeather.desktop DESTINATION share/applications)
     install(FILES packaging/CappedWeather.png DESTINATION share/icons/hicolor/256x256/apps)
 endif()
@@ -458,6 +472,10 @@ if(WIN32)
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
     set(CPACK_NSIS_MENU_LINKS "bin/CappedWeather.exe" "CappedWeather Level II Radar")
 else()
+    # Linux: TGZ. macOS release artifacts are assembled by
+    # packaging/macos-bundle.sh (macdeployqt, dylib fixups, ad-hoc signature),
+    # not by CPack: a CPack TGZ of the raw install tree would carry undeployed
+    # dylibs and an unsigned bundle.
     set(CPACK_GENERATOR "TGZ")
 endif()
 include(CPack)

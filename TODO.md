@@ -15,8 +15,8 @@ Short active list. Done work stays in git history and release notes, not in this
 - [ ] GIS export follow-on: GeoTIFF for one frame (needs a native TIFF dependency on every platform plus CI wiring). KML GroundOverlay is wired; uses current georeferencing only, no reprojection magic.
 
 ### Platform and UX
-- [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. macOS is the remaining stretch.
-- [ ] Flatpak. Artifacts already ship, discovery is the gap. (Windows update discovery is done: Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only.)
+- [ ] macOS build. Windows installer (NSIS + ZIP) and Linux AppDir TGZ are shipped from tags. The tag job now builds an arm64 `.app` preview (`macos` job in `.github/workflows/release.yml` via `packaging/macos-bundle.sh`: real netCDF/HDF5, ctest, dylib-closure audit, ad-hoc signature, offscreen launch, asset named `-preview`). Still open: launch it on a Mac and confirm a first echo from a real station, then drop `-preview` (checklist in `docs/packaging-macos.md`). No macOS runner has executed the job yet.
+- [ ] Flatpak. Artifacts already ship, discovery is the gap. (Update discovery is done for every desktop platform: the Help action checks the public releases metadata with explicit current/newer/no-info/error states, discovery only, no platform asset token needed.)
 - [ ] Light / high-contrast theme variant. Optional. Dark and Classic are complete including focus rules and dialog coverage.
 - [x] Zone disk cache live check (`tools/overlay_probe.cpp`, 2026-10-11, 306+ active alerts: cold launch 284 requests, warm launch 83 (same 12 unparseable zones refetch by design, rest is new-alert churn plus base feeds), warnings complete both runs (412/413). ~3.4x fewer requests.
 - [x] Cold-start time to first echo (`tools/volume_timing_probe.cpp`, 2026-10-11: KGSP first complete live volume 5.8 s after launch with opt-out defaults, overlays still fetching in background. Radar never waits on context layers.

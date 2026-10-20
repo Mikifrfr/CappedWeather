@@ -1,10 +1,16 @@
 #pragma once
 
-// Windows update discovery (the bounded half of the Flatpak-plus-updates
-// item): an async check against this project's public stable-release
-// metadata, version-compared, with the verified project release page one
-// click away when a newer build exists. Discovery only: no downloading
-// installers, no installs, no new dependency.
+// Update discovery for every desktop platform (the bounded half of the
+// Flatpak-plus-updates item): an async check against this project's public
+// stable-release metadata, version-compared, with the verified project
+// release page one click away when a newer build exists. Discovery only: no
+// downloading installers, no installs, no new dependency.
+//
+// Platform assets are deliberately ignored: only tag_name / prerelease /
+// html_url / published_at are read from /releases/latest. Adding a macOS
+// (or Flatpak) asset therefore needs no platform token, no asset selector
+// and no change here — the newer-version notice links to the release page
+// and the user picks their own artifact.
 //
 // States stay explicit: loading, current, newer, unknown-current
 // (development builds), no-release-info (a missing release is never proof
