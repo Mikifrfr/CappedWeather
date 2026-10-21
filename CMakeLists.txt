@@ -436,6 +436,11 @@ if(CAPPEDWEATHER_BUILD_APP)
                 tools/volume_timing_probe.cpp
             )
             target_link_libraries(volume_timing_probe PRIVATE cappedweather_ui)
+
+            qt_add_executable(volume3d_probe
+                tools/volume3d_probe.cpp
+            )
+            target_link_libraries(volume3d_probe PRIVATE cappedweather_ui)
         endif()
 
         set_target_properties(CappedWeather PROPERTIES

@@ -3764,6 +3764,83 @@ void testDecodedRayLegacyGeometryMaxGates() {
     assert(decoded.rays.front().gateCount == 5);
 }
 
+void testVolumeBrickTrilinear() {
+    // 2 x 2 x 2 brick, 1 km cells, every corner present at full value.
+    VolumeBrick brick;
+    brick.nx = 2;
+    brick.ny = 2;
+    brick.nz = 2;
+    brick.halfExtentMeters = 1000.0;
+    brick.topMeters = 1000.0;
+    brick.value.assign(8, 255);
+    brick.present.assign(8, 1);
+
+    // Trilinear: the cell centre of a uniform field reads that field exactly,
+    // and interpolation is continuous rather than snapping to a voxel.
+    const auto centre = sampleBrickTrilinear(brick, 0.0, 0.0, 500.0);
+    assert(centre.has_value());
+    assert(std::fabs(static_cast<double>(centre->value01) - 1.0) < 1e-4);
+    assert(std::fabs(static_cast<double>(centre->coverage) - 1.0) < 1e-4);
+
+    brick.value.at(0) = 0; // one low corner: the blend must land between, not snap
+    const auto blended = sampleBrickTrilinear(brick, 0.0, 0.0, 500.0);
+    assert(blended.has_value());
+    assert(blended->value01 > 0.80F && blended->value01 < 1.0F);
+
+    // A hole is unknown, not zero echo. Drop one corner entirely: the value must
+    // stay at full strength (renormalised among known corners) and coverage must
+    // report that a fraction of the cell is missing.
+    brick.value.assign(8, 255);
+    brick.present.assign(8, 1);
+    brick.present.at(7) = 0;
+    brick.value.at(7) = 0;
+    const auto holed = sampleBrickTrilinear(brick, 0.0, 0.0, 500.0);
+    assert(holed.has_value());
+    assert(std::fabs(static_cast<double>(holed->value01) - 1.0) < 1e-4); // not darkened
+    assert(std::fabs(static_cast<double>(holed->coverage) - 0.875) < 1e-4);
+
+    // Every corner absent: no claim at all.
+    brick.present.assign(8, 0);
+    assert(!sampleBrickTrilinear(brick, 0.0, 0.0, 500.0).has_value());
+
+    // Outside the box or below ground.
+    brick.present.assign(8, 1);
+    assert(!sampleBrickTrilinear(brick, 0.0, 0.0, 5000.0).has_value());
+    assert(!sampleBrickTrilinear(brick, 9000.0, 0.0, 500.0).has_value());
+    assert(!sampleBrickTrilinear(brick, 0.0, 0.0, -1.0).has_value());
+
+    // Surface normal points outward (toward decreasing density): dense west half,
+    // empty east half gives +x.
+    VolumeBrick half;
+    half.nx = 4;
+    half.ny = 4;
+    half.nz = 4;
+    half.halfExtentMeters = 2000.0;
+    half.topMeters = 2000.0;
+    half.value.assign(64, 0);
+    half.present.assign(64, 0);
+    for (int iz = 0; iz < 4; ++iz) {
+        for (int iy = 0; iy < 4; ++iy) {
+            for (int ix = 0; ix < 2; ++ix) {
+                const auto flat = static_cast<std::size_t>((iz * 4 + iy) * 4 + ix);
+                half.value.at(flat) = 255;
+                half.present.at(flat) = 1;
+            }
+        }
+    }
+    const auto normal = brickSurfaceNormal(half, -100.0, 0.0, 1000.0);
+    assert(normal.has_value());
+    assert(normal->x > 0.9); // points east, out of the dense half
+    assert(std::fabs(normal->y) < 0.1);
+
+    // A flat field has no surface: ambient only, no invented normal.
+    VolumeBrick flatBrick = brick;
+    flatBrick.value.assign(8, 128);
+    flatBrick.present.assign(8, 1);
+    assert(!brickSurfaceNormal(flatBrick, 0.0, 0.0, 500.0).has_value());
+    assert(!brickSurfaceNormal(brick, 0.0, 0.0, 5000.0).has_value());
+}
+
 void testVolumeBrick() {
     // One ray due east, low tilt, a single 50 dBZ gate in a sea of missing.
     DecodedChunk chunk;
@@ -3897,6 +3974,7 @@ int main() {
     testRainfallInvalidWindows();
     testRainfallPartialReferenceRays();
     testStormTracker();
+    testVolumeBrickTrilinear();
     testVolumeBrick();
     testVolumeSpillRoundTrip();
     testDerivedProductsSupportNegativeFirstGate();

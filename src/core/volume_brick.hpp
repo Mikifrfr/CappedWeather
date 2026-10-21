@@ -54,6 +54,29 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, ProductKind product,
 std::optional<float> sampleBrickNearest(const VolumeBrick& brick, double xMeters, double yMeters,
                                         double zMeters);
 
+struct BrickSample {
+    float value01 = 0.0F;
+    float coverage = 0.0F; // fraction of the 8 corners that carry a gate, 0..1
+};
+
+// Trilinear read. `value01` averages only the corners that carry gates, so a
+// hole is never interpolated as zero echo; `coverage` is how much of the cell is
+// known, and callers scale opacity by it rather than inventing density.
+std::optional<BrickSample> sampleBrickTrilinear(const VolumeBrick& brick, double xMeters,
+                                                double yMeters, double zMeters);
+
+struct EnuVector {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+// Outward unit normal (opposite the value gradient) from central differences.
+// nullopt when the neighbourhood is unknown or the field is flat, so the caller
+// shades with ambient only instead of a fabricated surface.
+std::optional<EnuVector> brickSurfaceNormal(const VolumeBrick& brick, double xMeters,
+                                            double yMeters, double zMeters);
+
 // Ray vs brick box (slab method). Distances are in units of dir; callers pass
 // a normalized direction to get meters.
 struct RayBoxHit {

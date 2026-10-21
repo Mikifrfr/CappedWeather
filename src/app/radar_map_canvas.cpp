@@ -5726,7 +5726,13 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             }
             std::shared_ptr<const VolumeBrick> brickNow = brick;
             if (!brickNow || brickChunk != chunk || brickProduct != product) {
-                VolumeBrick fresh = buildVolumeBrick(*chunk, product);
+                VolumeBrickDims brickDims;
+                brickDims.nx = 256;
+                brickDims.ny = 256;
+                brickDims.nz = 128;
+                brickDims.halfExtentMeters = 60000.0;
+                brickDims.topMeters = 20000.0;
+                VolumeBrick fresh = buildVolumeBrick(*chunk, product, brickDims);
                 brickNow = std::make_shared<const VolumeBrick>(std::move(fresh));
             }
             if (stale()) return;
@@ -5735,12 +5741,21 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             // it) scaled by the echo opacity.
             std::vector<RgbaStop> stops;
             stops.reserve(48);
+            const auto rampAlpha = [](double v01, bool folds) {
+                const double t = folds ? std::fabs(v01 - 0.5) * 2.0 : v01;
+                const double edge0 = folds ? 0.15 : 0.28;
+                const double edge1 = folds ? 0.55 : 0.62;
+                const double s = std::clamp((t - edge0) / (edge1 - edge0), 0.0, 1.0);
+                return (s * s * (3.0 - 2.0 * s)) * (folds ? 0.78 : 0.85);
+            };
+            const bool folds = product == ProductKind::Velocity;
             for (int stop = 0; stop < 48; ++stop) {
                 const double normalized = static_cast<double>(stop) / 47.0;
                 const QColor color = productColor(product, normalized, palette, 100, customPalette);
                 stops.push_back({static_cast<float>(normalized), static_cast<float>(color.redF()),
                                  static_cast<float>(color.greenF()),
-                                 static_cast<float>(color.blueF()), 1.0F});
+                                 static_cast<float>(color.blueF()),
+                                 static_cast<float>(rampAlpha(normalized, folds))});
             }
             const int renderWidth = std::max(1, logicalSize.width() / divisor);
             const int renderHeight = std::max(1, logicalSize.height() / divisor);
@@ -5748,13 +5763,19 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             image.fill(Qt::transparent);
             const VolumeCamera camera =
                 volumeCameraFor(*brickNow, orbitAzimuth, orbitElevation, orbitDistance, orbitTarget);
-            const double voxelMeters =
-                std::min({2.0 * brickNow->halfExtentMeters / brickNow->nx,
-                          2.0 * brickNow->halfExtentMeters / brickNow->ny,
-                          brickNow->topMeters / brickNow->nz});
-            const double stepMeters = voxelMeters * 1.25;
+            const double spanX = 2.0 * brickNow->halfExtentMeters / brickNow->nx;
+            const double spanY = 2.0 * brickNow->halfExtentMeters / brickNow->ny;
+            const double spanZ = brickNow->topMeters / brickNow->nz;
+            const double stepMeters = std::max({spanX, spanY, spanZ}) * 0.5;
+            const double diagonalMeters =
+                std::sqrt(8.0 * brickNow->halfExtentMeters * brickNow->halfExtentMeters +
+                          brickNow->topMeters * brickNow->topMeters);
+            const int maxSteps = static_cast<int>(diagonalMeters / stepMeters) + 2;
             const double aspect = static_cast<double>(renderWidth) / renderHeight;
             const float opacityScale = static_cast<float>(opacity) / 100.0F;
+            constexpr float kAmbient = 0.28F;
+            constexpr double kLight[3] = {-0.5, -0.5, 0.7071};
+            constexpr float kDensityPerMeter = 6.4e-4F;
             QElapsedTimer timer;
             timer.start();
             for (int y = 0; y < renderHeight; ++y) {
@@ -5775,26 +5796,33 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                     double t = std::max(hit->tEnter, 0.0);
                     float r = 0.0F, g = 0.0F, b = 0.0F, a = 0.0F;
                     int steps = 0;
-                    while (t < hit->tExit && a < 0.98F && steps < 400) {
-                        const auto sample = sampleBrickNearest(
-                            *brickNow, camera.eye[0] + dir[0] * t, camera.eye[1] + dir[1] * t,
-                            camera.eye[2] + dir[2] * t);
+                    while (t < hit->tExit && a < 0.98F && steps < maxSteps) {
+                        const double sx = camera.eye[0] + dir[0] * t;
+                        const double sy = camera.eye[1] + dir[1] * t;
+                        const double sz = camera.eye[2] + dir[2] * t;
+                        const auto sample = sampleBrickTrilinear(*brickNow, sx, sy, sz);
                         if (sample.has_value()) {
-                            // Alpha runs on intensity, color on value: weak
-                            // echo is skipped entirely so hundreds of faint
-                            // gates along a ray cannot accumulate into a solid
-                            // blue wall. Velocity folds around zero (away and
-                            // toward read equally solid).
-                            float intensity = *sample;
-                            if (product == ProductKind::Velocity)
-                                intensity = std::fabs(*sample - 0.5F) * 2.0F;
-                            if (intensity >= 0.25F) {
-                                const Rgba color = evaluateTransfer(stops, *sample);
-                                float gate = std::clamp((intensity - 0.25F) / 0.40F, 0.0F, 1.0F);
-                                gate = gate * gate * (3.0F - 2.0F * gate) * opacityScale;
-                                r += (1.0F - a) * color.r * gate;
-                                g += (1.0F - a) * color.g * gate;
-                                b += (1.0F - a) * color.b * gate;
+                            const Rgba color = evaluateTransfer(stops, sample->value01);
+                            const float sigma = color.a * sample->coverage * opacityScale;
+                            // Beer-Lambert along the step, not a per-sample alpha:
+                            // a fixed alpha saturates within two samples and the
+                            // ray becomes a fog shell instead of an integrated
+                            // volume, which is what makes shading unreadable.
+                            const float gate =
+                                1.0F - std::exp(-sigma * kDensityPerMeter *
+                                                static_cast<float>(stepMeters));
+                            if (gate > 0.002F) {
+                                float shade = kAmbient;
+                                if (const auto normal = brickSurfaceNormal(*brickNow, sx, sy, sz)) {
+                                    const double lit = normal->x * kLight[0] +
+                                                       normal->y * kLight[1] +
+                                                       normal->z * kLight[2];
+                                    shade += (1.0F - kAmbient) *
+                                             static_cast<float>(std::max(0.0, lit));
+                                }
+                                r += (1.0F - a) * color.r * shade * gate;
+                                g += (1.0F - a) * color.g * shade * gate;
+                                b += (1.0F - a) * color.b * shade * gate;
                                 a += (1.0F - a) * gate;
                             }
                         }
