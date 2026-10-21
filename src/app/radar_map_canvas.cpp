@@ -5674,6 +5674,63 @@ bool projectVolumePoint(const VolumeCamera& camera, const double point[3], const
     return true;
 }
 
+// Panel pixel -> ground-plane ENU point: the exact inverse of the marcher's
+// pixel-to-ray mapping (same aspect term, same focal), so a box dragged on
+// screen lands where the pixel looks. A pixel above the horizon has no ground
+// point; with `clampAboveHorizon` it is clamped to the coverage circle along
+// its own heading, so a low orbit still boxes instead of refusing the gesture,
+// and without it the mapping honestly reports that there is no ground there.
+bool groundPointFromCamera(const double target[3], const double azimuthDeg,
+                           const double elevationDeg, const double distanceMeters,
+                           const QPointF& pixel, const int width, const int height,
+                           const double coverageMeters, const bool clampAboveHorizon,
+                           double* xMeters, double* yMeters) {
+    if (width <= 0 || height <= 0) return false;
+    const VolumeBrick frame;
+    const VolumeCamera camera =
+        volumeCameraFor(frame, azimuthDeg, elevationDeg, distanceMeters, target);
+    const double aspect = static_cast<double>(width) / static_cast<double>(height);
+    const double px = ((pixel.x() + 0.5) / static_cast<double>(width) * 2.0 - 1.0) * aspect;
+    const double py = 1.0 - (pixel.y() + 0.5) / static_cast<double>(height) * 2.0;
+    double dir[3] = {
+        camera.forward[0] * camera.focal + camera.right[0] * px + camera.up[0] * py,
+        camera.forward[1] * camera.focal + camera.right[1] * px + camera.up[1] * py,
+        camera.forward[2] * camera.focal + camera.right[2] * px + camera.up[2] * py,
+    };
+    const double length = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (!(length > 1e-12)) return false;
+    for (double& component : dir) component /= length;
+    if (dir[2] < -1e-6) {
+        const double t = -camera.eye[2] / dir[2];
+        if (t > 1.0) {
+            *xMeters = camera.eye[0] + dir[0] * t;
+            *yMeters = camera.eye[1] + dir[1] * t;
+            return true;
+        }
+    }
+    if (!clampAboveHorizon) return false;
+    const double heading = std::hypot(dir[0], dir[1]);
+    if (!(heading > 1e-9)) return false; // straight down: no heading to follow
+    const double dx = dir[0] / heading;
+    const double dy = dir[1] / heading;
+    const double along = camera.eye[0] * dx + camera.eye[1] * dy;
+    const double eyeRadiusSq = camera.eye[0] * camera.eye[0] + camera.eye[1] * camera.eye[1];
+    const double discriminant = along * along - eyeRadiusSq + coverageMeters * coverageMeters;
+    const double travel = discriminant > 0.0 ? (-along + std::sqrt(discriminant)) : 0.0;
+    *xMeters = camera.eye[0] + dx * travel;
+    *yMeters = camera.eye[1] + dy * travel;
+    return true;
+}
+
+// Boxes are derived from a drag, so exact double equality would rebuild the
+// brick on a floating-point no-op gesture. One metre is below a voxel anywhere.
+bool sameVolume3dBox(const RadarMapCanvas::Volume3dBox& a,
+                     const RadarMapCanvas::Volume3dBox& b) {
+    return std::fabs(a.centerXMeters - b.centerXMeters) < 1.0 &&
+           std::fabs(a.centerYMeters - b.centerYMeters) < 1.0 &&
+           std::fabs(a.halfExtentMeters - b.halfExtentMeters) < 1.0;
+}
+
 } // namespace
 
 void RadarMapCanvas::rebuildVolumeRender() {
@@ -5691,6 +5748,8 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
     const auto brick = brick_;
     const auto brickChunk = brickChunk_;
     const auto brickProduct = brickProduct_;
+    const auto box = volumeBox_;
+    const auto cachedBox = brickBox_;
     const QSize logicalSize = size();
     const auto orbitAzimuth = volumeOrbitAzimuth_;
     const auto orbitElevation = volumeOrbitElevation_;
@@ -5702,8 +5761,8 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start(
         [guard, requestId, chunk, product, palette, customPalette, opacity, brick, brickChunk,
-         brickProduct, logicalSize, orbitAzimuth, orbitElevation, orbitDistance, orbitTarget,
-         divisor] {
+         brickProduct, box, cachedBox, logicalSize, orbitAzimuth, orbitElevation, orbitDistance,
+         orbitTarget, divisor] {
             auto stale = [&] {
                 return !guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed);
             };
@@ -5715,6 +5774,7 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                     guard->brick_.reset();
                     guard->brickChunk_ = chunk;
                     guard->brickProduct_ = product;
+                    guard->brickBox_ = Volume3dBox{};
                     guard->volumeImage_ = QImage();
                     guard->update();
                 }, Qt::QueuedConnection);
@@ -5726,9 +5786,15 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             }
             std::shared_ptr<const VolumeBrick> brickNow = brick;
             double buildMs = 0.0;
-            if (!brickNow || brickChunk != chunk || brickProduct != product) {
+            // The box is part of the cache key: a new box is a new brick, and
+            // the same box must not rebuild on a no-op drag.
+            if (!brickNow || brickChunk != chunk || brickProduct != product ||
+                !sameVolume3dBox(cachedBox, box)) {
                 VolumeBrickDims brickDims;
                 brickDims.nz = 128;
+                brickDims.halfExtentMeters = box.halfExtentMeters;
+                brickDims.centerXMeters = box.centerXMeters;
+                brickDims.centerYMeters = box.centerYMeters;
                 QElapsedTimer buildTimer;
                 buildTimer.start();
                 VolumeBrick fresh = buildVolumeBrick(*chunk, product, brickDims);
@@ -5849,6 +5915,10 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 guard->brick_ = brickNow;
                 guard->brickChunk_ = guard->chunk_;
                 guard->brickProduct_ = guard->product_;
+                // The box this brick really covers, read back from the brick
+                // itself so the cache key can never disagree with the data.
+                guard->brickBox_ = Volume3dBox{brickNow->centerXMeters, brickNow->centerYMeters,
+                                               brickNow->halfExtentMeters};
                 guard->volumeImage_ = image;
                 guard->volumeImageLogicalSize_ = logicalSize;
                 guard->volumeRenderMs_ = renderMs;
@@ -5863,6 +5933,148 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 guard->update();
             }, Qt::QueuedConnection);
         });
+}
+
+bool RadarMapCanvas::Volume3dBox::fullRange() const {
+    return std::fabs(centerXMeters) < 1.0 && std::fabs(centerYMeters) < 1.0 &&
+           std::fabs(halfExtentMeters - kVolume3dFullRangeHalfMeters) < 1.0;
+}
+
+RadarMapCanvas::Volume3dBox RadarMapCanvas::clampVolume3dBox(Volume3dBox box,
+                                                             const double coverageMeters) {
+    const double coverage = std::max(coverageMeters, kVolume3dMinimumBoxMeters);
+    if (!std::isfinite(box.centerXMeters) || !std::isfinite(box.centerYMeters) ||
+        !std::isfinite(box.halfExtentMeters)) {
+        // A broken drag falls back to the box that is never empty rather than
+        // handing NaN extents to the builder.
+        return Volume3dBox{};
+    }
+    // A square box fits the coverage circle only below half = R / sqrt(2); the
+    // minimum is the floor, so a two-pixel drag still builds a real grid.
+    const double minimumHalf = 0.5 * kVolume3dMinimumBoxMeters;
+    const double maximumHalf = coverage / std::sqrt(2.0);
+    box.halfExtentMeters = std::clamp(box.halfExtentMeters, minimumHalf, maximumHalf);
+    // Pull the centre in along its own bearing so the far corner stays inside
+    // coverage. Snapping the centre onto the site would silently move the box
+    // the user dragged; this keeps the direction and only shortens the reach.
+    const double centreRadius = std::hypot(box.centerXMeters, box.centerYMeters);
+    const double maximumCentreRadius =
+        std::max(0.0, coverage - box.halfExtentMeters * std::sqrt(2.0));
+    if (centreRadius > maximumCentreRadius) {
+        const double scale = centreRadius > 0.0 ? maximumCentreRadius / centreRadius : 0.0;
+        box.centerXMeters *= scale;
+        box.centerYMeters *= scale;
+    }
+    return box;
+}
+
+double RadarMapCanvas::volume3dCoverageMeters() const {
+    // The radar's own coverage: the ground range of the farthest decoded gate.
+    // Never the echo extent - automatic ROI selection failed three times by
+    // guessing where the weather was, so this ceiling is what the data reaches,
+    // not what happens to light up.
+    double coverage = 0.0;
+    if (chunk_) {
+        const auto productIndex = static_cast<std::size_t>(product_);
+        for (const DecodedRay& ray : chunk_->rays) {
+            if (!ray.has(product_)) continue;
+            const auto& field = ray.fields.at(productIndex);
+            if (field.empty()) continue;
+            const double slant = gateCenterSlantRange(ray.firstGateByProduct.at(productIndex),
+                                                      ray.gateSpacingByProduct.at(productIndex),
+                                                      field.size() - 1);
+            const EnuPoint point = gateEnu(ray.azimuthDegrees, slant, ray.elevationDegrees);
+            coverage = std::max(coverage, std::hypot(point.x, point.y));
+        }
+    }
+    if (!(coverage > 0.0)) coverage = maximumRangeMeters_;
+    return std::clamp(coverage, kVolume3dMinimumBoxMeters, 500000.0);
+}
+
+bool RadarMapCanvas::volume3dProjectPoint(const double xMeters, const double yMeters,
+                                          const double zMeters, QPointF* out) const {
+    double target[3] = {volumeImageTarget_[0], volumeImageTarget_[1], volumeImageTarget_[2]};
+    const VolumeBrick frame;
+    const VolumeCamera camera = volumeCameraFor(frame, volumeImageAzimuth_, volumeImageElevation_,
+                                                volumeImageDistance_, target);
+    const double point[3] = {xMeters, yMeters, zMeters};
+    return projectVolumePoint(camera, point, width(), height(), out);
+}
+
+bool RadarMapCanvas::volume3dGroundPointAt(const QPoint& pixel, double* xMeters,
+                                           double* yMeters) const {
+    double target[3] = {volumeImageTarget_[0], volumeImageTarget_[1], volumeImageTarget_[2]};
+    return groundPointFromCamera(target, volumeImageAzimuth_, volumeImageElevation_,
+                                 volumeImageDistance_, QPointF(pixel), width(), height(),
+                                 volume3dCoverageMeters(), false, xMeters, yMeters);
+}
+
+void RadarMapCanvas::fitVolumeCameraToBox() {
+    volumeTarget_[0] = volumeBox_.centerXMeters;
+    volumeTarget_[1] = volumeBox_.centerYMeters;
+    volumeTarget_[2] = 7000.0;
+    // 2.8x the half extent is the full-range default (420 km for the 150 km
+    // box), so a storm box is framed the way the radar view always was. The
+    // floor keeps an 8 km box from putting the eye inside the volume.
+    volumeDistance_ = std::clamp(2.8 * volumeBox_.halfExtentMeters, 60000.0, 1200000.0);
+}
+
+RadarMapCanvas::Volume3dBox RadarMapCanvas::volumeBoxFromDrag(const QPoint& start,
+                                                              const QPoint& end,
+                                                              bool* mapped) const {
+    *mapped = false;
+    const double coverage = volume3dCoverageMeters();
+    double target[3] = {volumeImageTarget_[0], volumeImageTarget_[1], volumeImageTarget_[2]};
+    double x0 = 0.0;
+    double y0 = 0.0;
+    double x1 = 0.0;
+    double y1 = 0.0;
+    if (!groundPointFromCamera(target, volumeImageAzimuth_, volumeImageElevation_,
+                               volumeImageDistance_, QPointF(start), width(), height(), coverage,
+                               true, &x0, &y0) ||
+        !groundPointFromCamera(target, volumeImageAzimuth_, volumeImageElevation_,
+                               volumeImageDistance_, QPointF(end), width(), height(), coverage,
+                               true, &x1, &y1)) {
+        return Volume3dBox{};
+    }
+    *mapped = true;
+    Volume3dBox box;
+    box.centerXMeters = 0.5 * (x0 + x1);
+    box.centerYMeters = 0.5 * (y0 + y1);
+    // The brick has one half extent for x and y, so the box that can be built
+    // around a rectangle is the square that covers it. The drag paints that
+    // square while the mouse moves, so the box on screen is the box built.
+    box.halfExtentMeters = 0.5 * std::max(std::fabs(x1 - x0), std::fabs(y1 - y0));
+    return clampVolume3dBox(box, coverage);
+}
+
+void RadarMapCanvas::setVolume3dBox(const Volume3dBox& box) {
+    const Volume3dBox clamped = clampVolume3dBox(box, volume3dCoverageMeters());
+    if (sameVolume3dBox(clamped, volumeBox_) && sameVolume3dBox(clamped, brickBox_)) return;
+    volumeBox_ = clamped;
+    fitVolumeCameraToBox();
+    rebuildVolumeRender();
+    update();
+}
+
+void RadarMapCanvas::resetVolume3dBox() {
+    volumeBox_ = Volume3dBox{}; // full range: the default that is never empty
+    volumeOrbitAzimuth_ = 180.0;
+    volumeOrbitElevation_ = 40.0;
+    volumeDistance_ = 420000.0;
+    volumeTarget_[0] = 0.0;
+    volumeTarget_[1] = 0.0;
+    volumeTarget_[2] = 7000.0;
+    rebuildVolumeRender();
+    update();
+}
+
+bool RadarMapCanvas::applyVolume3dBoxDrag(const QPoint& start, const QPoint& end) {
+    bool mapped = false;
+    const Volume3dBox box = volumeBoxFromDrag(start, end, &mapped);
+    if (!mapped) return false;
+    setVolume3dBox(box);
+    return true;
 }
 
 void RadarMapCanvas::paintVolume3d(QPainter& painter) {
@@ -5896,6 +6108,11 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
                         .arg(selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_)
                         .arg(shortName)
                         .arg(static_cast<int>(volumeRenderMs_));
+    if (brick_ && !brickBox_.fullRange()) {
+        // The box is the user's choice, so say which one is on screen: a 40 km
+        // box and the full range are not the same picture.
+        label += QStringLiteral("  - %1 km box").arg(brickBox_.widthMeters() / 1000.0, 0, 'f', 0);
+    }
     if (brick_ && brick_->interpolatedVoxels > 0) {
         // Filled voxels are reconstructed, not observed. Say so, with the share,
         // the same way an incomplete volume is flagged rather than hidden.
@@ -5911,6 +6128,10 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
                                                         : QStringLiteral("tilts"))
                      .arg(filledPercent);
     }
+    if (brick_ && brick_->measuredVoxels + brick_->interpolatedVoxels == 0) {
+        // An empty box is not a quiet storm. Say it in words.
+        label += QStringLiteral("  - no gates in box");
+    }
     // Size the chip to its own text so the disclosure is never elided away on
     // a wide panel; elide only when the panel itself is too narrow.
     const double chipWidth =
@@ -5925,12 +6146,16 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
     painter.setPen(QColor(160, 175, 182));
     painter.drawText(QRectF(12.0, height() - 30.0, width() - 24.0, 20.0),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     tr("Left-drag orbits - middle-drag moves - wheel zooms - right-click exits 3D"));
+                     tr("Left-drag orbits - middle-drag moves - wheel zooms - Alt+drag boxes - "
+                        "right-click exits 3D"));
 }
 
 void RadarMapCanvas::paintVolumeGrid(QPainter& painter) {
-    // Ground orientation: 50 km grid, range rings, site marker, north label,
-    // all projected with the image's own camera so grid and echo move as one.
+    // Ground orientation: grid, range rings, site marker, north label, all
+    // projected with the image's own camera so grid and echo move as one.
+    // Everything is clipped to the brick's footprint: with a dragged box the
+    // frame covers 40 km, and a grid drawn out to 150 km would claim ground the
+    // picture does not show.
     double target[3] = {volumeImageTarget_[0], volumeImageTarget_[1], volumeImageTarget_[2]};
     const VolumeCamera camera = volumeCameraFor(*brick_, volumeImageAzimuth_, volumeImageElevation_,
                                                 volumeImageDistance_, target);
@@ -5940,25 +6165,43 @@ void RadarMapCanvas::paintVolumeGrid(QPainter& painter) {
         const double point[3] = {x, y, z};
         return projectVolumePoint(camera, point, w, h, out);
     };
+    const Volume3dBox box{brick_->centerXMeters, brick_->centerYMeters,
+                          brick_->halfExtentMeters};
+    const double west = box.centerXMeters - box.halfExtentMeters;
+    const double east = box.centerXMeters + box.halfExtentMeters;
+    const double south = box.centerYMeters - box.halfExtentMeters;
+    const double north = box.centerYMeters + box.halfExtentMeters;
+    const auto inside = [&](double x, double y) {
+        return x >= west - 1.0 && x <= east + 1.0 && y >= south - 1.0 && y <= north + 1.0;
+    };
     const auto segment = [&](double x0, double y0, double x1, double y1) {
+        if (!inside(x0, y0) || !inside(x1, y1)) return;
         QPointF a, b;
         if (project(x0, y0, 0.0, &a) && project(x1, y1, 0.0, &b)) painter.drawLine(a, b);
     };
     painter.setPen(QPen(QColor(92, 112, 122, 150), 1.0));
-    for (int k = -3; k <= 3; ++k) {
-        const double line = static_cast<double>(k) * 50000.0;
-        segment(line, -150000.0, line, 150000.0);
-        segment(-150000.0, line, 150000.0, line);
-    }
-    // Range rings at 50/100/150 km.
+    // One grid step per sixth of the box: 50 km over the full range (the grid
+    // this view always had) down to 10 km around a storm, never finer.
+    const double gridStep = std::max(10000.0, box.widthMeters() / 6.0);
+    for (double line = std::ceil(west / gridStep) * gridStep; line <= east; line += gridStep)
+        segment(line, south, line, north);
+    for (double line = std::ceil(south / gridStep) * gridStep; line <= north; line += gridStep)
+        segment(west, line, east, line);
+    // Range rings around the site: only the arcs that fall inside the box.
     painter.setPen(QPen(QColor(150, 175, 188, 170), 1.0));
-    for (const double radius : {50000.0, 100000.0, 150000.0}) {
+    for (const double radius : {50000.0, 100000.0, 150000.0, 200000.0, 250000.0}) {
         QPointF previous;
         bool havePrevious = false;
-        for (int step = 0; step <= 72; ++step) {
-            const double angle = static_cast<double>(step) / 72.0 * 2.0 * kPi;
+        for (int step = 0; step <= 144; ++step) {
+            const double angle = static_cast<double>(step) / 144.0 * 2.0 * kPi;
+            const double x = radius * std::sin(angle);
+            const double y = radius * std::cos(angle);
+            if (!inside(x, y)) {
+                havePrevious = false;
+                continue;
+            }
             QPointF point;
-            if (!project(radius * std::sin(angle), radius * std::cos(angle), 0.0, &point)) {
+            if (!project(x, y, 0.0, &point)) {
                 havePrevious = false;
                 continue;
             }
@@ -5967,7 +6210,40 @@ void RadarMapCanvas::paintVolumeGrid(QPainter& painter) {
             havePrevious = true;
         }
     }
-    // Site marker + height axis + north label.
+    // The brick's own box as a wireframe: ground rectangle, top rectangle, four
+    // risers. This is the volume on screen; during a drag the dashed one is the
+    // box that will be built on release, so nothing is guessed at.
+    const auto drawWire = [&](const Volume3dBox& wire, const QColor& color,
+                              const Qt::PenStyle style) {
+        const double xs[2] = {wire.centerXMeters - wire.halfExtentMeters,
+                              wire.centerXMeters + wire.halfExtentMeters};
+        const double ys[2] = {wire.centerYMeters - wire.halfExtentMeters,
+                              wire.centerYMeters + wire.halfExtentMeters};
+        painter.setPen(QPen(color, 1.3, style));
+        const auto rectangle = [&](const double z) {
+            for (int i = 0; i < 2; ++i) {
+                QPointF a, b, c, d;
+                if (project(xs[0], ys[i], z, &a) && project(xs[1], ys[i], z, &b))
+                    painter.drawLine(a, b);
+                if (project(xs[i], ys[0], z, &c) && project(xs[i], ys[1], z, &d))
+                    painter.drawLine(c, d);
+            }
+        };
+        rectangle(0.0);
+        rectangle(brick_->topMeters);
+        for (int ix = 0; ix < 2; ++ix) {
+            for (int iy = 0; iy < 2; ++iy) {
+                QPointF base, apex;
+                if (project(xs[ix], ys[iy], 0.0, &base) &&
+                    project(xs[ix], ys[iy], brick_->topMeters, &apex))
+                    painter.drawLine(base, apex);
+            }
+        }
+    };
+    drawWire(box, QColor(255, 214, 140, 150), Qt::SolidLine);
+    if (volumeBoxDragActive_ && volumeBoxDragPreviewValid_)
+        drawWire(volumeBoxDragPreview_, QColor(255, 240, 200, 235), Qt::DashLine);
+    // Site marker + height axis.
     QPointF site;
     if (project(0.0, 0.0, 0.0, &site)) {
         painter.setPen(Qt::NoPen);
@@ -5979,23 +6255,24 @@ void RadarMapCanvas::paintVolumeGrid(QPainter& painter) {
                          Qt::AlignLeft | Qt::AlignVCenter, selectedRadar_);
         // Height axis out of the site: the one vertical cue in a pancake
         // volume (300 km wide, 20 km tall).
-        QPointF top;
+        QPointF axisTopPoint;
         const double axisTop[3] = {0.0, 0.0, brick_->topMeters};
-        if (projectVolumePoint(camera, axisTop, w, h, &top)) {
+        if (projectVolumePoint(camera, axisTop, w, h, &axisTopPoint)) {
             painter.setPen(QPen(QColor(255, 214, 140, 170), 1.0));
-            painter.drawLine(site, top);
+            painter.drawLine(site, axisTopPoint);
             painter.setPen(QColor(255, 214, 140, 200));
             painter.setFont(hudFont(7, QFont::DemiBold));
-            painter.drawText(QRectF(top.x() + 6.0, top.y() - 16.0, 80.0, 16.0),
+            painter.drawText(QRectF(axisTopPoint.x() + 6.0, axisTopPoint.y() - 16.0, 80.0, 16.0),
                              Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("%1 km").arg(brick_->topMeters / 1000.0, 0, 'f', 0));
         }
     }
-    QPointF north;
-    if (project(0.0, 168000.0, 0.0, &north)) {
+    // North label rides the box's own north edge, not a fixed 168 km.
+    QPointF northLabel;
+    if (project(box.centerXMeters, north + 8000.0, 0.0, &northLabel)) {
         painter.setPen(QColor(200, 215, 220));
         painter.setFont(hudFont(10, QFont::DemiBold));
-        painter.drawText(QRectF(north.x() - 20.0, north.y() - 12.0, 40.0, 24.0),
+        painter.drawText(QRectF(northLabel.x() - 20.0, northLabel.y() - 12.0, 40.0, 24.0),
                          Qt::AlignCenter, QStringLiteral("N"));
     }
 }
@@ -6170,8 +6447,22 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
     emit activated();
     if (volume3d_) {
         // 3D preview owns the mouse: left-drag orbits, middle-drag moves the
-        // focus point (like the 2D middle-button pan), everything else falls
-        // through to the context menu. Map tools stay parked while in 3D.
+        // focus point (like the 2D middle-button pan), Alt+left-drag boxes a
+        // new brick region, everything else falls through to the context menu.
+        // Map tools stay parked while in 3D.
+        if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::AltModifier)) {
+            // Not an orbit: nothing re-renders until release, and the dashed
+            // wireframe under the cursor is the box that will be built.
+            volumeBoxDragActive_ = true;
+            volumeBoxDragStart_ = event->pos();
+            volumeBoxDragEnd_ = event->pos();
+            volumeBoxDragPreviewValid_ = false;
+            volumeDragging_ = false;
+            volumePanDragging_ = false;
+            setCursor(Qt::CrossCursor);
+            event->accept();
+            return;
+        }
         if (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton) {
             volumeDragging_ = true;
             volumePanDragging_ = (event->button() == Qt::MiddleButton);
@@ -6227,6 +6518,16 @@ void RadarMapCanvas::mousePressEvent(QMouseEvent* event) {
 
 void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
     if (volume3d_) {
+        if (volumeBoxDragActive_) {
+            volumeBoxDragEnd_ = event->pos();
+            bool mapped = false;
+            volumeBoxDragPreview_ =
+                volumeBoxFromDrag(volumeBoxDragStart_, volumeBoxDragEnd_, &mapped);
+            volumeBoxDragPreviewValid_ = mapped;
+            update(); // wireframe only: the brick is untouched until release
+            event->accept();
+            return;
+        }
         if (volumeDragging_) {
             const auto delta = event->pos() - lastMousePosition_;
             if (!delta.isNull()) {
@@ -6327,6 +6628,17 @@ void RadarMapCanvas::mouseMoveEvent(QMouseEvent* event) {
 
 void RadarMapCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (volume3d_) {
+        if (volumeBoxDragActive_ && event->button() == Qt::LeftButton) {
+            volumeBoxDragActive_ = false;
+            volumeBoxDragPreviewValid_ = false;
+            setCursor(Qt::ArrowCursor);
+            // Release is the only moment the brick is rebuilt: the drag is
+            // geometry, not a live render.
+            applyVolume3dBoxDrag(volumeBoxDragStart_, event->pos());
+            update();
+            event->accept();
+            return;
+        }
         if ((event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton) &&
             volumeDragging_) {
             volumeDragging_ = false;
@@ -6629,14 +6941,16 @@ void RadarMapCanvas::resizeEvent(QResizeEvent* event) {
 void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     if (volume3d_) {
         QMenu menu(this);
+        const auto resetBox = menu.addAction(tr("Reset 3D box to full range"));
+        resetBox->setEnabled(!volumeBox_.fullRange());
+        connect(resetBox, &QAction::triggered, this, [this] { resetVolume3dBox(); });
         const auto resetView = menu.addAction(tr("Reset 3D view"));
         connect(resetView, &QAction::triggered, this, [this] {
             volumeOrbitAzimuth_ = 180.0;
             volumeOrbitElevation_ = 40.0;
-            volumeDistance_ = 420000.0;
-            volumeTarget_[0] = 0.0;
-            volumeTarget_[1] = 0.0;
-            volumeTarget_[2] = 7000.0;
+            // Keep the current box and frame it: resetting the angle must not
+            // silently zoom a storm box back out to the full range.
+            fitVolumeCameraToBox();
             rebuildVolumeRender();
         });
         const auto backTo2d = menu.addAction(tr("Back to 2D map"));

@@ -51,6 +51,7 @@ void ShortcutHelpDialog::populateShortcutsInto(QTextEdit* text) {
         {"B",            "Bookmark / unbookmark current frame"},
         {"Ctrl+K",       "Command palette (radar, product, layout, action)"},
         {"Double-click card", "Expand / collapse the pinned detail card"},
+        {"Alt+drag (3D)", "Box a new volume region around a storm; right-click resets it to full range"},
         {"Ctrl+Z / Ctrl+Shift+Z", "Undo / redo map view"},
         {"F11",          "Maximize / restore active panel"},
         {"Esc",          "Close card, cancel measure / cross-section"},
