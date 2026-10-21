@@ -72,11 +72,76 @@ int main(int argc, char** argv) {
     }
     const double litFraction =
         static_cast<double>(lit) / (static_cast<double>(frame.width()) * frame.height());
+
+    // Structural read of the brick the frame actually marched: occupied voxels,
+    // how many of them were reconstructed, and the empty share of each column's
+    // span. Reported twice: over the whole filled brick, and over the measured
+    // voxels only. The second one is the shell defect as a number - it is what
+    // the brick looked like before the vertical fill, on the same volume.
+    const auto brick = canvas.volume3dBrick();
+    std::size_t presentVoxels = 0;
+    std::size_t measuredVoxels = 0;
+    std::size_t interpolatedVoxels = 0;
+    std::size_t spanColumns = 0;
+    std::size_t spanLevels = 0;
+    std::size_t emptyInSpan = 0;
+    std::size_t measuredSpanLevels = 0;
+    std::size_t measuredEmptyInSpan = 0;
+    int interpolatedTilts = 0;
+    if (brick) {
+        measuredVoxels = brick->measuredVoxels;
+        interpolatedVoxels = brick->interpolatedVoxels;
+        interpolatedTilts = brick->interpolatedTilts;
+        for (int iy = 0; iy < brick->ny; ++iy) {
+            for (int ix = 0; ix < brick->nx; ++ix) {
+                int low = -1;
+                int high = -1;
+                int measuredLow = -1;
+                int measuredHigh = -1;
+                std::size_t occupiedInSpan = 0;
+                std::size_t measuredInSpan = 0;
+                for (int iz = 0; iz < brick->nz; ++iz) {
+                    const std::size_t flat = brickFlatIndex(*brick, ix, iy, iz);
+                    if (brick->present[flat] == 0) continue;
+                    ++presentVoxels;
+                    if (low < 0) low = iz;
+                    high = iz;
+                    ++occupiedInSpan;
+                    if (brickVoxelInterpolated(*brick, flat)) continue;
+                    if (measuredLow < 0) measuredLow = iz;
+                    measuredHigh = iz;
+                    ++measuredInSpan;
+                }
+                if (low >= 0 && high - low >= 1) {
+                    ++spanColumns;
+                    spanLevels += static_cast<std::size_t>(high - low + 1);
+                    emptyInSpan += static_cast<std::size_t>(high - low + 1) - occupiedInSpan;
+                }
+                if (measuredLow >= 0 && measuredHigh - measuredLow >= 1) {
+                    measuredSpanLevels += static_cast<std::size_t>(measuredHigh - measuredLow + 1);
+                    measuredEmptyInSpan += static_cast<std::size_t>(measuredHigh - measuredLow + 1) -
+                                           measuredInSpan;
+                }
+            }
+        }
+    }
+    const double columnGapFraction =
+        spanLevels > 0 ? static_cast<double>(emptyInSpan) / static_cast<double>(spanLevels) : 0.0;
+    const double measuredGapFraction = measuredSpanLevels > 0
+                                           ? static_cast<double>(measuredEmptyInSpan) /
+                                                 static_cast<double>(measuredSpanLevels)
+                                           : 0.0;
     std::cout << "volume3d_probe=passed radar=" << decoded->radarId.toStdString()
               << " rays=" << decoded->decoded.rays.size()
               << " product=" << productName.toStdString()
               << " size=" << frame.width() << 'x' << frame.height()
               << " lit_fraction=" << litFraction << " checksum=" << checksum
+              << " present_voxels=" << presentVoxels << " measured_voxels=" << measuredVoxels
+              << " interpolated_voxels=" << interpolatedVoxels << " interpolated_tilts=" << interpolatedTilts
+              << " span_columns=" << spanColumns << " column_gap_fraction=" << columnGapFraction
+              << " measured_gap_fraction=" << measuredGapFraction
+              << " build_ms=" << canvas.volume3dBuildMilliseconds()
+              << " frame_ms=" << canvas.volume3dRenderMilliseconds()
               << " screenshot=" << outputPath.toStdString() << '\n';
     return 0;
 }

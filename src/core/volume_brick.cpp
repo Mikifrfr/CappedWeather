@@ -31,6 +31,39 @@ int voxelAxis(const double coord, const double halfExtent, const int count) {
 
 } // namespace
 
+std::size_t brickFlatIndex(const VolumeBrick& brick, const int ix, const int iy, const int iz) {
+    return (static_cast<std::size_t>(iz) * static_cast<std::size_t>(brick.ny) +
+            static_cast<std::size_t>(iy)) *
+               static_cast<std::size_t>(brick.nx) +
+           static_cast<std::size_t>(ix);
+}
+
+std::optional<BrickIndex> brickIndexOf(const VolumeBrick& brick, const double xMeters,
+                                       const double yMeters, const double zMeters) {
+    if (brick.nx <= 0 || brick.ny <= 0 || brick.nz <= 0 || !(brick.topMeters > 0.0) ||
+        !(brick.halfExtentMeters > 0.0)) {
+        return std::nullopt;
+    }
+    const double localX = xMeters - brick.centerXMeters;
+    const double localY = yMeters - brick.centerYMeters;
+    if (std::fabs(localX) > brick.halfExtentMeters || std::fabs(localY) > brick.halfExtentMeters ||
+        zMeters < 0.0 || zMeters > brick.topMeters) {
+        return std::nullopt;
+    }
+    BrickIndex index;
+    index.ix = voxelAxis(localX, brick.halfExtentMeters, brick.nx);
+    index.iy = voxelAxis(localY, brick.halfExtentMeters, brick.ny);
+    index.iz = std::clamp(
+        static_cast<int>(std::floor(zMeters / brick.topMeters * static_cast<double>(brick.nz))), 0,
+        brick.nz - 1);
+    index.flat = brickFlatIndex(brick, index.ix, index.iy, index.iz);
+    return index;
+}
+
+bool brickVoxelInterpolated(const VolumeBrick& brick, const std::size_t flatIndex) {
+    return flatIndex < brick.interpolated.size() && brick.interpolated[flatIndex] != 0;
+}
+
 VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind product,
                              const VolumeBrickDims& dims, const bool incomplete) {
     VolumeBrick brick;
@@ -47,10 +80,45 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind produc
                                static_cast<std::size_t>(dims.nz);
     brick.value.assign(voxels, 0);
     brick.present.assign(voxels, 0);
+    brick.interpolated.assign(voxels, 0);
 
     const auto productIndex = static_cast<std::size_t>(product);
     const ProductDescriptor& descriptor = productDescriptor(product);
     const double span = descriptor.maximum - descriptor.minimum;
+
+    // Sweep identity. Each ray's decoder elevation number is the tilt id
+    // (Message 31 rejects rays without one; ODIM numbers its sweeps), so
+    // encoder jitter inside a tilt cannot look like a second view. A chunk with
+    // no numbers falls back to a 0.1-degree bucket, well below the closest
+    // pair of real tilts. Key 0 = no gate, so a column never bridges to itself,
+    // and beyond 254 distinct sweeps the extra tilts simply are not bridged
+    // (conservative, not invented).
+    bool numberedSweeps = true;
+    for (const DecodedRay& ray : chunk.rays) {
+        if (ray.has(product) && ray.elevationNumber == 0) {
+            numberedSweeps = false;
+            break;
+        }
+    }
+    const auto sweepId = [numberedSweeps](const DecodedRay& ray) {
+        return numberedSweeps ? static_cast<int>(ray.elevationNumber)
+                              : static_cast<int>(std::lround(ray.elevationDegrees * 10.0F));
+    };
+    std::vector<int> sweeps;
+    for (const DecodedRay& ray : chunk.rays) {
+        if (ray.has(product)) sweeps.push_back(sweepId(ray));
+    }
+    std::sort(sweeps.begin(), sweeps.end());
+    sweeps.erase(std::unique(sweeps.begin(), sweeps.end()), sweeps.end());
+    if (sweeps.size() > 254) sweeps.resize(254);
+    const auto sweepKey = [&sweeps](const int id) {
+        const auto found = std::lower_bound(sweeps.begin(), sweeps.end(), id);
+        if (found == sweeps.end()) return static_cast<std::uint8_t>(0);
+        return static_cast<std::uint8_t>((found - sweeps.begin()) + 1);
+    };
+    // Winning gate's sweep per voxel. Local: it exists only to decide what may
+    // be bridged, and the public brick keeps just the interpolated mask.
+    std::vector<std::uint8_t> measuredSweep(voxels, 0);
 
     for (const DecodedRay& ray : chunk.rays) {
         if (!ray.has(product)) continue;
@@ -59,6 +127,7 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind produc
         const int spacing = ray.gateSpacingByProduct.at(productIndex);
         const float scale = ray.scaleByProduct.at(productIndex);
         const float offset = ray.offsetByProduct.at(productIndex);
+        const std::uint8_t sweep = sweepKey(sweepId(ray));
         for (std::size_t gate = 0; gate < field.size(); ++gate) {
             const auto native = nativeValue(field[gate], scale, offset);
             if (!native.has_value()) continue; // missing / below threshold: honest hole
@@ -79,36 +148,74 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind produc
             const int iz = std::clamp(
                 static_cast<int>(std::floor(point.z / brick.topMeters * static_cast<double>(brick.nz))),
                 0, brick.nz - 1);
-            const std::size_t flat = (static_cast<std::size_t>(iz) * static_cast<std::size_t>(brick.ny) +
-                                      static_cast<std::size_t>(iy)) *
-                                         static_cast<std::size_t>(brick.nx) +
-                                     static_cast<std::size_t>(ix);
-            brick.present[flat] = 1;
-            brick.value[flat] = std::max(brick.value[flat], quantized); // max wins: storm stays visible
+            const std::size_t flat = brickFlatIndex(brick, ix, iy, iz);
+            if (brick.present[flat] == 0) {
+                brick.present[flat] = 1;
+                ++brick.measuredVoxels;
+            }
+            // max wins: storm stays visible. The sweep recorded is the one that
+            // won, so a low value from another tilt cannot claim the voxel and
+            // stop the fill.
+            if (quantized >= brick.value[flat]) {
+                brick.value[flat] = quantized;
+                measuredSweep[flat] = sweep;
+            }
         }
     }
+
+    // Vertical fill: walk each (ix, iy) column and bridge the empty levels
+    // between two measured voxels, lerping the value so the column transitions
+    // rather than stepping. Only measured samples bound a run, so no column
+    // grows a top or a bottom that no gate supports; only different sweeps are
+    // bridged, so a single tilt is never filled with itself; and the fill is
+    // bounded by its two ends, so it never invents a stronger return.
+    std::vector<std::uint8_t> bridged;
+    if (!sweeps.empty()) bridged.assign(sweeps.size() + 1, 0);
+    for (int iy = 0; iy < brick.ny; ++iy) {
+        for (int ix = 0; ix < brick.nx; ++ix) {
+            int lowerZ = -1;
+            int lowerValue = 0;
+            std::uint8_t lowerSweep = 0;
+            for (int iz = 0; iz < brick.nz; ++iz) {
+                const std::size_t flat = brickFlatIndex(brick, ix, iy, iz);
+                if (brick.present[flat] == 0) continue;
+                const std::uint8_t sweep = measuredSweep[flat];
+                if (lowerZ >= 0 && iz - lowerZ > 1 && sweep != lowerSweep) {
+                    const int upperValue = brick.value[flat];
+                    const int gapLevels = iz - lowerZ;
+                    for (int fill = lowerZ + 1; fill < iz; ++fill) {
+                        const double t = static_cast<double>(fill - lowerZ) /
+                                         static_cast<double>(gapLevels);
+                        const auto blended = static_cast<std::uint8_t>(std::lround(
+                            static_cast<double>(lowerValue) +
+                            (static_cast<double>(upperValue) - static_cast<double>(lowerValue)) * t));
+                        const std::size_t fillFlat = brickFlatIndex(brick, ix, iy, fill);
+                        brick.present[fillFlat] = 1;
+                        brick.interpolated[fillFlat] = 1;
+                        brick.value[fillFlat] = blended;
+                        ++brick.interpolatedVoxels;
+                    }
+                    if (!bridged.empty()) {
+                        bridged[lowerSweep] = 1;
+                        bridged[sweep] = 1;
+                    }
+                }
+                lowerZ = iz;
+                lowerValue = brick.value[flat];
+                lowerSweep = sweep;
+            }
+        }
+    }
+    for (const auto flag : bridged) brick.interpolatedTilts += flag;
     return brick;
 }
 
 std::optional<float> sampleBrickNearest(const VolumeBrick& brick, const double xMeters,
                                         const double yMeters, const double zMeters) {
-    const double localX = xMeters - brick.centerXMeters;
-    const double localY = yMeters - brick.centerYMeters;
-    if (brick.nx <= 0 || std::fabs(localX) > brick.halfExtentMeters ||
-        std::fabs(localY) > brick.halfExtentMeters || zMeters < 0.0 || zMeters > brick.topMeters) {
-        return std::nullopt;
-    }
-    const int ix = voxelAxis(localX, brick.halfExtentMeters, brick.nx);
-    const int iy = voxelAxis(localY, brick.halfExtentMeters, brick.ny);
-    const int iz = std::clamp(
-        static_cast<int>(std::floor(zMeters / brick.topMeters * static_cast<double>(brick.nz))), 0,
-        brick.nz - 1);
-    const std::size_t flat = (static_cast<std::size_t>(iz) * static_cast<std::size_t>(brick.ny) +
-                              static_cast<std::size_t>(iy)) *
-                                 static_cast<std::size_t>(brick.nx) +
-                             static_cast<std::size_t>(ix);
-    if (brick.present[flat] == 0) return std::nullopt;
-    return static_cast<float>(brick.value[flat]) / 255.0F;
+    const auto index = brickIndexOf(brick, xMeters, yMeters, zMeters);
+    if (!index.has_value()) return std::nullopt;
+    if (brick.present[index->flat] == 0) return std::nullopt;
+    return static_cast<float>(brick.value[index->flat]) / 255.0F;
 }
 
 std::optional<BrickSample> sampleBrickTrilinear(const VolumeBrick& brick, const double xMeters,

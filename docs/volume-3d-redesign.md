@@ -121,6 +121,75 @@ Acceptance for Phase 1, all measured:
 - Frame time at 900 × 700 on this machine, half res: recorded, not guessed.
 - Existing `VolumeBrick` tests unchanged and green.
 
+## Phase 1.1 — vertical fill between sweeps (implemented)
+
+The Phase 1 march was still fourteen tilted shells, because the splat wrote every
+gate into exactly one voxel and left the space between adjacent sweeps empty.
+
+Measured on KTLX 2013-05-20 20:12Z REF, full-range brick (300 km, 256 x 256 x 128,
+156 m levels): of the 25,724 columns that had more than one measured level,
+**0.780 of the vertical span between the lowest and highest measured voxel was
+empty**. 251,336 voxels were observed; everything between the sweeps was nothing.
+
+`buildVolumeBrick` now runs a vertical pass after the max-wins splat:
+
+- For each `(ix, iy)` column, walk z and bridge the empty levels between two
+  measured voxels, lerping the quantized value so the column transitions rather
+  than stepping.
+- Only measured voxels bound a run. No column grows a top or a bottom no gate
+  supports, and the fill is bounded by its two ends, so it can never invent a
+  stronger return than the samples it sits between.
+- Only sweeps that differ may be bridged. A chunk with `elevationNumber` uses it
+  as the sweep id (Message 31 rejects rays without one, ODIM numbers its
+  sweeps), so encoder jitter inside one tilt cannot look like a second view; a
+  chunk with none falls back to a 0.1-degree bucket. One tilt's beam climbing
+  across a column is one view, not two, and is never filled with itself.
+- The max-wins rule for measured gates is unchanged.
+
+Reconstructed voxels are marked, not blended in silently:
+
+- `VolumeBrick::interpolated` is a parallel byte mask, set exactly on filled
+  voxels and clear on measured ones; `present && !interpolated` is the observed
+  set. `measuredVoxels`, `interpolatedVoxels` and `interpolatedTilts` carry the
+  counts so a readout does not rescan the mask.
+- The renderer samples filled voxels at full weight. Discounting their opacity
+  would recreate the shell look this pass exists to remove; the honesty lives in
+  the chip instead, which states the fill whenever there is one:
+  `3D preview (CPU)  KTLX REF  1041 ms  - 17 tilts interpolated (78% reconstructed)`.
+
+Same volume, same camera, same binary with the fill switched off and on
+(`tools/volume3d_probe`, 1440x900):
+
+| | fill off | fill on |
+|---|---|---|
+| occupied voxels | 251,336 | 1,132,399 |
+| reconstructed share of occupied | 0 | 78% |
+| empty share of each column's span | 0.780 | 0.00001 |
+| lit_fraction | 0.0597 | 0.1343 |
+| checksum | 326,463,133 | 436,387,229 |
+| brick build | 166 ms | 230 ms |
+| frame | 643 ms | 1041 ms |
+
+The march costs 62% more because there is 4.5x more data to shade: gradient
+shading (`brickSurfaceNormal`, seven trilinear fetches per lit sample) is 507 ms
+of the 1041 ms frame. It lands on the 1048 ms budget this pass was measured
+against, but the cost is real, and the fix is empty-space skipping on a column
+occupancy mask plus the Phase 2 GPU march, not a coarser step. Repeat runs under
+a loaded machine (62% CPU, another build running) scale the pair together:
+835 ms off, 1325 ms on.
+
+Tests: `testVolumeBrickFillsBetweenTilts` (a two-sweep chunk with a known gap
+produces a continuous column, the mask is set exactly on the fill and clear on
+both endpoints, values stay monotone between the endpoints, a third sweep in
+another column adds nothing) and `testVolumeBrickDoesNotFillOneCone` (one sweep
+whose own beam climbs ten levels inside one column still produces zero
+interpolated voxels). Both were shown failing on the old path first: with the
+fill disabled `core_tests` exits 1 at `core_tests.cpp:3960`; with the sweep guard
+removed it exits 1 at `core_tests.cpp:4044`.
+
+Screenshots: `docs/screenshots/volume3d-shells.png` (before, no fill) and
+`docs/screenshots/volume3d-filled.png` (after).
+
 ## Phase 2 specification
 
 - `VolumeCanvas : QRhiWidget`, own top-level widget inside the panel stack, not

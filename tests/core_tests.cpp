@@ -3914,6 +3914,142 @@ void testVolumeBrick() {
     assert(!intersectVolumeBox(brick, eye, away).has_value());
 }
 
+// One gate per sweep on the same azimuth, at two heights with empty levels
+// between them. The build must bridge that gap, mark every bridged voxel as
+// reconstructed, and never grow the column past either measured gate.
+void testVolumeBrickFillsBetweenTilts() {
+    const auto pi = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto makeRay = [&](const float elevation, const std::size_t gate, const double dBZ) {
+        DecodedRay ray;
+        ray.azimuthDegrees = 90.0F;
+        ray.elevationDegrees = elevation;
+        ray.fields.at(pi).assign(200, 0); // 0 encodes missing: no invented gates
+        ray.fields.at(pi).at(gate) = static_cast<std::uint16_t>(dBZ * 2.0 + 66.0);
+        ray.firstGateByProduct.at(pi) = 0;
+        ray.gateSpacingByProduct.at(pi) = 1000;
+        ray.scaleByProduct.at(pi) = 2.0F;
+        ray.offsetByProduct.at(pi) = 66.0F;
+        ray.gateCount = 200;
+        return ray;
+    };
+
+    VolumeBrickDims dims;
+    dims.nx = 8; // 37.5 km columns over the full-range box: the two sweeps share one
+    dims.ny = 8;
+    dims.nz = 64; // 312 m levels
+
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(makeRay(0.5F, 100, 50.0)); // ~1.5 km up at 100 km slant
+    chunk.rays.push_back(makeRay(5.0F, 100, 20.0)); // ~9.4 km up
+
+    const double slant = gateCenterSlantRange(0, 1000, 100);
+    const EnuPoint low = gateEnu(90.0, slant, 0.5);
+    const EnuPoint high = gateEnu(90.0, slant, 5.0);
+
+    const VolumeBrick brick = buildVolumeBrick(chunk, ProductKind::Reflectivity, dims);
+    const auto lowIndex = brickIndexOf(brick, low.x, low.y, low.z);
+    const auto highIndex = brickIndexOf(brick, high.x, high.y, high.z);
+    assert(lowIndex.has_value() && highIndex.has_value());
+    assert(lowIndex->ix == highIndex->ix && lowIndex->iy == highIndex->iy); // one column
+    assert(highIndex->iz > lowIndex->iz + 3);                              // a real gap
+
+    // Two measured voxels; every level between them filled exactly once.
+    const int gapLevels = highIndex->iz - lowIndex->iz - 1;
+    assert(brick.measuredVoxels == 2);
+    assert(brick.interpolatedVoxels == static_cast<std::size_t>(gapLevels));
+    assert(brick.interpolatedTilts == 2); // both sweeps took part
+    std::size_t present = 0;
+    std::size_t interpolated = 0;
+    for (const auto flag : brick.present) present += flag;
+    for (const auto flag : brick.interpolated) interpolated += flag;
+    assert(present == brick.measuredVoxels + brick.interpolatedVoxels);
+    assert(interpolated == brick.interpolatedVoxels);
+
+    // The column is continuous between the two heights and the mask is set
+    // exactly on the filled voxels, clear on the measured ones.
+    const int lowValue =
+        brick.value[brickFlatIndex(brick, lowIndex->ix, lowIndex->iy, lowIndex->iz)];
+    const int highValue =
+        brick.value[brickFlatIndex(brick, highIndex->ix, highIndex->iy, highIndex->iz)];
+    assert(lowValue > highValue); // 50 dBZ below, 20 dBZ above
+    int previous = lowValue;
+    for (int iz = lowIndex->iz; iz <= highIndex->iz; ++iz) {
+        const std::size_t flat = brickFlatIndex(brick, lowIndex->ix, lowIndex->iy, iz);
+        assert(brick.present[flat] == 1); // continuous, not shells
+        const bool measuredEnd = iz == lowIndex->iz || iz == highIndex->iz;
+        assert(brickVoxelInterpolated(brick, flat) == !measuredEnd);
+        const int value = brick.value[flat];
+        assert(value <= lowValue && value >= highValue); // bounded by its two ends
+        assert(value <= previous);                        // smooth, not stepped
+        previous = value;
+    }
+
+    // No invented top or bottom: every other level in the column stays empty.
+    for (int iz = 0; iz < brick.nz; ++iz) {
+        if (iz >= lowIndex->iz && iz <= highIndex->iz) continue;
+        assert(brick.present[brickFlatIndex(brick, lowIndex->ix, lowIndex->iy, iz)] == 0);
+    }
+
+    // A third sweep with a gate in another column must not be bridged to
+    // anything: one sample alone has nothing on its other side.
+    DecodedChunk withStranger = chunk;
+    DecodedRay stranger = makeRay(10.0F, 20, 35.0);
+    stranger.azimuthDegrees = 270.0F;
+    withStranger.rays.push_back(stranger);
+    const VolumeBrick withStrangerBrick =
+        buildVolumeBrick(withStranger, ProductKind::Reflectivity, dims);
+    assert(withStrangerBrick.measuredVoxels == 3);
+    assert(withStrangerBrick.interpolatedVoxels == brick.interpolatedVoxels);
+    assert(withStrangerBrick.interpolatedTilts == 2); // the lone sweep adds none
+}
+
+// A single sweep is never filled with itself, even where its own beam climbs
+// several levels inside one column: that is one view, not two.
+void testVolumeBrickDoesNotFillOneCone() {
+    const auto pi = static_cast<std::size_t>(ProductKind::Reflectivity);
+    VolumeBrickDims dims;
+    dims.nx = 8;
+    dims.ny = 8;
+    dims.nz = 64;
+
+    DecodedRay ray;
+    ray.azimuthDegrees = 90.0F;
+    ray.elevationDegrees = 19.5F;
+    ray.fields.at(pi).assign(8, 0);
+    ray.fields.at(pi).at(2) = static_cast<std::uint16_t>(40.0 * 2.0 + 66.0); // ~3.3 km up
+    ray.fields.at(pi).at(4) = static_cast<std::uint16_t>(30.0 * 2.0 + 66.0); // ~6.7 km up
+    ray.firstGateByProduct.at(pi) = 0;
+    ray.gateSpacingByProduct.at(pi) = 5000;
+    ray.scaleByProduct.at(pi) = 2.0F;
+    ray.offsetByProduct.at(pi) = 66.0F;
+    ray.gateCount = 8;
+
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    chunk.rays.push_back(ray);
+
+    // Shown, not assumed: the two gates really are in one column with empty
+    // levels between them, so the only reason the fill stays empty is the rule.
+    const EnuPoint near = gateEnu(90.0, gateCenterSlantRange(0, 5000, 2), 19.5);
+    const EnuPoint far = gateEnu(90.0, gateCenterSlantRange(0, 5000, 4), 19.5);
+    const VolumeBrick brick = buildVolumeBrick(chunk, ProductKind::Reflectivity, dims);
+    const auto nearIndex = brickIndexOf(brick, near.x, near.y, near.z);
+    const auto farIndex = brickIndexOf(brick, far.x, far.y, far.z);
+    assert(nearIndex.has_value() && farIndex.has_value());
+    assert(nearIndex->ix == farIndex->ix && nearIndex->iy == farIndex->iy);
+    assert(farIndex->iz > nearIndex->iz + 1);
+
+    assert(brick.measuredVoxels == 2);
+    assert(brick.interpolatedVoxels == 0);
+    assert(brick.interpolatedTilts == 0);
+    for (const auto flag : brick.interpolated) assert(flag == 0);
+    // And the gap is honestly empty rather than filled.
+    for (int iz = nearIndex->iz + 1; iz < farIndex->iz; ++iz) {
+        assert(brick.present[brickFlatIndex(brick, nearIndex->ix, nearIndex->iy, iz)] == 0);
+    }
+}
+
 void testOdimParallelDecode() {
     // Regression for the hdf5.dll AVs: ODIM decodes fan out across the pool
     // while GLM netCDF reads run on theirs, all inside one non-threadsafe
@@ -3976,6 +4112,8 @@ int main() {
     testStormTracker();
     testVolumeBrickTrilinear();
     testVolumeBrick();
+    testVolumeBrickFillsBetweenTilts();
+    testVolumeBrickDoesNotFillOneCone();
     testVolumeSpillRoundTrip();
     testDerivedProductsSupportNegativeFirstGate();
     testCatalog();
