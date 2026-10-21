@@ -19,8 +19,10 @@ struct VolumeBrickDims {
     int nx = 256;
     int ny = 256;
     int nz = 96;
-    double halfExtentMeters = 150000.0; // brick spans [-half, +half] in x/y
+    double halfExtentMeters = 150000.0; // brick spans [centre-half, centre+half] in x/y
     double topMeters = 20000.0;         // brick spans [0, top] in z
+    double centerXMeters = 0.0;         // ENU centre; 0,0 is the radar site
+    double centerYMeters = 0.0;
 };
 
 struct VolumeBrick {
@@ -29,6 +31,8 @@ struct VolumeBrick {
     int nz = 0;
     double halfExtentMeters = 0.0;
     double topMeters = 0.0;
+    double centerXMeters = 0.0;
+    double centerYMeters = 0.0;
     ProductKind product = ProductKind::Reflectivity;
     bool incomplete = false; // partial volume: render what exists, say so
     std::vector<std::uint8_t> value;   // normalized 0..255, max wins on collision

@@ -39,6 +39,8 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind produc
     brick.nz = dims.nz;
     brick.halfExtentMeters = dims.halfExtentMeters;
     brick.topMeters = dims.topMeters;
+    brick.centerXMeters = dims.centerXMeters;
+    brick.centerYMeters = dims.centerYMeters;
     brick.product = product;
     brick.incomplete = incomplete;
     const std::size_t voxels = static_cast<std::size_t>(dims.nx) * static_cast<std::size_t>(dims.ny) *
@@ -65,13 +67,15 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind produc
             const auto quantized = static_cast<std::uint8_t>(std::lround(normalized * 255.0));
             const double slant = gateCenterSlantRange(firstGate, spacing, gate);
             const EnuPoint point = gateEnu(ray.azimuthDegrees, slant, ray.elevationDegrees);
-            if (std::fabs(point.x) > brick.halfExtentMeters ||
-                std::fabs(point.y) > brick.halfExtentMeters || point.z < 0.0 ||
+            const double localX = point.x - brick.centerXMeters;
+            const double localY = point.y - brick.centerYMeters;
+            if (std::fabs(localX) > brick.halfExtentMeters ||
+                std::fabs(localY) > brick.halfExtentMeters || point.z < 0.0 ||
                 point.z > brick.topMeters) {
                 continue;
             }
-            const int ix = voxelAxis(point.x, brick.halfExtentMeters, brick.nx);
-            const int iy = voxelAxis(point.y, brick.halfExtentMeters, brick.ny);
+            const int ix = voxelAxis(localX, brick.halfExtentMeters, brick.nx);
+            const int iy = voxelAxis(localY, brick.halfExtentMeters, brick.ny);
             const int iz = std::clamp(
                 static_cast<int>(std::floor(point.z / brick.topMeters * static_cast<double>(brick.nz))),
                 0, brick.nz - 1);
@@ -88,12 +92,14 @@ VolumeBrick buildVolumeBrick(const DecodedChunk& chunk, const ProductKind produc
 
 std::optional<float> sampleBrickNearest(const VolumeBrick& brick, const double xMeters,
                                         const double yMeters, const double zMeters) {
-    if (brick.nx <= 0 || std::fabs(xMeters) > brick.halfExtentMeters ||
-        std::fabs(yMeters) > brick.halfExtentMeters || zMeters < 0.0 || zMeters > brick.topMeters) {
+    const double localX = xMeters - brick.centerXMeters;
+    const double localY = yMeters - brick.centerYMeters;
+    if (brick.nx <= 0 || std::fabs(localX) > brick.halfExtentMeters ||
+        std::fabs(localY) > brick.halfExtentMeters || zMeters < 0.0 || zMeters > brick.topMeters) {
         return std::nullopt;
     }
-    const int ix = voxelAxis(xMeters, brick.halfExtentMeters, brick.nx);
-    const int iy = voxelAxis(yMeters, brick.halfExtentMeters, brick.ny);
+    const int ix = voxelAxis(localX, brick.halfExtentMeters, brick.nx);
+    const int iy = voxelAxis(localY, brick.halfExtentMeters, brick.ny);
     const int iz = std::clamp(
         static_cast<int>(std::floor(zMeters / brick.topMeters * static_cast<double>(brick.nz))), 0,
         brick.nz - 1);
@@ -108,7 +114,9 @@ std::optional<float> sampleBrickNearest(const VolumeBrick& brick, const double x
 std::optional<BrickSample> sampleBrickTrilinear(const VolumeBrick& brick, const double xMeters,
                                                 const double yMeters, const double zMeters) {
     if (brick.nx <= 0 || brick.ny <= 0 || brick.nz <= 0) return std::nullopt;
-    if (std::fabs(xMeters) > brick.halfExtentMeters || std::fabs(yMeters) > brick.halfExtentMeters ||
+    const double localX = xMeters - brick.centerXMeters;
+    const double localY = yMeters - brick.centerYMeters;
+    if (std::fabs(localX) > brick.halfExtentMeters || std::fabs(localY) > brick.halfExtentMeters ||
         zMeters < 0.0 || zMeters > brick.topMeters) {
         return std::nullopt;
     }
@@ -117,8 +125,8 @@ std::optional<BrickSample> sampleBrickTrilinear(const VolumeBrick& brick, const 
         const int lo = static_cast<int>(std::floor(cell));
         return std::pair<int, double>{lo, cell - static_cast<double>(lo)};
     };
-    const auto [ix, tx] = axis(xMeters + brick.halfExtentMeters, 2.0 * brick.halfExtentMeters, brick.nx);
-    const auto [iy, ty] = axis(yMeters + brick.halfExtentMeters, 2.0 * brick.halfExtentMeters, brick.ny);
+    const auto [ix, tx] = axis(localX + brick.halfExtentMeters, 2.0 * brick.halfExtentMeters, brick.nx);
+    const auto [iy, ty] = axis(localY + brick.halfExtentMeters, 2.0 * brick.halfExtentMeters, brick.ny);
     const auto [iz, tz] = axis(zMeters, brick.topMeters, brick.nz);
 
     double accumulated = 0.0;
@@ -181,8 +189,8 @@ std::optional<EnuVector> brickSurfaceNormal(const VolumeBrick& brick, const doub
 std::optional<RayBoxHit> intersectVolumeBox(const VolumeBrick& brick, const double eye[3],
                                             const double dir[3]) {
     const double bounds[3][2] = {
-        {-brick.halfExtentMeters, brick.halfExtentMeters},
-        {-brick.halfExtentMeters, brick.halfExtentMeters},
+        {brick.centerXMeters - brick.halfExtentMeters, brick.centerXMeters + brick.halfExtentMeters},
+        {brick.centerYMeters - brick.halfExtentMeters, brick.centerYMeters + brick.halfExtentMeters},
         {0.0, brick.topMeters},
     };
     double tEnter = 0.0;

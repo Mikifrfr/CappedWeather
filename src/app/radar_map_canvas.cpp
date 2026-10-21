@@ -5727,11 +5727,7 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             std::shared_ptr<const VolumeBrick> brickNow = brick;
             if (!brickNow || brickChunk != chunk || brickProduct != product) {
                 VolumeBrickDims brickDims;
-                brickDims.nx = 256;
-                brickDims.ny = 256;
                 brickDims.nz = 128;
-                brickDims.halfExtentMeters = 60000.0;
-                brickDims.topMeters = 20000.0;
                 VolumeBrick fresh = buildVolumeBrick(*chunk, product, brickDims);
                 brickNow = std::make_shared<const VolumeBrick>(std::move(fresh));
             }
@@ -5743,10 +5739,10 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             stops.reserve(48);
             const auto rampAlpha = [](double v01, bool folds) {
                 const double t = folds ? std::fabs(v01 - 0.5) * 2.0 : v01;
-                const double edge0 = folds ? 0.15 : 0.28;
-                const double edge1 = folds ? 0.55 : 0.62;
+                const double edge0 = folds ? 0.12 : 0.24;
+                const double edge1 = folds ? 0.50 : 0.60;
                 const double s = std::clamp((t - edge0) / (edge1 - edge0), 0.0, 1.0);
-                return (s * s * (3.0 - 2.0 * s)) * (folds ? 0.78 : 0.85);
+                return (s * s * (3.0 - 2.0 * s)) * (folds ? 0.85 : 0.92);
             };
             const bool folds = product == ProductKind::Velocity;
             for (int stop = 0; stop < 48; ++stop) {
@@ -5761,8 +5757,10 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             const int renderHeight = std::max(1, logicalSize.height() / divisor);
             QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
             image.fill(Qt::transparent);
+            const double frameTarget[3] = {brickNow->centerXMeters, brickNow->centerYMeters,
+                                           orbitTarget[2]};
             const VolumeCamera camera =
-                volumeCameraFor(*brickNow, orbitAzimuth, orbitElevation, orbitDistance, orbitTarget);
+                volumeCameraFor(*brickNow, orbitAzimuth, orbitElevation, orbitDistance, frameTarget);
             const double spanX = 2.0 * brickNow->halfExtentMeters / brickNow->nx;
             const double spanY = 2.0 * brickNow->halfExtentMeters / brickNow->ny;
             const double spanZ = brickNow->topMeters / brickNow->nz;
@@ -5773,9 +5771,9 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             const int maxSteps = static_cast<int>(diagonalMeters / stepMeters) + 2;
             const double aspect = static_cast<double>(renderWidth) / renderHeight;
             const float opacityScale = static_cast<float>(opacity) / 100.0F;
-            constexpr float kAmbient = 0.28F;
+            constexpr float kAmbient = 0.46F;
             constexpr double kLight[3] = {-0.5, -0.5, 0.7071};
-            constexpr float kDensityPerMeter = 6.4e-4F;
+            constexpr float kDensityPerMeter = 1.2e-3F;
             QElapsedTimer timer;
             timer.start();
             for (int y = 0; y < renderHeight; ++y) {
@@ -5855,6 +5853,8 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 guard->volumeImageDistance_ = orbitDistance;
                 for (int axis = 0; axis < 3; ++axis)
                     guard->volumeImageTarget_[axis] = orbitTarget[axis];
+                guard->volumeTarget_[0] = brickNow->centerXMeters;
+                guard->volumeTarget_[1] = brickNow->centerYMeters;
                 guard->update();
             }, Qt::QueuedConnection);
         });
