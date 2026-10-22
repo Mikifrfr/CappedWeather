@@ -1,8 +1,9 @@
 # Level III KDP + reflectivity pairing — the R(KDP) reference grid
 
-Status: **decided** (card `t_f4d324e8`, 2026-10-22). Implementation: the decode
-follow-up card opened from that card. This file is the decision record; it does
-not claim any validation of R(KDP) itself (see `rainfall-validation.md`).
+Status: **decided** (card `t_f4d324e8`, 2026-10-22). Implementation: `t_cde4dc7d`
+(decode); the single-tilt guard this exposes: `t_639665e7` (science). This
+file is the decision record; it does not claim any validation of R(KDP) itself
+(see `rainfall-validation.md`).
 
 Supersedes the open acceptance line in `t_0d919180` ("KDP on rays that also carry
 reflectivity at the same geometry"). The decoder was finished; the missing piece
@@ -52,8 +53,8 @@ All four files from the public NOAA NODD bucket
 | `TLX_N0B_2024_05_06_23_44_57` | 153 Z | 75 | 85 497 s | 19 850 | 212 | #5 @ 0.5° | 720 × 1840 | 250 m | 460 km | 224 587 | `1c40134c269819e9321df4e94a44f802015a1c5612d731b94c82e052d6c3c14a` |
 
 The two N0K hashes are the fixtures committed by `t_0d919180`; the two N0B files
-are new. The pair spans 86 079 − 85 497 = **582 s**, so a two-interval R(KDP)
-accumulation is possible with committed bytes alone.
+are new. The pair spans 86 079 − 85 497 = **582 s**, so a two-volume, one-interval
+R(KDP) accumulation is possible with committed bytes alone.
 
 Encoding, measured from the bytes:
 
@@ -172,7 +173,7 @@ replay to be explained rather than absorbed.
    (197.0 km), so strong echoes in gates 655-787 (133 gates per ray,
    163.75-196.75 km) would pass the AP/clutter check without a column and
    *without a flag*, while closer gates correctly say `NoVerticalCheck` and
-   farther ones are refused as too high (gates 788-919, 132 per ray). A
+   farther ones are refused as too high (gates 788-920, 133 per ray). A
    single-tilt chunk cannot run a vertical check at all; science owns making
    that say so (follow-up card from `t_f4d324e8`). The replay's 5 982
    `NoVerticalCheck` gates are the honest part.
