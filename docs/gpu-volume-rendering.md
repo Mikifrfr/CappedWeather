@@ -249,27 +249,71 @@ widget's presentation path does not alter the result. Screenshots:
 `volume3d-gpu-offscreen.png` (offscreen), `volume3d-gpu-cpu.png` (shipping CPU
 panel path, same volume and camera, 950 ms chip).
 
-### CPU vs GPU: the gap is a CPU compositing bug, not a shading difference
+### CPU vs GPU: the gap was a CPU compositing bug, not a shading difference
 
 The GPU frame is brighter at the same camera: lit 0.0810 vs 0.0599 at 1440x900.
 That is not sampling noise. `RadarMapCanvas::rebuildVolumeRender` accumulates
-proper premultiplied RGB (`r += (1-a) * colour * shade * gate`) but stores it in
+proper premultiplied RGB (`r += (1-a) * colour * shade * gate`) but stored it in
 `QImage::Format_ARGB32`, which QPainter interprets as **straight** alpha, so
 alpha is applied a second time when the image is painted. The panel preview is
 therefore dimmer than the transfer function says, and more so the lower the
-per-pixel alpha — which is why the CPU number keeps falling as the frame grows
+per-pixel alpha — which is why the CPU number kept falling as the frame grew
 (the fixed-size HUD chip stops padding the count).
 
 Measured in the hermetic test on an identical brick and camera:
 
 - `lit_gpu = 0.0891`
-- `lit_cpu` as the panel paints it (ARGB32 + QPainter) = `0.0839`
+- `lit_cpu` as the panel painted it (ARGB32 + QPainter) = `0.0839`
 - `lit_cpu` with the same bytes composited as premultiplied = `0.0934`
 
-Reinterpreting the bytes as premultiplied moves the CPU image toward the GPU
-image, which pins the diagnosis (the test asserts that direction). The CPU path
-was deliberately **not** changed in this card ("CPU path unchanged"); the fix is
-a follow-up card.
+Reinterpreting the bytes as premultiplied moved the CPU image toward the GPU
+image, which pinned the diagnosis (the test asserted that direction). The CPU
+path was deliberately **not** changed in that card ("CPU path unchanged").
+
+#### Fixed — 2026-10-22 (card t_cc6aa591)
+
+The march now stores its image in `RadarMapCanvas::volumePreviewFormat` =
+`QImage::Format_ARGB32_Premultiplied`, so QPainter applies the accumulated
+coverage exactly once, and the packing step lives in one shared place
+(`RadarMapCanvas::volumePreviewPixel`) that the march and the hermetic test both
+call. No marched pixel changed value; what changed is their declared meaning.
+
+Why ARGB32_Premultiplied and not RGBA8888_Premultiplied: both are correct, but
+ARGB32_Premultiplied is the raster engine's native layout here (`0xAARRGGBB`,
+what `qRgba`/`scanLine` already write), so painting needs no per-frame swizzle.
+Note the original card text called `Format_ARGB32` premultiplied; it is not —
+straight alpha *is* the bug.
+
+Same volume and camera (KTLX 2013-05-20 20:12Z REF, `KTLX20130520_201229_V06`,
+1440x900, brick 256x256x128, camera az 180 / el 40 / 420 km, opacity 80):
+
+| | before (ARGB32) | after (ARGB32_Premultiplied) | GPU reference |
+|---|---|---|---|
+| CPU panel lit_fraction (grab, includes grid/rings/HUD) | 0.13734 | 0.15426 | 0.13691 offscreen (no chrome), 0.14479 panel * |
+| CPU panel checksum | 445668258 | 477392467 * | 399665074 |
+| hermetic CPU march lit_fraction (no chrome) | 0.08389 | 0.09342 | 0.08914 |
+
+\* the GPU panel number is card t_51d7af1a's, on the branch that has the panel
+GPU wiring, same volume/camera/size/product. Chrome (ground grid, rings, chip)
+adds `0.14479 - 0.13691 = 0.00788` to a GPU panel grab; applying that to the
+fixed CPU panel leaves `0.1464` against the GPU's `0.14479` — 0.0016 apart,
+inside the `+0.0043` coverage-model difference already documented below. So the
+compositing path now agrees with the GPU; what remains is the sampling model,
+not alpha. The CPU panel checksum moves by ~0.003% between runs because the HUD
+chip prints its own march time; `lit_fraction` is the fixed number.
+
+The card's "0.081-after-tone-mapping" target no longer describes this tree: the
+shader has no tone map (`rgb = accum + (1-alpha) * background`,
+`src/app/volume_canvas.cpp`), and 0.0810 was measured on the pre-interpolation
+brick. After tilt interpolation (9e6f46e) the GPU reference on this volume is
+0.13691 raw / 0.14479 panel, which is the like-for-like target used above.
+
+Pixel path pinned, red then green (hermetic, no volume data): one sample of
+colour 0.5 at coverage 0.5 must store `0x7f00007f` and paint red ~131 over the
+panel's `#080D10`. With the format set back to `Format_ARGB32` the new check
+fails — `cappedweather_ui_tests -platform offscreen` exits 1 with
+`the 3D preview applied alpha twice: painted r=67 (expected ~131 premultiplied,
+~67 straight-alpha)`; with `Format_ARGB32_Premultiplied` it passes.
 
 Second, smaller difference: the shader's coverage is the hardware-filtered
 weight of present corners (`sum w`), while `sampleBrickTrilinear` reports
