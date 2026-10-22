@@ -36,8 +36,36 @@ struct VolumeBrick {
     ProductKind product = ProductKind::Reflectivity;
     bool incomplete = false; // partial volume: render what exists, say so
     std::vector<std::uint8_t> value;   // normalized 0..255, max wins on collision
-    std::vector<std::uint8_t> present; // 1 where at least one gate splatted
+    // 1 where a voxel carries a value: measured (a gate splatted it) or
+    // reconstructed (filled between two measured gates on the same column).
+    std::vector<std::uint8_t> present;
+    // 1 exactly where `value` was reconstructed rather than measured. A gate
+    // never sets this bit, so `present && !interpolated` is the observed set.
+    // Same size as `value` after a build; empty on a hand-built brick.
+    std::vector<std::uint8_t> interpolated;
+    std::size_t measuredVoxels = 0;     // voxels a decoded gate wrote
+    std::size_t interpolatedVoxels = 0; // voxels filled between two measured gates
+    int interpolatedTilts = 0;          // distinct sweeps that took part in a fill
 };
+
+// Flat index into value/present/interpolated for a voxel address.
+std::size_t brickFlatIndex(const VolumeBrick& brick, int ix, int iy, int iz);
+
+// Voxel address of an ENU point, using the same mapping the splat used. nullopt
+// outside the box, below ground, or for a degenerate brick. Tests and probes
+// address a voxel through this rather than re-deriving the mapping.
+struct BrickIndex {
+    int ix = 0;
+    int iy = 0;
+    int iz = 0;
+    std::size_t flat = 0;
+};
+std::optional<BrickIndex> brickIndexOf(const VolumeBrick& brick, double xMeters, double yMeters,
+                                       double zMeters);
+
+// True when this voxel's value was reconstructed between two measured gates.
+// Hand-built bricks carry no mask (and no reconstruction), so they read false.
+bool brickVoxelInterpolated(const VolumeBrick& brick, std::size_t flatIndex);
 
 // Local ENU meters relative to the radar site: x east, y north, z up.
 struct EnuPoint {

@@ -5725,10 +5725,14 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 return;
             }
             std::shared_ptr<const VolumeBrick> brickNow = brick;
+            double buildMs = 0.0;
             if (!brickNow || brickChunk != chunk || brickProduct != product) {
                 VolumeBrickDims brickDims;
                 brickDims.nz = 128;
+                QElapsedTimer buildTimer;
+                buildTimer.start();
                 VolumeBrick fresh = buildVolumeBrick(*chunk, product, brickDims);
+                buildMs = static_cast<double>(buildTimer.elapsed());
                 brickNow = std::make_shared<const VolumeBrick>(std::move(fresh));
             }
             if (stale()) return;
@@ -5837,9 +5841,9 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             const double renderMs = static_cast<double>(timer.elapsed());
             if (stale()) return;
             QMetaObject::invokeMethod(guard, [guard, requestId, brickNow,
-                                             image = std::move(image), renderMs, logicalSize,
-                                             orbitAzimuth, orbitElevation, orbitDistance,
-                                             orbitTarget] {
+                                             image = std::move(image), renderMs, buildMs,
+                                             logicalSize, orbitAzimuth, orbitElevation,
+                                             orbitDistance, orbitTarget] {
                 if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
                     return;
                 guard->brick_ = brickNow;
@@ -5848,6 +5852,7 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 guard->volumeImage_ = image;
                 guard->volumeImageLogicalSize_ = logicalSize;
                 guard->volumeRenderMs_ = renderMs;
+                if (buildMs > 0.0) guard->volumeBuildMs_ = buildMs;
                 guard->volumeImageAzimuth_ = orbitAzimuth;
                 guard->volumeImageElevation_ = orbitElevation;
                 guard->volumeImageDistance_ = orbitDistance;
@@ -5887,13 +5892,32 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
     painter.setFont(hudFont(8, QFont::DemiBold));
     painter.setPen(QColor(232, 238, 240));
     painter.setBrush(QColor(8, 15, 19, 205));
-    const QRectF chip(12.0, 10.0, 330.0, 22.0);
+    QString label = QStringLiteral("3D preview (CPU)  %1 %2  %3 ms")
+                        .arg(selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_)
+                        .arg(shortName)
+                        .arg(static_cast<int>(volumeRenderMs_));
+    if (brick_ && brick_->interpolatedVoxels > 0) {
+        // Filled voxels are reconstructed, not observed. Say so, with the share,
+        // the same way an incomplete volume is flagged rather than hidden.
+        const std::size_t occupied = brick_->measuredVoxels + brick_->interpolatedVoxels;
+        const int filledPercent = occupied > 0
+                                      ? static_cast<int>(std::lround(
+                                            100.0 * static_cast<double>(brick_->interpolatedVoxels) /
+                                            static_cast<double>(occupied)))
+                                      : 0;
+        label += QStringLiteral("  - %1 %2 interpolated (%3% reconstructed)")
+                     .arg(brick_->interpolatedTilts)
+                     .arg(brick_->interpolatedTilts == 1 ? QStringLiteral("tilt")
+                                                        : QStringLiteral("tilts"))
+                     .arg(filledPercent);
+    }
+    // Size the chip to its own text so the disclosure is never elided away on
+    // a wide panel; elide only when the panel itself is too narrow.
+    const double chipWidth =
+        std::min(static_cast<double>(width()) - 24.0,
+                 static_cast<double>(painter.fontMetrics().horizontalAdvance(label)) + 18.0);
+    const QRectF chip(12.0, 10.0, std::max(140.0, chipWidth), 22.0);
     painter.drawRoundedRect(chip, 4, 4);
-    const QString label =
-        QStringLiteral("3D preview (CPU)  %1 %2  %3 ms")
-            .arg(selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_)
-            .arg(shortName)
-            .arg(static_cast<int>(volumeRenderMs_));
     painter.drawText(chip.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
                      painter.fontMetrics().elidedText(label, Qt::ElideRight,
                                                       static_cast<int>(chip.width()) - 16));

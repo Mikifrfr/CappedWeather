@@ -319,6 +319,12 @@ public:
     // lands later behind the same toggle; the brick and camera are shared.
     void setVolume3dMode(bool enabled);
     [[nodiscard]] bool volume3dMode() const { return volume3d_; }
+    // The brick the last completed 3D frame marched, and what that frame cost.
+    // Read by tools/volume3d_probe so the numbers are machine-readable instead
+    // of being read off a screenshot. Null / 0 until the first frame lands.
+    [[nodiscard]] std::shared_ptr<const VolumeBrick> volume3dBrick() const { return brick_; }
+    [[nodiscard]] double volume3dRenderMilliseconds() const { return volumeRenderMs_; }
+    [[nodiscard]] double volume3dBuildMilliseconds() const { return volumeBuildMs_; }
     void setVolumeQuality(int decodedChunks, int totalChunks, int failedChunks,
                           std::size_t rejectedMessages = 0, std::size_t rejectedBlocks = 0);
     void setLoading(bool loading, const QString& message = {});
@@ -833,6 +839,7 @@ private:
     double volumeImageDistance_ = 420000.0;
     double volumeImageTarget_[3] = {0.0, 0.0, 7000.0};
     double volumeRenderMs_ = 0.0;
+    double volumeBuildMs_ = 0.0; // cost of the last brick build (0 = reused a cached brick)
     std::atomic<int> volumeRequestId_{0};
     int radarOpacity_ = 80;
     int warningOpacity_ = 90;
