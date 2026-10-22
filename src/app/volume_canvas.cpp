@@ -6,11 +6,16 @@
 #include <QColor>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QMutex>
+#include <QThread>
 #include <QVarLengthArray>
+#include <QWaitCondition>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <cstdio>
 
@@ -172,9 +177,16 @@ float4 psMain(float4 pos : SV_Position) : SV_Target
 )HLSL";
 
 QShader hlslShader(const QShader::Stage stage, const char* entryPoint) {
+    // Deliberate-failure hook for the fallback proof in
+    // docs/gpu-volume-rendering.md ("Failure behaviour"): a broken shader source
+    // must give a one-line error and a CPU frame, never a black panel. Read once,
+    // never set by the app itself.
+    static const bool broken = qEnvironmentVariableIsSet("CAPPEDWEATHER_VOLUME_BREAK_SHADER");
     QShader shader;
     shader.setStage(stage);
-    const QShaderCode code{QByteArray(kVolumeHlsl), QByteArray(entryPoint)};
+    const QShaderCode code{broken ? QByteArrayLiteral("this is not hlsl")
+                                  : QByteArray(kVolumeHlsl),
+                           QByteArray(entryPoint)};
     // QRhi's D3D11 backend asks for the HLSL profile that matches the device
     // feature level; both keys carry the same source.
     shader.setShader(QShaderKey(QShader::HlslShader, 50), code);
@@ -310,6 +322,8 @@ public:
             volume_->destroy();
             delete volume_;
             volume_ = nullptr;
+            volumeGrid_ = QSize();
+            volumeDepth_ = 0;
         }
         if (ubuf_) {
             ubuf_->destroy();
@@ -352,17 +366,47 @@ public:
         if (volumeDirty_) {
             int sliceBytes = 0;
             volumeBytes_ = buildVolumeBytes(*brick_, &sliceBytes);
-            if (!volume_) {
-                volume_ = rhi_->newTexture(QRhiTexture::RG8, brick_->nx, brick_->ny, brick_->nz,
-                                           1, QRhiTexture::ThreeDimensional);
-        if (!volume_->create()) {
-                    *error = QStringLiteral("3D texture creation failed (%1x%2x%3)")
-                                 .arg(brick_->nx).arg(brick_->ny).arg(brick_->nz);
-                    return false;
+            const int nz = std::max(1, brick_->nz);
+            const QSize grid(std::max(1, brick_->nx), std::max(1, brick_->ny));
+            // The 3D texture is sized by the brick. A brick with a new grid (a
+            // different box side, or the first frame after a product change)
+            // needs a new texture: uploading a byte array shaped for the new
+            // grid into a texture still sized for the old one makes D3D11 walk
+            // the old row pitch off the end of the buffer - an access violation
+            // inside the QRhi batch, not an error the caller can catch.
+            if (volume_ && (volumeGrid_ != grid || volumeDepth_ != nz)) {
+                volume_->destroy();
+                delete volume_;
+                volume_ = nullptr;
+                // The SRB binds the old texture by pointer and the pipeline binds
+                // the SRB, so both are rebuilt with the replacement. Without this
+                // the draw samples a deleted texture: a black frame at best.
+                if (srb_) {
+                    srb_->destroy();
+                    delete srb_;
+                    srb_ = nullptr;
+                }
+                if (pipeline_) {
+                    pipeline_->destroy();
+                    delete pipeline_;
+                    pipeline_ = nullptr;
                 }
             }
+            if (!volume_) {
+                volume_ = rhi_->newTexture(QRhiTexture::RG8, grid.width(), grid.height(), nz, 1,
+                                           QRhiTexture::ThreeDimensional);
+                if (!volume_ || !volume_->create()) {
+                    *error = QStringLiteral("3D texture creation failed (%1x%2x%3)")
+                                 .arg(grid.width())
+                                 .arg(grid.height())
+                                 .arg(nz);
+                    volume_ = nullptr;
+                    return false;
+                }
+                volumeGrid_ = grid;
+                volumeDepth_ = nz;
+            }
             QVarLengthArray<QRhiTextureUploadEntry, 160> entries;
-            const int nz = std::max(1, brick_->nz);
             for (int slice = 0; slice < nz; ++slice) {
                 entries.append(QRhiTextureUploadEntry(
                     slice, 0,
@@ -506,6 +550,11 @@ private:
     QRhiRenderPassDescriptor* renderPass_ = nullptr;
     QRhiBuffer* ubuf_ = nullptr;
     QRhiTexture* volume_ = nullptr;
+    // Grid the resident 3D texture was created for: a brick with a different
+    // grid must replace the texture, not upload a differently-shaped buffer
+    // into the old one (see render()).
+    QSize volumeGrid_;
+    int volumeDepth_ = 0;
     QRhiSampler* volumeSampler_ = nullptr;
     QRhiTexture* lut_ = nullptr;
     QRhiSampler* lutSampler_ = nullptr;
@@ -522,6 +571,297 @@ private:
     QByteArray volumeBytes_;
     QByteArray lutBytes_;
     float params_[40] = {};
+};
+
+// --- resident device -----------------------------------------------------
+//
+// Panel integration (card t_f71a0be0) needs a frame without a window and without
+// paying device creation per frame: 91-132 ms for a D3D11 device, against 4-8 ms
+// for the march itself. So one QRhi device, one offscreen render target and the
+// uploaded 3D texture live for the process, owned by one thread. QRhi has thread
+// affinity, so RhiVolumeScene is only ever touched inside GpuFrameThread::run().
+
+class RhiVolumeScene {
+public:
+    RhiVolumeScene() = default;
+    ~RhiVolumeScene() {
+        releaseTarget();
+        renderer_.reset();   // textures, buffers, pipeline: before the device
+        rhi_.reset();
+    }
+    RhiVolumeScene(const RhiVolumeScene&) = delete;
+    RhiVolumeScene& operator=(const RhiVolumeScene&) = delete;
+
+    qint64 frameCount() const { return frameCount_; }
+    qint64 uploadCount() const { return uploadCount_; }
+
+    // One frame with the device (and normally the volume texture) already
+    // resident. frameMs is the march + readback + the wait for the GPU; the
+    // caller's firstFrameMs is the whole call, which is where a cold device and
+    // a fresh 16.8 MB upload show up.
+    VolumeGpuFrame renderFrame(const std::shared_ptr<const VolumeBrick>& brick,
+                               const VolumeCamera& camera, const std::vector<RgbaStop>& stops,
+                               const int opacityPercent, const QSize& pixelSize) {
+        VolumeGpuFrame frame;
+        if (pixelSize.isEmpty()) {
+            frame.error = QStringLiteral("GPU 3D offscreen render needs a non-empty size");
+            return frame;
+        }
+        if (!brick || brick->value.empty()) {
+            frame.error = QStringLiteral("GPU 3D has no brick to march");
+            return frame;
+        }
+        QElapsedTimer call;
+        call.start();
+        if (!ensureDevice(&frame.error)) return frame;
+        frame.backend = backend_;
+        frame.device = device_;
+        if (!ensureTarget(pixelSize, &frame.error)) return frame;
+
+        renderer_->setView(camera, pixelSize, opacityPercent);
+        renderer_->setStops(stops);
+        if (brick != uploadedBrick_) {
+            // RhiVolumeRenderer::setBrick() skips an identical pointer, so this
+            // counts what actually reaches the GPU. Resizes keep it resident.
+            uploadedBrick_ = brick;
+            ++uploadCount_;
+        }
+        renderer_->setBrick(brick);
+
+        QRhiCommandBuffer* cb = nullptr;
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess || !cb) {
+            frame.error = QStringLiteral("offscreen frame begin failed");
+            return frame;
+        }
+        QElapsedTimer timer;
+        timer.start();
+        QRhiReadbackResult readback;
+        // The readback has to be requested inside the pass, after the draw.
+        cb->beginPass(rt_, QColor(0, 0, 0, 255), {1.0f, 0});
+        QString renderError;
+        const bool rendered = renderer_->render(cb, &renderError);
+        if (rendered) {
+            QRhiResourceUpdateBatch* readbackBatch = rhi_->nextResourceUpdateBatch();
+            readbackBatch->readBackTexture(QRhiReadbackDescription(target_), &readback);
+            cb->endPass(readbackBatch);
+        } else {
+            cb->endPass();
+        }
+        rhi_->endOffscreenFrame();
+        rhi_->finish();
+        frame.frameMs = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
+        frame.firstFrameMs = static_cast<double>(call.nsecsElapsed()) / 1.0e6;
+        if (!rendered) {
+            frame.error =
+                renderError.isEmpty() ? QStringLiteral("GPU 3D frame failed") : renderError;
+            return frame;
+        }
+        if (readback.data.isEmpty()) {
+            frame.error = QStringLiteral("GPU 3D readback returned no pixels");
+            return frame;
+        }
+        const QImage view(reinterpret_cast<const uchar*>(readback.data.constData()),
+                          pixelSize.width(), pixelSize.height(), QImage::Format_RGBA8888);
+        // Same as the spike's offscreen path: the readback is bottom-up and the
+        // shader already composited over the 3D view background, so the frame is
+        // opaque RGB32 with nothing for QPainter to premultiply twice.
+        frame.image = view.mirrored(false, true).convertToFormat(QImage::Format_RGB32);
+        frame.ok = true;
+        ++frameCount_;
+        return frame;
+    }
+
+private:
+    bool ensureDevice(QString* error) {
+        if (rhi_) return true;
+        QRhiD3D11InitParams params;
+        rhi_.reset(QRhi::create(QRhi::D3D11, &params));
+        if (!rhi_) {
+            *error = QStringLiteral("Direct3D 11 device creation failed");
+            return false;
+        }
+        backend_ = QString::fromUtf8(rhi_->backendName());
+        device_ = rhi_->driverInfo().deviceName;
+        return true;
+    }
+
+    bool ensureTarget(const QSize& size, QString* error) {
+        if (rt_ && targetSize_ == size) return true;
+        releaseTarget();
+        target_ = rhi_->newTexture(QRhiTexture::RGBA8, size, 1,
+                                   QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
+        if (!target_ || !target_->create()) {
+            *error = QStringLiteral("offscreen render target creation failed");
+            releaseTarget();
+            return false;
+        }
+        rt_ = rhi_->newTextureRenderTarget({target_});
+        pass_ = rt_->newCompatibleRenderPassDescriptor();
+        rt_->setRenderPassDescriptor(pass_);
+        if (!rt_->create()) {
+            *error = QStringLiteral("offscreen render target setup failed");
+            releaseTarget();
+            return false;
+        }
+        if (!renderer_) {
+            renderer_ = std::make_unique<RhiVolumeRenderer>();
+            if (!renderer_->create(rhi_.get(), pass_, error)) {
+                renderer_.reset();
+                releaseTarget();
+                return false;
+            }
+        } else {
+            // A resize keeps the volume texture and the palette LUT; only the
+            // pipeline is bound to the render pass, and setRenderPass drops it.
+            renderer_->setRenderPass(pass_);
+        }
+        targetSize_ = size;
+        return true;
+    }
+
+    void releaseTarget() {
+        if (renderer_) renderer_->setRenderPass(nullptr);
+        if (rt_) {
+            rt_->destroy();
+            delete rt_;
+            rt_ = nullptr;
+        }
+        if (pass_) {
+            pass_->destroy();
+            delete pass_;
+            pass_ = nullptr;
+        }
+        if (target_) {
+            target_->destroy();
+            delete target_;
+            target_ = nullptr;
+        }
+        targetSize_ = QSize();
+    }
+
+    std::unique_ptr<QRhi> rhi_;
+    std::unique_ptr<RhiVolumeRenderer> renderer_;
+    QRhiTexture* target_ = nullptr;
+    QRhiTextureRenderTarget* rt_ = nullptr;
+    QRhiRenderPassDescriptor* pass_ = nullptr;
+    QSize targetSize_;
+    std::shared_ptr<const VolumeBrick> uploadedBrick_;
+    QString backend_;
+    QString device_;
+    qint64 frameCount_ = 0;
+    qint64 uploadCount_ = 0;
+};
+
+// One request at a time, one frame at a time. A caller blocks for its frame
+// because the panel's pool thread has nothing else to do while the GPU marches;
+// a frame that does not come back inside kFrameTimeoutMs is reported as an error
+// so the panel falls back to the CPU instead of hanging on a wedged driver.
+constexpr int kFrameTimeoutMs = 4000;
+
+class GpuFrameThread final : public QThread {
+public:
+    static GpuFrameThread& shared() {
+        // Deliberately leaked, and `run()` never returns: the device belongs to
+        // the process, and tearing a D3D11 device down during static destruction
+        // (after Qt is gone) is a hang waiting to happen. Process exit takes it
+        // down with the address space.
+        static GpuFrameThread* thread = new GpuFrameThread();
+        // Started once, on first use: a thread that is never started answers
+        // every submit() with "not running" and the panel silently lives on the
+        // CPU march. call_once keeps the start race-free for the first two 3D
+        // panels toggled in the same event loop turn.
+        static std::once_flag started;
+        std::call_once(started, [] { thread->start(); });
+        return *thread;
+    }
+
+    std::atomic<qint64> frames{0};
+    std::atomic<qint64> uploads{0};
+
+    VolumeGpuFrame submit(const std::shared_ptr<const VolumeBrick>& brick,
+                          const VolumeCamera& camera, const std::vector<RgbaStop>& stops,
+                          const int opacityPercent, const QSize& pixelSize) {
+        QMutexLocker lock(&mutex_);
+        // Several 3D panels share this device: queue behind whichever frame is
+        // in flight rather than overwriting its request.
+        while (inFlight_ && isRunning()) {
+            if (!wake_.wait(&mutex_, kFrameTimeoutMs)) return timeoutFrame();
+        }
+        if (!isRunning()) {
+            VolumeGpuFrame frame;
+            frame.error = QStringLiteral("GPU 3D thread is not running");
+            return frame;
+        }
+        request_ = Request{brick, camera, stops, opacityPercent, pixelSize};
+        haveRequest_ = true;
+        inFlight_ = true;
+        pending_ = true;
+        wake_.wakeAll();
+        while (pending_) {
+            if (!wake_.wait(&mutex_, kFrameTimeoutMs)) {
+                // Leave inFlight_ set: the next caller must not pile onto a
+                // request the driver never finished.
+                return timeoutFrame();
+            }
+        }
+        VolumeGpuFrame frame = reply_;
+        inFlight_ = false;
+        wake_.wakeAll();
+        return frame;
+    }
+
+protected:
+    void run() override {
+        RhiVolumeScene scene;
+        for (;;) {
+            Request request;
+            {
+                QMutexLocker lock(&mutex_);
+                while (!haveRequest_) wake_.wait(&mutex_);
+                request = request_;
+                haveRequest_ = false;
+            }
+            VolumeGpuFrame frame =
+                scene.renderFrame(request.brick, request.camera, request.stops,
+                                  request.opacityPercent, request.pixelSize);
+            frames.store(scene.frameCount(), std::memory_order_relaxed);
+            uploads.store(scene.uploadCount(), std::memory_order_relaxed);
+            {
+                QMutexLocker lock(&mutex_);
+                reply_ = std::move(frame);
+                pending_ = false;
+                // The caller that timed out still owns the request on paper; the
+                // frame it asked for is done here. Clear the in-flight flag so a
+                // later caller queues behind the GPU thread's actual work rather
+                // than waiting out kFrameTimeoutMs for a reply nobody will take.
+                inFlight_ = false;
+                wake_.wakeAll();
+            }
+        }
+    }
+
+private:
+    struct Request {
+        std::shared_ptr<const VolumeBrick> brick;
+        VolumeCamera camera;
+        std::vector<RgbaStop> stops;
+        int opacityPercent = 80;
+        QSize pixelSize;
+    };
+
+    static VolumeGpuFrame timeoutFrame() {
+        VolumeGpuFrame frame;
+        frame.error = QStringLiteral("GPU 3D frame timed out after %1 ms").arg(kFrameTimeoutMs);
+        return frame;
+    }
+
+    QMutex mutex_;
+    QWaitCondition wake_;
+    bool haveRequest_ = false;
+    bool inFlight_ = false;
+    bool pending_ = false;
+    Request request_;
+    VolumeGpuFrame reply_;
 };
 
 } // namespace
@@ -694,104 +1034,42 @@ VolumeGpuFrame renderVolumeOffscreen(const VolumeBrick& brick, const VolumeCamer
         frame.error = QStringLiteral("GPU 3D has no brick to march");
         return frame;
     }
-    QRhiD3D11InitParams params;
-    std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::D3D11, &params));
-    if (!rhi) {
-        frame.error = QStringLiteral("Direct3D 11 device creation failed");
-        return frame;
-    }
-    frame.backend = QString::fromUtf8(rhi->backendName());
-    frame.device = rhi->driverInfo().deviceName;
-
-    QRhiTexture* target = rhi->newTexture(QRhiTexture::RGBA8, pixelSize, 1,
-                                          QRhiTexture::RenderTarget |
-                                              QRhiTexture::UsedAsTransferSource);
-    if (!target->create()) {
-        target->destroy();
-        delete target;
-        frame.error = QStringLiteral("offscreen render target creation failed");
-        return frame;
-    }
-    QRhiTextureRenderTarget* rt = rhi->newTextureRenderTarget({target});
-    QRhiRenderPassDescriptor* pass = rt->newCompatibleRenderPassDescriptor();
-    rt->setRenderPassDescriptor(pass);
-    if (!rt->create()) {
-        rt->destroy();
-        delete rt;
-        pass->destroy();
-        delete pass;
-        target->destroy();
-        delete target;
-        frame.error = QStringLiteral("offscreen render target setup failed");
-        return frame;
-    }
-
-    auto renderer = std::make_unique<RhiVolumeRenderer>();
-    QString error;
-    if (!renderer->create(rhi.get(), pass, &error)) {
-        frame.error = error;
-        renderer.reset();
-        rt->destroy();
-        delete rt;
-        pass->destroy();
-        delete pass;
-        target->destroy();
-        delete target;
-        return frame;
-    }
-    renderer->setBrick(std::make_shared<const VolumeBrick>(brick));
-    renderer->setStops(stops);
-    renderer->setView(camera, pixelSize, opacityPercent);
-
+    // A private device: the probe must not queue behind (or warm) the panel's.
+    RhiVolumeScene scene;
+    const auto brickNow = std::make_shared<const VolumeBrick>(brick);
     const int frameCount = std::max(1, frames);
-    QByteArray pixels;
     for (int index = 0; index < frameCount; ++index) {
-        QRhiCommandBuffer* cb = nullptr;
-        if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) {
-            frame.error = QStringLiteral("offscreen frame begin failed");
-            break;
+        const VolumeGpuFrame one =
+            scene.renderFrame(brickNow, camera, stops, opacityPercent, pixelSize);
+        if (index == 0) frame.firstFrameMs = one.firstFrameMs;
+        frame.frameMs = one.frameMs; // last completed frame, resources resident
+        frame.backend = one.backend;
+        frame.device = one.device;
+        if (!one.ok) {
+            frame.error = one.error;
+            frame.ok = false;
+            return frame;
         }
-        QElapsedTimer timer;
-        timer.start();
-        QRhiReadbackResult readback;
-        cb->beginPass(rt, QColor(0, 0, 0, 255), {1.0f, 0});
-        bool rendered = false;
-        {
-            QString renderError;
-            rendered = renderer->render(cb, &renderError);
-            if (!rendered)
-                frame.error = renderError.isEmpty() ? QStringLiteral("GPU 3D frame failed")
-                                                    : renderError;
-        }
-        // Readback has to be requested from inside the pass; render() already
-        // recorded the draw, so this is the only extra command.
-        QRhiResourceUpdateBatch* readbackBatch = rhi->nextResourceUpdateBatch();
-        readbackBatch->readBackTexture(QRhiReadbackDescription(target), &readback);
-        cb->endPass(readbackBatch);
-        rhi->endOffscreenFrame();
-        rhi->finish();
-        const double elapsedMs = static_cast<double>(timer.nsecsElapsed()) / 1.0e6;
-        if (!rendered) break;
-        if (index == 0) frame.firstFrameMs = elapsedMs;
-        frame.frameMs = elapsedMs; // last completed frame, resources resident
-        pixels = readback.data;
-        if (index + 1 == frameCount) frame.ok = true;
+        frame.image = one.image;
+        frame.ok = true;
     }
-
-    if (frame.ok && !pixels.isEmpty()) {
-        QImage image(reinterpret_cast<const uchar*>(pixels.constData()), pixelSize.width(),
-                     pixelSize.height(), QImage::Format_RGBA8888);
-        frame.image = image.mirrored(false, true).convertToFormat(QImage::Format_RGB32);
-    }
-
-    renderer.reset();
-    rt->destroy();
-    delete rt;
-    pass->destroy();
-    delete pass;
-    target->destroy();
-    delete target;
     return frame;
 }
+
+VolumeGpuFrame renderVolumeResident(std::shared_ptr<const VolumeBrick> brick,
+                                    const VolumeCamera& camera,
+                                    const std::vector<RgbaStop>& stops, const int opacityPercent,
+                                    const QSize& pixelSize) {
+    if (!brick || brick->value.empty()) {
+        VolumeGpuFrame frame;
+        frame.error = QStringLiteral("GPU 3D has no brick to march");
+        return frame;
+    }
+    return GpuFrameThread::shared().submit(brick, camera, stops, opacityPercent, pixelSize);
+}
+
+qint64 volumeResidentFrames() { return GpuFrameThread::shared().frames.load(); }
+
+qint64 volumeResidentUploads() { return GpuFrameThread::shared().uploads.load(); }
 
 } // namespace cappedweather

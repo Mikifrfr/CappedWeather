@@ -6861,7 +6861,8 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             std::cout << "GPU 3D raymarch: backend=" << gpu.backend.toStdString()
                       << " device=" << gpu.device.toStdString() << " frame_ms=" << gpu.frameMs
                       << " lit_gpu=" << gpuLit << " lit_cpu=" << cpuLit
-                      << " lit_cpu_premultiplied=" << cpuLitPremultiplied << '\n';
+                      << " lit_cpu_premultiplied=" << cpuLitPremultiplied << '\n'
+                      << std::flush;
             if (std::abs(gpuLit - cpuLitPremultiplied) > std::abs(gpuLit - cpuLit)) {
                 std::cerr << "CPU/GPU 3D gap is not the premultiplied-alpha mismatch: gpu=" << gpuLit
                           << " panel_composite=" << cpuLit
@@ -6875,6 +6876,280 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             if (std::abs(gpuLit - cpuLit) > 0.08) {
                 std::cerr << "GPU and CPU 3D images disagree: lit_gpu=" << gpuLit
                           << " lit_cpu=" << cpuLit << '\n';
+                return 1;
+            }
+        }
+    }
+
+    // --- resident GPU 3D backend (card t_f71a0be0) --------------------------
+    // Hermetic: the panel's own device must keep the brick uploaded between
+    // frames (one upload for two frames at the same camera, still one after a
+    // resize, two after a different brick), and the shipping panel must report
+    // the backend that actually drew the frame. Skips with a note on a machine
+    // without D3D11, like the block above.
+    {
+        VolumeBrick brick;
+        brick.nx = 40;
+        brick.ny = 40;
+        brick.nz = 20;
+        brick.halfExtentMeters = 50000.0;
+        brick.topMeters = 10000.0;
+        brick.product = ProductKind::Reflectivity;
+        const std::size_t voxels = static_cast<std::size_t>(brick.nx) *
+                                   static_cast<std::size_t>(brick.ny) *
+                                   static_cast<std::size_t>(brick.nz);
+        brick.value.assign(voxels, 0);
+        brick.present.assign(voxels, 0);
+        for (int z = 2; z < brick.nz - 2; ++z) {
+            for (int y = 2; y < brick.ny - 2; ++y) {
+                for (int x = 2; x < brick.nx - 2; ++x) {
+                    const double px = (x + 0.5) / brick.nx - 0.5;
+                    const double py = (y + 0.5) / brick.ny - 0.5;
+                    const double pz = static_cast<double>(z) / brick.nz;
+                    if (std::sqrt(px * px + py * py) > 0.28) continue;
+                    const std::size_t flat =
+                        (static_cast<std::size_t>(z) * brick.ny + y) * brick.nx + x;
+                    brick.value[flat] = static_cast<std::uint8_t>(
+                        std::clamp(230.0 - pz * 160.0, 60.0, 255.0));
+                    brick.present[flat] = 1;
+                }
+            }
+        }
+        const QSize residentSize(200, 120);
+        const double target[3] = {0.0, 0.0, 2500.0};
+        const VolumeCamera camera = volumeCameraFor(brick, 180.0, 40.0, 140000.0, target);
+        const auto stops =
+            RadarMapCanvas::volumeTransferStops(ProductKind::Reflectivity,
+                                                RadarMapCanvas::PaletteKind::Capped);
+        const auto sharedBrick = std::make_shared<const VolumeBrick>(brick);
+        const qint64 uploadsBefore = volumeResidentUploads();
+        const qint64 framesBefore = volumeResidentFrames();
+        const VolumeGpuFrame first =
+            renderVolumeResident(sharedBrick, camera, stops, 80, residentSize);
+        if (!first.ok) {
+            std::cout << "note: resident GPU 3D device unavailable (" << first.error.toStdString()
+                      << "); skipping the resident-backend checks\n";
+        } else {
+            const VolumeGpuFrame second =
+                renderVolumeResident(sharedBrick, camera, stops, 80, residentSize);
+            const VolumeGpuFrame resized =
+                renderVolumeResident(sharedBrick, camera, stops, 80, QSize(120, 80));
+            auto changed = std::make_shared<VolumeBrick>(brick);
+            changed->value.at(0) = 255;
+            changed->present.at(0) = 1;
+            const VolumeGpuFrame reuploaded =
+                renderVolumeResident(changed, camera, stops, 80, residentSize);
+            // A brick with a different grid must replace the 3D texture. Before
+            // the grid check existed this frame uploaded a 24x24x12 buffer into
+            // the 256-wide texture still resident from the previous brick, D3D11
+            // walked the old row pitch off the end of the buffer and the process
+            // died with an access violation inside the QRhi batch. Hermetic and
+            // cheap: the same device, one smaller brick.
+            VolumeBrick smaller;
+            smaller.nx = 24;
+            smaller.ny = 24;
+            smaller.nz = 12;
+            smaller.halfExtentMeters = 50000.0;
+            smaller.topMeters = 10000.0;
+            smaller.product = ProductKind::Reflectivity;
+            const std::size_t smallerVoxels =
+                static_cast<std::size_t>(smaller.nx) * static_cast<std::size_t>(smaller.ny) *
+                static_cast<std::size_t>(smaller.nz);
+            smaller.value.assign(smallerVoxels, 0);
+            smaller.present.assign(smallerVoxels, 0);
+            for (int z = 0; z < smaller.nz; ++z) {
+                for (int y = 0; y < smaller.ny; ++y) {
+                    for (int x = 0; x < smaller.nx; ++x) {
+                        const double px = (x + 0.5) / smaller.nx - 0.5;
+                        const double py = (y + 0.5) / smaller.ny - 0.5;
+                        if (std::sqrt(px * px + py * py) > 0.28) continue;
+                        const std::size_t flat =
+                            (static_cast<std::size_t>(z) * smaller.ny + y) * smaller.nx + x;
+                        smaller.value[flat] = 180;
+                        smaller.present[flat] = 1;
+                    }
+                }
+            }
+            const VolumeGpuFrame reshaped = renderVolumeResident(
+                std::make_shared<const VolumeBrick>(smaller), camera, stops, 80, residentSize);
+            const qint64 uploads = volumeResidentUploads() - uploadsBefore;
+            const qint64 frames = volumeResidentFrames() - framesBefore;
+            const auto litFractionOf = [](const QImage& frame) {
+                if (frame.isNull()) return 0.0;
+                long long lit = 0;
+                for (int y = 0; y < frame.height(); ++y) {
+                    const auto* line = reinterpret_cast<const QRgb*>(frame.constScanLine(y));
+                    for (int x = 0; x < frame.width(); ++x) {
+                        const QRgb px = line[x];
+                        if (qRed(px) + qGreen(px) + qBlue(px) > 90) ++lit;
+                    }
+                }
+                return static_cast<double>(lit) /
+                       (static_cast<double>(frame.width()) * frame.height());
+            };
+            const double lit = litFractionOf(second.image);
+            std::cout << "resident GPU 3D: backend=" << first.backend.toStdString()
+                      << " device=" << first.device.toStdString()
+                      << " first_frame_ms=" << first.firstFrameMs
+                      << " frame_ms=" << second.frameMs << " uploads=" << uploads
+                      << " frames=" << frames << " lit=" << lit << '\n'
+                      << std::flush;
+            if (!second.ok || !resized.ok || !reuploaded.ok || !reshaped.ok) {
+                std::cerr << "resident GPU 3D frame failed: " << second.error.toStdString() << " / "
+                          << resized.error.toStdString() << " / "
+                          << reuploaded.error.toStdString() << " / "
+                          << reshaped.error.toStdString() << '\n';
+                return 1;
+            }
+            if (reshaped.image.isNull()) {
+                std::cerr << "resident GPU 3D drew nothing after the brick grid changed\n";
+                return 1;
+            }
+            if (uploads != 3) {
+                std::cerr << "resident GPU 3D uploaded the brick " << uploads
+                          << " times; expected 3 (same brick twice + resize + one changed brick + "
+                             "one reshaped brick)\n";
+                return 1;
+            }
+            if (frames != 5) {
+                std::cerr << "resident GPU 3D completed " << frames << " frames; expected 5\n";
+                return 1;
+            }
+            if (first.image != second.image) {
+                std::cerr << "resident GPU 3D produced different images for one camera\n";
+                return 1;
+            }
+            if (lit < 0.02 || lit > 0.98) {
+                std::cerr << "resident GPU 3D frame is empty or uniform: lit_fraction=" << lit
+                          << '\n';
+                return 1;
+            }
+
+            // The shipping panel's toggle, with the GPU asked for: a small
+            // in-memory volume, and the frame on the widget must be the GPU's.
+            DecodedChunk chunk;
+            chunk.radarId = "KTLX";
+            chunk.messageCount = 1;
+            chunk.momentEncoding = MomentEncoding::NexradMessage31;
+            for (int sweep = 0; sweep < 3; ++sweep) {
+                for (int ray = 0; ray < 90; ++ray) {
+                    DecodedRay decodedRay;
+                    decodedRay.azimuthDegrees = static_cast<float>(ray * 4);
+                    decodedRay.azimuthResolutionDegrees = 1.0F;
+                    decodedRay.elevationNumber = static_cast<std::uint8_t>(sweep);
+                    decodedRay.elevationDegrees = static_cast<float>(0.5 + sweep * 5.0);
+                    decodedRay.gateCount = 120;
+                    decodedRay.firstGateMeters = 1000;
+                    decodedRay.gateSpacingMeters = 1000;
+                    const auto reflectivity =
+                        static_cast<std::size_t>(ProductKind::Reflectivity);
+                    decodedRay.firstGateByProduct.at(reflectivity) = 1000;
+                    decodedRay.gateSpacingByProduct.at(reflectivity) = 1000;
+                    decodedRay.scaleByProduct.at(reflectivity) = 0.5F;
+                    decodedRay.offsetByProduct.at(reflectivity) = 0.0F;
+                    auto& gates = decodedRay.fields.at(reflectivity);
+                    gates.resize(120);
+                    for (int gate = 0; gate < 120; ++gate)
+                        gates[static_cast<std::size_t>(gate)] =
+                            static_cast<std::uint16_t>(30 + (gate / 10) % 40);
+                    chunk.rays.push_back(std::move(decodedRay));
+                }
+            }
+            RadarMapCanvas panel;
+            panel.resize(480, 300);
+            panel.setDecodedChunk(chunk, QDateTime::currentDateTimeUtc());
+            panel.setProduct(ProductKind::Reflectivity);
+            panel.setVolume3dBackend(RadarMapCanvas::VolumeBackend::Gpu);
+            panel.setVolume3dMode(true);
+            QElapsedTimer panelClock;
+            panelClock.start();
+            while (panel.volumeRenderMs() <= 0.0 && panelClock.elapsed() < 30000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                QThread::msleep(5);
+            }
+            const QImage painted = panel.grab().toImage();
+            const double panelLit = litFractionOf(painted);
+            std::cout << "panel 3D: backend=" << (panel.volumeFrameGpu() ? "GPU" : "CPU")
+                      << " render_ms=" << panel.volumeRenderMs() << " panel_lit=" << panelLit
+                      << " gpu_error=\"" << panel.volumeGpuError().toStdString() << "\""
+                      << " first_frame_ms=" << panelClock.elapsed() << '\n'
+                      << std::flush;
+            if (panel.volumeRenderMs() <= 0.0) {
+                std::cerr << "panel 3D never published a frame\n";
+                return 1;
+            }
+            if (!panel.volumeFrameGpu()) {
+                std::cerr << "panel was asked for the GPU backend but reports CPU: "
+                          << panel.volumeGpuError().toStdString() << '\n';
+                return 1;
+            }
+            if (panelLit < 0.005) {
+                std::cerr << "panel 3D painted no volume: lit_fraction=" << panelLit << '\n';
+                return 1;
+            }
+            // The CPU march stays a real path, not dead code: asking for it must
+            // flip the chip and still produce a frame.
+            panel.setVolume3dBackend(RadarMapCanvas::VolumeBackend::Cpu);
+            if (panel.volumeFrameGpu()) {
+                std::cerr << "panel kept the GPU label after the CPU backend was selected\n";
+                return 1;
+            }
+        }
+
+        // --- the 3D chip names the backend that drew the frame (t_51d7af1a) ---
+        // Hermetic text rules, no device needed: the operator must be able to
+        // tell a GPU frame from a CPU one by reading the chip, a CPU frame must
+        // never name an RHI API, and no backend may be paired with a cost that
+        // has not been measured.
+        {
+            RadarMapCanvas::Volume3dChipState state;
+            state.radarName = QStringLiteral("KTLX");
+            state.productShortName = QStringLiteral("REF");
+            state.renderMs = 4.0;
+            state.frameGpu = true;
+            state.gpuBackend = QStringLiteral("Direct3D 11");
+            const QString gpuText = RadarMapCanvas::volume3dChipLabel(state);
+            std::cout << "3D chip: gpu=\"" << gpuText.toStdString() << "\"";
+            if (!gpuText.contains(QStringLiteral("Direct3D 11")) ||
+                !gpuText.contains(QStringLiteral("4 ms")) ||
+                !gpuText.contains(QStringLiteral("KTLX REF"))) {
+                std::cerr << "\n3D chip did not name the GPU backend and its frame cost: "
+                          << gpuText.toStdString() << '\n';
+                return 1;
+            }
+            state.renderMs = 1048.0;
+            state.frameGpu = false;
+            state.gpuBackend.clear();
+            const QString cpuText = RadarMapCanvas::volume3dChipLabel(state);
+            std::cout << " cpu=\"" << cpuText.toStdString() << "\"";
+            if (cpuText != QStringLiteral("3D  KTLX REF  1048 ms  (CPU)")) {
+                std::cerr << "\n3D chip text for a CPU frame is wrong: "
+                          << cpuText.toStdString() << '\n';
+                return 1;
+            }
+            if (gpuText == cpuText) {
+                std::cerr << "\n3D chip reads the same for both backends: "
+                          << gpuText.toStdString() << '\n';
+                return 1;
+            }
+            // A stale gpuBackend string must not leak onto a CPU frame: the
+            // formatter reads it only when the frame came from the GPU.
+            state.renderMs = 12.0;
+            state.frameGpu = false;
+            state.gpuBackend = QStringLiteral("Direct3D 11");
+            if (RadarMapCanvas::volume3dChipLabel(state).contains(QStringLiteral("Direct3D"))) {
+                std::cerr << "\n3D chip named an RHI API for a CPU frame\n";
+                return 1;
+            }
+            // Nothing measured yet: no cost, and the backend being asked for.
+            state.renderMs = 0.0;
+            state.pendingGpu = true;
+            const QString pendingText = RadarMapCanvas::volume3dChipLabel(state);
+            std::cout << " pending=\"" << pendingText.toStdString() << "\"\n";
+            if (pendingText.contains(QStringLiteral(" ms")) ||
+                !pendingText.contains(QStringLiteral("rendering (GPU)"))) {
+                std::cerr << "\n3D chip claimed a cost before a frame landed: "
+                          << pendingText.toStdString() << '\n';
                 return 1;
             }
         }

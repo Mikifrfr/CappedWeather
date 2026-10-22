@@ -2,6 +2,7 @@
 
 #include "app/http_client.hpp"
 #include "app/volume_camera.hpp"
+#include "app/volume_canvas.hpp"
 #include "core/radar_geometry.hpp"
 #include "core/scan_diagnostics.hpp"
 
@@ -17,6 +18,7 @@
 #include <QCache>
 #include <QClipboard>
 #include <QContextMenuEvent>
+#include <QDebug>
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QPointer>
@@ -5631,13 +5633,48 @@ void RadarMapCanvas::setVolume3dMode(const bool enabled) {
         volumeTarget_[0] = 0.0;
         volumeTarget_[1] = 0.0;
         volumeTarget_[2] = 7000.0;
+        // Toggling the view on is the operator asking again: retry a GPU that
+        // failed earlier instead of leaving the panel on the CPU march for the
+        // rest of the session. The failure stays sticky per frame (a dead device
+        // is not retried on every orbit), not per deliberate toggle.
+        volumeGpuFailed_ = false;
+        volumeGpuError_.clear();
         rebuildVolumeRender();
     }
     update();
     emit volume3dModeToggled(volume3d_);
 }
 
+void RadarMapCanvas::setVolume3dBackend(const VolumeBackend backend) {
+    if (volumeBackend_ == backend) return;
+    volumeBackend_ = backend;
+    // A deliberate re-selection is a retry: the sticky failure belongs to the
+    // previous attempt, not to this one.
+    volumeGpuFailed_ = false;
+    volumeGpuError_.clear();
+    // The frame on screen was drawn by the previous backend, so its label and
+    // its cost stop describing this panel the moment the backend changes. Drop
+    // them and let the next frame repaint; the panel says "Building" for the
+    // few hundred ms that takes rather than showing a backend that is no longer
+    // drawing it.
+    volumeImage_ = QImage();
+    volumeRenderMs_ = 0.0;
+    volumeFrameGpu_ = false;
+    volumeGpuBackend_.clear();
+    if (volume3d_) rebuildVolumeRender();
+    update();
+}
+
 namespace {
+
+// The operator's escape hatch out of the GPU path, read once: the probe and the
+// bench A/B the two backends by setting CAPPEDWEATHER_VOLUME_GPU=0 on the same
+// binary. Not a UI action, so it does not get a shortcut-dialog line.
+bool volumeGpuDisabledByEnv() {
+    static const bool disabled = qEnvironmentVariableIsSet("CAPPEDWEATHER_VOLUME_GPU") &&
+                                 qEnvironmentVariableIntValue("CAPPEDWEATHER_VOLUME_GPU") == 0;
+    return disabled;
+}
 
 // Project an ENU point to panel pixels with a volume camera. False when the
 // point is behind the eye. Inverse of the marcher's pixel-to-ray mapping.
@@ -5740,13 +5777,20 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
     const auto orbitDistance = volumeDistance_;
     double orbitTarget[3] = {volumeTarget_[0], volumeTarget_[1], volumeTarget_[2]};
     // While orbiting, march at third resolution for responsiveness and
-    // refine on release; idle renders use half resolution.
+    // refine on release; idle renders use half resolution. Same policy on both
+    // backends so GPU and CPU frames describe the same rays.
     const int divisor = fast ? 3 : 2;
+    // Auto means "GPU unless it already failed or the operator turned it off";
+    // a failed device stays failed so a panel never slideshows on 900 ms CPU
+    // frames without saying so.
+    const bool useGpu = volumeBackend_ == VolumeBackend::Gpu ||
+                        (volumeBackend_ == VolumeBackend::Auto && !volumeGpuFailed_ &&
+                         !volumeGpuDisabledByEnv());
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start(
         [guard, requestId, chunk, product, palette, customPalette, opacity, brick, brickChunk,
          brickProduct, box, cachedBox, logicalSize, orbitAzimuth, orbitElevation, orbitDistance,
-         orbitTarget, divisor] {
+         orbitTarget, divisor, useGpu] {
             auto stale = [&] {
                 return !guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed);
             };
@@ -5793,12 +5837,77 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             const std::vector<RgbaStop> stops = volumeTransferStops(product, palette, customPalette);
             const int renderWidth = std::max(1, logicalSize.width() / divisor);
             const int renderHeight = std::max(1, logicalSize.height() / divisor);
-            QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
-            image.fill(Qt::transparent);
             const double frameTarget[3] = {brickNow->centerXMeters, brickNow->centerYMeters,
                                            orbitTarget[2]};
             const VolumeCamera camera =
                 volumeCameraFor(*brickNow, orbitAzimuth, orbitElevation, orbitDistance, frameTarget);
+            // One publish path for both backends: same staleness gate, same
+            // fields, so the chip, the orbit grid and the next frame never care
+            // which march produced the image. `gpuBackend` is the API the device
+            // reported ("Direct3D 11"), empty for a CPU frame; the chip names it.
+            const auto publish = [&](QImage rendered, const double renderMs,
+                                     const double buildMs, const bool gpu,
+                                     const QString& gpuBackend) {
+                if (stale()) return;
+                QMetaObject::invokeMethod(guard, [guard, requestId, brickNow,
+                                                 rendered = std::move(rendered), renderMs, buildMs,
+                                                 logicalSize, orbitAzimuth, orbitElevation,
+                                                 orbitDistance, orbitTarget, gpu, gpuBackend] {
+                    if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
+                        return;
+                    guard->brick_ = brickNow;
+                    guard->brickChunk_ = guard->chunk_;
+                    guard->brickProduct_ = guard->product_;
+                    // The box this brick really covers, read back from the brick
+                    // itself so the cache key can never disagree with the data.
+                    guard->brickBox_ = Volume3dBox{brickNow->centerXMeters,
+                                                   brickNow->centerYMeters,
+                                                   brickNow->halfExtentMeters};
+                    guard->volumeImage_ = rendered;
+                    guard->volumeImageLogicalSize_ = logicalSize;
+                    guard->volumeRenderMs_ = renderMs;
+                    if (buildMs > 0.0) guard->volumeBuildMs_ = buildMs;
+                    // The chip names the backend that produced *this* frame, and
+                    // the ms beside it is this frame's. No optimistic label: a
+                    // panel that fell back must never read "(Direct3D 11)".
+                    guard->volumeFrameGpu_ = gpu;
+                    guard->volumeGpuBackend_ = gpu ? gpuBackend : QString();
+                    if (gpu) {
+                        guard->volumeGpuFailed_ = false;
+                        guard->volumeGpuError_.clear();
+                    }
+                    guard->volumeImageAzimuth_ = orbitAzimuth;
+                    guard->volumeImageElevation_ = orbitElevation;
+                    guard->volumeImageDistance_ = orbitDistance;
+                    for (int axis = 0; axis < 3; ++axis)
+                        guard->volumeImageTarget_[axis] = orbitTarget[axis];
+                    guard->volumeTarget_[0] = brickNow->centerXMeters;
+                    guard->volumeTarget_[1] = brickNow->centerYMeters;
+                    guard->update();
+                }, Qt::QueuedConnection);
+            };
+            if (useGpu) {
+                const VolumeGpuFrame frame = renderVolumeResident(
+                    brickNow, camera, stops, opacity, QSize(renderWidth, renderHeight));
+                if (frame.ok) {
+                    publish(frame.image, frame.frameMs, buildMs, true, frame.backend);
+                    return;
+                }
+                // One line, once: the panel is marching on the CPU because the
+                // device would not run, not because nobody asked. Then fall
+                // through, because this request still owes the panel a frame.
+                QMetaObject::invokeMethod(guard, [guard, message = frame.error] {
+                    if (!guard) return;
+                    if (guard->volumeGpuFailed_ && guard->volumeGpuError_ == message) return;
+                    guard->volumeGpuFailed_ = true;
+                    guard->volumeGpuError_ = message;
+                    guard->volumeFrameGpu_ = false;
+                    qWarning().noquote() << "3D: GPU raymarch failed, using the CPU march -" << message;
+                    guard->update();
+                }, Qt::QueuedConnection);
+            }
+            QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
+            image.fill(Qt::transparent);
             const double spanX = 2.0 * brickNow->halfExtentMeters / brickNow->nx;
             const double spanY = 2.0 * brickNow->halfExtentMeters / brickNow->ny;
             const double spanZ = brickNow->topMeters / brickNow->nz;
@@ -5873,33 +5982,9 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 }
             }
             const double renderMs = static_cast<double>(timer.elapsed());
-            if (stale()) return;
-            QMetaObject::invokeMethod(guard, [guard, requestId, brickNow,
-                                             image = std::move(image), renderMs, buildMs,
-                                             logicalSize, orbitAzimuth, orbitElevation,
-                                             orbitDistance, orbitTarget] {
-                if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
-                    return;
-                guard->brick_ = brickNow;
-                guard->brickChunk_ = guard->chunk_;
-                guard->brickProduct_ = guard->product_;
-                // The box this brick really covers, read back from the brick
-                // itself so the cache key can never disagree with the data.
-                guard->brickBox_ = Volume3dBox{brickNow->centerXMeters, brickNow->centerYMeters,
-                                               brickNow->halfExtentMeters};
-                guard->volumeImage_ = image;
-                guard->volumeImageLogicalSize_ = logicalSize;
-                guard->volumeRenderMs_ = renderMs;
-                if (buildMs > 0.0) guard->volumeBuildMs_ = buildMs;
-                guard->volumeImageAzimuth_ = orbitAzimuth;
-                guard->volumeImageElevation_ = orbitElevation;
-                guard->volumeImageDistance_ = orbitDistance;
-                for (int axis = 0; axis < 3; ++axis)
-                    guard->volumeImageTarget_[axis] = orbitTarget[axis];
-                guard->volumeTarget_[0] = brickNow->centerXMeters;
-                guard->volumeTarget_[1] = brickNow->centerYMeters;
-                guard->update();
-            }, Qt::QueuedConnection);
+            // CPU frame: no RHI API to name, so the chip's backend field is the
+            // panel's own literal "CPU".
+            publish(std::move(image), renderMs, buildMs, false, QString());
         });
 }
 
@@ -6045,6 +6130,32 @@ bool RadarMapCanvas::applyVolume3dBoxDrag(const QPoint& start, const QPoint& end
     return true;
 }
 
+QString RadarMapCanvas::volume3dChipLabel(const Volume3dChipState& state) {
+    // Shape: "3D  KTLX REF  4 ms  (Direct3D 11)" for a GPU frame and
+    // "3D  KTLX REF  1048 ms  (CPU)" for a CPU one - the operator can tell which
+    // raymarcher drew the picture without asking. Before any frame has measured
+    // a cost the chip says so instead of pairing a backend with a number it did
+    // not produce.
+    const QString radarName = state.radarName.isEmpty() ? QStringLiteral("...") : state.radarName;
+    if (state.renderMs <= 0.0) {
+        return QStringLiteral("3D  %1 %2  rendering (%3)")
+            .arg(radarName)
+            .arg(state.productShortName)
+            .arg(state.pendingGpu ? QStringLiteral("GPU") : QStringLiteral("CPU"));
+    }
+    // Never name an API the frame did not come from: the backend string is only
+    // read when the GPU drew it, and the CPU branch is the literal "CPU".
+    const QString backendName =
+        state.frameGpu ? (state.gpuBackend.isEmpty() ? QStringLiteral("GPU") : state.gpuBackend)
+                       : QStringLiteral("CPU");
+    const int milliseconds = static_cast<int>(state.renderMs);
+    return QStringLiteral("3D  %1 %2  %3 ms  (%4)")
+        .arg(radarName)
+        .arg(state.productShortName)
+        .arg(milliseconds)
+        .arg(backendName);
+}
+
 void RadarMapCanvas::paintVolume3d(QPainter& painter) {
     painter.fillRect(rect(), QColor(8, 13, 16));
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -6072,10 +6183,19 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
     painter.setFont(hudFont(8, QFont::DemiBold));
     painter.setPen(QColor(232, 238, 240));
     painter.setBrush(QColor(8, 15, 19, 205));
-    QString label = QStringLiteral("3D preview (CPU)  %1 %2  %3 ms")
-                        .arg(selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_)
-                        .arg(shortName)
-                        .arg(static_cast<int>(volumeRenderMs_));
+    // The chip names the backend that produced the frame on screen, and the ms
+    // beside it is that frame's cost. `volumeGpuBackend_` is the API the device
+    // reported ("Direct3D 11"), so a panel drawing through the CPU never reads a
+    // GPU name and vice versa - the two are written together by publish().
+    Volume3dChipState chipState;
+    chipState.radarName = selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_;
+    chipState.productShortName = shortName;
+    chipState.renderMs = volumeRenderMs_;
+    chipState.frameGpu = volumeFrameGpu_;
+    chipState.gpuBackend = volumeGpuBackend_;
+    chipState.pendingGpu = volumeBackend_ != VolumeBackend::Cpu && !volumeGpuFailed_ &&
+                           !volumeGpuDisabledByEnv();
+    QString label = volume3dChipLabel(chipState);
     if (brick_ && !brickBox_.fullRange()) {
         // The box is the user's choice, so say which one is on screen: a 40 km
         // box and the full range are not the same picture.
@@ -6110,6 +6230,19 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
     painter.drawText(chip.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
                      painter.fontMetrics().elidedText(label, Qt::ElideRight,
                                                       static_cast<int>(chip.width()) - 16));
+    if (!volumeGpuError_.isEmpty()) {
+        // One line under the chip: the panel is marching on the CPU and this is
+        // why. Text, no icon, elided rather than wrapped.
+        const QRectF note(12.0, 34.0, qMin(560.0, static_cast<double>(width()) - 24.0), 18.0);
+        painter.setBrush(QColor(26, 14, 10, 215));
+        painter.setPen(QColor(240, 190, 150));
+        painter.drawRoundedRect(note, 4, 4);
+        painter.setFont(hudFont(8));
+        painter.drawText(note.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(
+                             tr("CPU fallback: %1").arg(volumeGpuError_), Qt::ElideRight,
+                             static_cast<int>(note.width()) - 16));
+    }
     painter.setFont(hudFont(8));
     painter.setPen(QColor(160, 175, 182));
     painter.drawText(QRectF(12.0, height() - 30.0, width() - 24.0, 20.0),
@@ -6994,7 +7127,10 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     }
 
     menu.addSeparator();
-    const auto volume3dAction = menu.addAction(tr("3D volume preview (CPU)"));
+    // Backend-neutral on purpose: the 3D toggle picks GPU when the device starts
+    // and the CPU march otherwise, and the 3D view's own chip names whichever
+    // one is drawing. A "(CPU)" here would be a claim this menu cannot check.
+    const auto volume3dAction = menu.addAction(tr("3D volume preview"));
     volume3dAction->setCheckable(true);
     volume3dAction->setChecked(false);
     connect(volume3dAction, &QAction::toggled, this, [this](bool enabled) {

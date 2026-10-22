@@ -155,7 +155,10 @@ Reconstructed voxels are marked, not blended in silently:
 - The renderer samples filled voxels at full weight. Discounting their opacity
   would recreate the shell look this pass exists to remove; the honesty lives in
   the chip instead, which states the fill whenever there is one:
-  `3D preview (CPU)  KTLX REF  1041 ms  - 17 tilts interpolated (78% reconstructed)`.
+  `3D  KTLX REF  1041 ms  (CPU)  - 17 tilts interpolated (78% reconstructed)`.
+  The `(CPU)` / `(Direct3D 11)` field names the raymarcher that drew the frame;
+  before card t_51d7af1a the chip read `3D preview (CPU)` and could not tell a
+  GPU frame from a CPU one.
 
 Same volume, same camera, same binary with the fill switched off and on
 (`tools/volume3d_probe`, 1440x900):

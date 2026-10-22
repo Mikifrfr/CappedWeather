@@ -40,9 +40,30 @@ struct VolumeGpuFrame {
 // reads it back and waits. Returns ok == false with a one-line error instead of
 // throwing or returning a blank image with no explanation. `frames` repeats the
 // march so `frameMs` describes a frame with the volume already uploaded.
+// Used by tools/volume3d_probe and the hermetic test, which need GPU pixels
+// without a window and must not disturb the panel's device.
 VolumeGpuFrame renderVolumeOffscreen(const VolumeBrick& brick, const VolumeCamera& camera,
                                      const std::vector<RgbaStop>& stops, int opacityPercent,
                                      const QSize& pixelSize, int frames = 3);
+
+// The panel's backend (card t_f71a0be0): the same march on a device that stays
+// resident for the process, with the brick's 3D texture kept uploaded across
+// frames. Blocking, so call it from a worker thread; returns ok == false with a
+// one-line error when the device cannot start, the shader fails, or the GPU
+// stops answering, and the caller (RadarMapCanvas) falls back to its CPU march.
+// `frameMs` is the march plus readback of one frame; `firstFrameMs` is the whole
+// call, so on a fresh device it carries the 91-132 ms device creation.
+VolumeGpuFrame renderVolumeResident(std::shared_ptr<const VolumeBrick> brick,
+                                    const VolumeCamera& camera,
+                                    const std::vector<RgbaStop>& stops, int opacityPercent,
+                                    const QSize& pixelSize);
+
+// Frames the resident device has completed, and how many times it uploaded a
+// brick. Proves a camera move reuses the resident texture instead of pushing
+// 16.8 MB again (probe + test read these).
+qint64 volumeResidentFrames();
+qint64 volumeResidentUploads();
+
 
 
 class VolumeCanvas : public QRhiWidget {
