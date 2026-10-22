@@ -40,6 +40,23 @@ option(CAPPEDWEATHER_REQUIRE_HDF5
     "Fail configuration instead of building the stubbed ODIM reader when HDF5 is unavailable"
     ${_cw_require_hdf5_default})
 
+# Qt Shader Tools (qsb) bakes the GLSL volume shaders in src/app/shaders into
+# the .qsb QRhi feeds to D3D11 (HLSL), Vulkan (SPIR-V), OpenGL (GLSL 150) and
+# Metal (MSL). Without the module the 3D volume keeps its embedded HLSL string
+# and create() refuses every backend except D3D11. Release builds should set
+# this ON so a tag build fails loudly instead of shipping a package whose GPU
+# 3D cannot start; dev kits without the module stay OFF and get one status
+# line at configure time.
+# docs/gpu-volume-rendering.md records the decision (card t_9691d611).
+if(DEFINED ENV{CAPPEDWEATHER_REQUIRE_SHADER_TOOLS} AND NOT DEFINED CAPPEDWEATHER_REQUIRE_SHADER_TOOLS)
+    set(_cw_require_shader_tools_default "$ENV{CAPPEDWEATHER_REQUIRE_SHADER_TOOLS}")
+else()
+    set(_cw_require_shader_tools_default "OFF")
+endif()
+option(CAPPEDWEATHER_REQUIRE_SHADER_TOOLS
+    "Fail configuration instead of building the HLSL/D3D11-only volume shader when Qt Shader Tools (qsb) is unavailable"
+    ${_cw_require_shader_tools_default})
+
 include(CTest)
 
 add_library(cappedweather_core STATIC
@@ -171,6 +188,12 @@ if(CAPPEDWEATHER_BUILD_APP)
     # alerts without map polygons.
     find_package(ZLIB QUIET)
     set(CAPPEDWEATHER_HAS_ZLIB ${ZLIB_FOUND})
+
+    # Shader Tools is a separate Qt component (aqt module: qtshadertools), not
+    # part of the base install. Optional here; CAPPEDWEATHER_REQUIRE_SHADER_TOOLS
+    # turns its absence into a configure error for release builds.
+    find_package(Qt6 6.4 COMPONENTS ShaderTools QUIET)
+    set(CAPPEDWEATHER_QT_SHADER_TOOLS ${Qt6ShaderTools_FOUND})
 
     if(CAPPEDWEATHER_QT_FOUND AND BZip2_FOUND)
         qt_standard_project_setup()
@@ -451,6 +474,56 @@ if(CAPPEDWEATHER_BUILD_APP)
                 tools/volume3d_probe.cpp
             )
             target_link_libraries(volume3d_probe PRIVATE cappedweather_ui)
+        endif()
+
+        # One shader set for every QRhi backend: the GLSL sources in
+        # src/app/shaders bake at build time into ":<prefix>/volume.vert.qsb"
+        # and ":<prefix>/volume.frag.qsb", each carrying SPIR-V (Vulkan), GLSL
+        # 150 (OpenGL), HLSL 5.0 (D3D11) and MSL 1.2 (Metal). volume_canvas.cpp
+        # loads them when CAPPEDWEATHER_HAS_VOLUME_QSB is defined and keeps its
+        # HLSL string otherwise, so a kit without the module still builds the
+        # D3D11 path.
+        #
+        # The qrc is attached per executable rather than to cappedweather_ui: a
+        # resource inside a static library is dropped by the linker unless the
+        # consumer calls Q_INIT_RESOURCE(), and every target that renders the 3D
+        # volume would have to remember. On the executables it is registered
+        # before main() runs.
+        #
+        # GLSL 150 / HLSL 50 / MSL 12 instead of the Qt default 100 es,120,150:
+        # the march loop bound (maxSteps) is a uniform, and GLSL 100 es/120
+        # require constant loop bounds. QRhi's OpenGL backend needs GL 3.3 /
+        # GLSL 150 anyway, and SPIR-V is always baked.
+        if(CAPPEDWEATHER_QT_SHADER_TOOLS)
+            foreach(_cw_shader_target
+                    CappedWeather
+                    cappedweather_ui_tests
+                    volume3d_probe
+                    pan_benchmark)
+                if(TARGET ${_cw_shader_target})
+                    qt_add_shaders(${_cw_shader_target} "volume_shaders"
+                        PREFIX "/shaders"
+                        BASE "${CMAKE_CURRENT_SOURCE_DIR}/src/app/shaders"
+                        GLSL 150
+                        HLSL 50
+                        MSL 12
+                        FILES
+                            src/app/shaders/volume.vert
+                            src/app/shaders/volume.frag
+                    )
+                endif()
+            endforeach()
+            target_compile_definitions(cappedweather_ui PUBLIC CAPPEDWEATHER_HAS_VOLUME_QSB=1)
+            message(STATUS "Qt Shader Tools ${Qt6ShaderTools_VERSION} found: volume shader bakes to a cross-API .qsb")
+        elseif(CAPPEDWEATHER_REQUIRE_SHADER_TOOLS)
+            message(FATAL_ERROR
+                "CAPPEDWEATHER_REQUIRE_SHADER_TOOLS=ON but Qt6::ShaderTools was not found under "
+                "${CAPPEDWEATHER_QT_ROOT}.\n"
+                "Install the module into the kit (aqtinstall):\n"
+                "  aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -m qtshadertools --noarchives -O C:/Qt\n"
+                "or configure with -DCAPPEDWEATHER_REQUIRE_SHADER_TOOLS=OFF to build the HLSL/D3D11-only path.")
+        else()
+            message(STATUS "Qt Shader Tools (qsb) not found: the 3D volume keeps the HLSL/D3D11-only shader")
         endif()
 
         set_target_properties(CappedWeather PROPERTIES

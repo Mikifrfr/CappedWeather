@@ -97,18 +97,26 @@ int main(int argc, char** argv) {
     QStringList arguments = application.arguments();
     const bool gpu = arguments.removeAll(QStringLiteral("--gpu")) > 0;
     QSize size(1440, 900);
+    QString requestedBackend;
     for (int index = 0; index < arguments.size(); ++index) {
         if (arguments.at(index).startsWith(QStringLiteral("--size=")))
             size = parseSize(arguments.at(index).mid(7), size);
+        else if (arguments.at(index).startsWith(QStringLiteral("--backend=")))
+            requestedBackend = arguments.at(index).mid(10).trimmed().toLower();
     }
     arguments.erase(std::remove_if(arguments.begin(), arguments.end(),
                                    [](const QString& value) {
-                                       return value.startsWith(QStringLiteral("--size="));
+                                       return value.startsWith(QStringLiteral("--size=")) ||
+                                              value.startsWith(QStringLiteral("--backend="));
                                    }),
                     arguments.end());
+    // Cross-API record (card t_9691d611): one binary, one flag, each backend
+    // measured on its own. Set before any device exists; every QRhi creation in
+    // volume_canvas.cpp reads it.
+    if (!requestedBackend.isEmpty()) qputenv("CAPPEDWEATHER_VOLUME_RHI", requestedBackend.toUtf8());
     if (arguments.size() < 3) {
         std::cerr << "usage: volume3d_probe <archive_V06> <out.png> [product] [settle_ms] "
-                     "[--gpu] [--size=WxH]\n";
+                     "[--gpu] [--size=WxH] [--backend=opengl|vulkan|d3d11|d3d12|metal]\n";
         return 2;
     }
     const QString archivePath = arguments.at(1);
@@ -149,10 +157,11 @@ int main(int argc, char** argv) {
     const int opacityPercent = 80; // RadarMapCanvas::radarOpacity_ default
 
     std::printf("volume3d_probe=passed radar=%s rays=%zu product=%s size=%dx%d "
-                "brick=%dx%dx%d present_voxels=%zu voxel_m=%.1f\n",
+                "brick=%dx%dx%d present_voxels=%zu voxel_m=%.1f backend_requested=%s\n",
                 decoded->radarId.toStdString().c_str(), decoded->decoded.rays.size(),
                 productName.toStdString().c_str(), size.width(), size.height(), brick.nx, brick.ny,
-                brick.nz, presentVoxels, 2.0 * brick.halfExtentMeters / std::max(1, brick.nx));
+                brick.nz, presentVoxels, 2.0 * brick.halfExtentMeters / std::max(1, brick.nx),
+                requestedBackend.isEmpty() ? "auto" : requestedBackend.toStdString().c_str());
 
     if (!gpu) {
         RadarMapCanvas canvas;
@@ -188,9 +197,11 @@ int main(int argc, char** argv) {
         const QString offscreenPath = outputPath + QStringLiteral("-offscreen.png");
         offscreen.image.save(offscreenPath, "PNG");
         offscreenStats = statsFor(offscreen.image);
-        std::printf("gpu_offscreen backend=%s device=%s first_frame_ms=%.2f frame_ms=%.2f "
+        std::printf("gpu_offscreen backend=%s shader=%s device=%s first_frame_ms=%.2f frame_ms=%.2f "
                     "lit_fraction=%.5f checksum=%lld screenshot=%s\n",
-                    offscreen.backend.toStdString().c_str(), offscreen.device.toStdString().c_str(),
+                    offscreen.backend.toStdString().c_str(),
+                    offscreen.shader.toStdString().c_str(),
+                    offscreen.device.toStdString().c_str(),
                     offscreen.firstFrameMs, offscreen.frameMs, offscreenStats.litFraction,
                     offscreenStats.checksum, offscreenPath.toStdString().c_str());
     } else {
@@ -223,9 +234,10 @@ int main(int argc, char** argv) {
             widgetStats = statsFor(widgetFrame.convertToFormat(QImage::Format_RGB32));
         }
     }
-    std::printf("gpu_widget ready=%d backend=%s frames=%lld submit_ms=%.2f "
+    std::printf("gpu_widget ready=%d backend=%s shader=%s frames=%lld submit_ms=%.2f "
                 "lit_fraction=%.5f status=\"%s\"\n",
                 volumeCanvas->gpuReady() ? 1 : 0, volumeCanvas->backendName().toStdString().c_str(),
+                volumeCanvas->shaderSource().toStdString().c_str(),
                 static_cast<long long>(volumeCanvas->frameCount()), volumeCanvas->lastFrameMs(),
                 widgetStats.litFraction, volumeCanvas->statusLine().toStdString().c_str());
 
@@ -241,8 +253,10 @@ int main(int argc, char** argv) {
         if (first.ok && second.ok) {
             const FrameStats stats = statsFor(second.image);
             second.image.save(outputPath + QStringLiteral("-resident.png"), "PNG");
-            std::printf("gpu_resident first_frame_ms=%.2f frame_ms=%.2f first_march_ms=%.2f "
-                        "uploads=%lld frames=%lld lit_fraction=%.5f checksum=%lld device=%s\n",
+            std::printf("gpu_resident api=%s shader=%s first_frame_ms=%.2f frame_ms=%.2f "
+                        "first_march_ms=%.2f uploads=%lld frames=%lld lit_fraction=%.5f "
+                        "checksum=%lld device=%s\n",
+                        first.backend.toStdString().c_str(), first.shader.toStdString().c_str(),
                         first.firstFrameMs, second.frameMs, first.frameMs,
                         static_cast<long long>(volumeResidentUploads()),
                         static_cast<long long>(volumeResidentFrames()), stats.litFraction,
@@ -278,10 +292,11 @@ int main(int argc, char** argv) {
         panelFrame.save(panelPath, "PNG");
         panelStats = statsFor(panelFrame);
     }
-    std::printf("panel_gpu backend=%s render_ms=%.1f toggle_first_frame_ms=%.1f "
+    std::printf("panel_gpu backend=%s api=%s render_ms=%.1f toggle_first_frame_ms=%.1f "
                 "lit_fraction=%.5f checksum=%lld gpu_error=\"%s\" screenshot=%s\n",
-                gpuPanel.volumeFrameGpu() ? "GPU" : "CPU", gpuPanel.volumeRenderMs(), toggleMs,
-                panelStats.litFraction, panelStats.checksum,
+                gpuPanel.volumeFrameGpu() ? "GPU" : "CPU",
+                gpuPanel.volumeGpuBackend().toStdString().c_str(), gpuPanel.volumeRenderMs(),
+                toggleMs, panelStats.litFraction, panelStats.checksum,
                 gpuPanel.volumeGpuError().toStdString().c_str(), panelPath.toStdString().c_str());
 
     // 4b. The same panel after one orbit. The first panel frame carries the
@@ -319,9 +334,11 @@ int main(int argc, char** argv) {
         const QImage settledFrame = gpuPanel.grab().toImage();
         if (!settledFrame.isNull())
             settledFrame.save(outputPath + QStringLiteral("-panel-gpu-settled.png"), "PNG");
-        std::printf("panel_gpu_settled backend=%s render_ms=%.2f frames=%lld applied_ms=%.1f "
+        std::printf("panel_gpu_settled backend=%s api=%s render_ms=%.2f frames=%lld applied_ms=%.1f "
                     "lit_fraction=%.5f\n",
-                    gpuPanel.volumeFrameGpu() ? "GPU" : "CPU", gpuPanel.volumeRenderMs(),
+                    gpuPanel.volumeFrameGpu() ? "GPU" : "CPU",
+                    gpuPanel.volumeGpuBackend().toStdString().c_str(),
+                    gpuPanel.volumeRenderMs(),
                     static_cast<long long>(volumeResidentFrames() - framesBefore),
                     static_cast<double>(clock.elapsed()), statsFor(settledFrame).litFraction);
     }

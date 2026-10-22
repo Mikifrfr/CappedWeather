@@ -34,6 +34,7 @@ struct VolumeGpuFrame {
     QString error;     // one line, suitable for a status chip
     QString backend;   // e.g. "Direct3D 11"
     QString device;    // e.g. "AMD Radeon RX 7800 XT"
+    QString shader;    // "qsb" (baked cross-API set) or "HLSL" (fallback build)
 };
 
 // Offscreen raymarch: creates its own QRhi device, renders into a texture,
@@ -88,6 +89,10 @@ public:
     [[nodiscard]] bool gpuReady() const;
     [[nodiscard]] QString statusLine() const;
     [[nodiscard]] QString backendName() const;
+    // "qsb" when the frame came from the baked cross-API shader set, "HLSL"
+    // when it came from the embedded D3D11-only fallback. Empty before a device
+    // exists. Proves which source a pasted number came from.
+    [[nodiscard]] QString shaderSource() const;
     [[nodiscard]] QString lastError() const;
     [[nodiscard]] double lastFrameMs() const;
     [[nodiscard]] qint64 frameCount() const;

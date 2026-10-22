@@ -6,7 +6,9 @@
 #include <QColor>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QMutex>
+#include <QOffscreenSurface>
 #include <QThread>
 #include <QVarLengthArray>
 #include <QWaitCondition>
@@ -61,12 +63,15 @@ MarchPlan marchPlanFor(const VolumeBrick& brick) {
 
 // --- shader -------------------------------------------------------------
 
-// Direct3D 11 / Shader Model 5. Authored in HLSL because this Qt install has
-// no Qt Shader Tools module (no qsb, no QShaderBaker), so there is nothing to
-// translate GLSL/SPIR-V with. QRhi accepts a QShader whose HLSL source it
-// compiles through D3DCompile at pipeline creation, which is what happens
-// here. See docs/gpu-volume-rendering.md for what that means for cross-API
-// reach.
+// The shipped shader is GLSL in src/app/shaders/volume.{vert,frag}. Qt Shader
+// Tools bakes each into a .qsb that carries SPIR-V (Vulkan), GLSL 150 (OpenGL),
+// HLSL 5.0 (D3D11) and MSL 1.2 (Metal), and QRhi picks the flavour its backend
+// asks for. That is what makes the GPU path cross-API (card t_9691d611).
+//
+// The HLSL below is the fallback for a kit built without Qt Shader Tools: no
+// qsb, so D3D11 is the only backend that can start, and create() says so
+// instead of pretending. It is the same math as the GLSL source, line for
+// line; tools/volume3d_probe compares the two images.
 const char* const kVolumeHlsl = R"HLSL(
 cbuffer Params : register(b0)
 {
@@ -177,21 +182,110 @@ float4 psMain(float4 pos : SV_Position) : SV_Target
 )HLSL";
 
 QShader hlslShader(const QShader::Stage stage, const char* entryPoint) {
-    // Deliberate-failure hook for the fallback proof in
-    // docs/gpu-volume-rendering.md ("Failure behaviour"): a broken shader source
-    // must give a one-line error and a CPU frame, never a black panel. Read once,
-    // never set by the app itself.
-    static const bool broken = qEnvironmentVariableIsSet("CAPPEDWEATHER_VOLUME_BREAK_SHADER");
     QShader shader;
     shader.setStage(stage);
-    const QShaderCode code{broken ? QByteArrayLiteral("this is not hlsl")
-                                  : QByteArray(kVolumeHlsl),
-                           QByteArray(entryPoint)};
+    const QShaderCode code{QByteArray(kVolumeHlsl), QByteArray(entryPoint)};
     // QRhi's D3D11 backend asks for the HLSL profile that matches the device
     // feature level; both keys carry the same source.
     shader.setShader(QShaderKey(QShader::HlslShader, 50), code);
     shader.setShader(QShaderKey(QShader::HlslShader, 51), code);
     return shader;
+}
+
+// One pair of stages a backend can consume. `label` names the source in the
+// status line ("qsb" or "HLSL") so a support report says what actually ran.
+struct ShaderSet {
+    QShader vertex;
+    QShader fragment;
+    QString label;
+    QString error;
+    bool ok = false;
+};
+
+#ifdef CAPPEDWEATHER_HAS_VOLUME_QSB
+bool loadBakedShader(const QString& path, QShader* out) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    const QByteArray blob = file.readAll();
+    if (blob.isEmpty()) return false;
+    const QShader shader = QShader::fromSerialized(blob);
+    if (!shader.isValid()) return false;
+    *out = shader;
+    return true;
+}
+#endif
+
+// The baked set is preferred on every backend: D3D11 gets the HLSL variant of
+// the same GLSL source, OpenGL gets GLSL 150, Vulkan SPIR-V, Metal MSL. Only a
+// build without Shader Tools falls back to the embedded HLSL string, and that
+// fallback is D3D11-only by construction.
+ShaderSet volumeShaderSet(const QRhi::Implementation backend, const QString& backendName) {
+    ShaderSet set;
+    // Deliberate-failure hook for the fallback proof in
+    // docs/gpu-volume-rendering.md ("Failure behaviour"): a shader the backend
+    // cannot consume must give a one-line error and a CPU frame, never a black
+    // panel. Read once, never set by the app itself. The blob is not a shader in
+    // any language, so every backend refuses it in its own words.
+    static const bool broken = qEnvironmentVariableIsSet("CAPPEDWEATHER_VOLUME_BREAK_SHADER");
+    if (broken) {
+        const auto invalid = [](const QShader::Stage stage) {
+            QShader shader;
+            shader.setStage(stage);
+            shader.setShader(QShaderKey(QShader::SpirvShader, 100),
+                             QShaderCode(QByteArrayLiteral("this is not a shader"),
+                                         QByteArrayLiteral("main")));
+            return shader;
+        };
+        set.vertex = invalid(QShader::VertexStage);
+        set.fragment = invalid(QShader::FragmentStage);
+        set.label = QStringLiteral("broken");
+        set.ok = true; // create() fails; the caller reports the captured reason
+        return set;
+    }
+#ifdef CAPPEDWEATHER_HAS_VOLUME_QSB
+    if (loadBakedShader(QStringLiteral(":/shaders/volume.vert.qsb"), &set.vertex) &&
+        loadBakedShader(QStringLiteral(":/shaders/volume.frag.qsb"), &set.fragment)) {
+        set.label = QStringLiteral("qsb");
+        set.ok = true;
+        return set;
+    }
+    set.error = QStringLiteral("the baked volume shader is missing from this build's resources");
+#endif
+    if (backend == QRhi::D3D11) {
+        // Kit without Qt Shader Tools: the embedded HLSL string is the only set
+        // available, and only the D3D11 backend can compile it at runtime.
+        set.label = QStringLiteral("HLSL");
+        set.error.clear();
+        set.vertex = hlslShader(QShader::VertexStage, "vsMain");
+        set.fragment = hlslShader(QShader::FragmentStage, "psMain");
+        set.ok = true;
+        return set;
+    }
+    if (set.error.isEmpty())
+        set.error = QStringLiteral("GPU 3D has no shader set for %1: this build has no Qt Shader Tools")
+                        .arg(backendName);
+    return set;
+}
+
+// --- backend choice ------------------------------------------------------
+//
+// CAPPEDWEATHER_VOLUME_RHI=opengl|vulkan|d3d11|d3d12|metal forces the QRhi
+// backend for the volume widget, the resident render thread and the offscreen
+// probe, so one binary can be measured on every API the machine has. Unset
+// keeps the platform default: Direct3D 11 on Windows, OpenGL elsewhere.
+QString volumeRhiOverride() {
+    return qEnvironmentVariable("CAPPEDWEATHER_VOLUME_RHI").trimmed().toLower();
+}
+
+bool volumeRhiOverrideIs(const char* name) {
+    const QString value = volumeRhiOverride();
+    const QString wanted = QString::fromLatin1(name);
+    if (value == wanted) return true;
+    if (wanted == QLatin1String("d3d11")) return value == QLatin1String("direct3d11");
+    if (wanted == QLatin1String("opengl"))
+        return value == QLatin1String("gl") || value == QLatin1String("opengl32") ||
+               value == QLatin1String("gles");
+    return false;
 }
 
 // --- error text ---------------------------------------------------------
@@ -281,10 +375,21 @@ public:
 
     bool create(QRhi* rhi, QRhiRenderPassDescriptor* renderPass, QString* error) {
         rhi_ = rhi;
-        if (rhi_->backend() != QRhi::D3D11) {
-            *error = QStringLiteral("GPU 3D needs the Direct3D 11 backend; this spike ships no "
-                                    "shader set for %1")
-                         .arg(QString::fromUtf8(rhi_->backendName()));
+        const QRhi::Implementation impl = rhi_->backend();
+        const QString backendName = QString::fromUtf8(rhi_->backendName());
+        // Only the backends the baked .qsb set can feed: HLSL 5.0 for D3D11,
+        // GLSL 150 for OpenGL, SPIR-V for Vulkan, MSL for Metal. D3D12 wants
+        // HLSL 6.x/DXIL stages the bake does not produce, and Null has no
+        // device. Everything else is refused with the backend named.
+        if (impl != QRhi::D3D11 && impl != QRhi::OpenGLES2 && impl != QRhi::Vulkan &&
+            impl != QRhi::Metal) {
+            *error = QStringLiteral("GPU 3D has no shader set for the %1 backend").arg(backendName);
+            rhi_ = nullptr;
+            return false;
+        }
+        shaders_ = volumeShaderSet(impl, backendName);
+        if (!shaders_.ok) {
+            *error = shaders_.error;
             rhi_ = nullptr;
             return false;
         }
@@ -357,6 +462,9 @@ public:
 
     // True once the brick's 3D texture exists, i.e. a frame can be drawn.
     bool ready() const { return pipeline_ != nullptr; }
+
+    // "qsb" or "HLSL": which shader source this device resolved.
+    QString shaderLabel() const { return shaders_.label; }
 
     bool render(QRhiCommandBuffer* cb, QString* error) {
         if (!rhi_ || !cb || !brick_ || pixelSize_.isEmpty()) return false;
@@ -476,8 +584,8 @@ public:
             beginCapture();
             pipeline_ = rhi_->newGraphicsPipeline();
             pipeline_->setShaderStages(
-                {{QRhiShaderStage::Vertex, hlslShader(QShader::VertexStage, "vsMain")},
-                 {QRhiShaderStage::Fragment, hlslShader(QShader::FragmentStage, "psMain")}});
+                {{QRhiShaderStage::Vertex, shaders_.vertex},
+                 {QRhiShaderStage::Fragment, shaders_.fragment}});
             pipeline_->setVertexInputLayout({});
             pipeline_->setShaderResourceBindings(srb_);
             pipeline_->setRenderPassDescriptor(renderPass_);
@@ -560,6 +668,9 @@ private:
     QRhiSampler* lutSampler_ = nullptr;
     QRhiShaderResourceBindings* srb_ = nullptr;
     QRhiGraphicsPipeline* pipeline_ = nullptr;
+    // Resolved once per device in create(): the baked .qsb (or HLSL fallback)
+    // pair this backend consumes.
+    ShaderSet shaders_;
     std::shared_ptr<const VolumeBrick> brick_;
     std::vector<RgbaStop> stops_;
     VolumeCamera camera_;
@@ -588,6 +699,8 @@ public:
         releaseTarget();
         renderer_.reset();   // textures, buffers, pipeline: before the device
         rhi_.reset();
+        delete glFallbackSurface_;   // the GL context is gone with rhi_
+        glFallbackSurface_ = nullptr;
     }
     RhiVolumeScene(const RhiVolumeScene&) = delete;
     RhiVolumeScene& operator=(const RhiVolumeScene&) = delete;
@@ -617,6 +730,7 @@ public:
         frame.backend = backend_;
         frame.device = device_;
         if (!ensureTarget(pixelSize, &frame.error)) return frame;
+        frame.shader = renderer_ ? renderer_->shaderLabel() : QString();
 
         renderer_->setView(camera, pixelSize, opacityPercent);
         renderer_->setStops(stops);
@@ -674,10 +788,41 @@ public:
 private:
     bool ensureDevice(QString* error) {
         if (rhi_) return true;
-        QRhiD3D11InitParams params;
-        rhi_.reset(QRhi::create(QRhi::D3D11, &params));
+        const QString requested = volumeRhiOverride();
+        // The QRhiWidget can present Vulkan (Qt owns the VkInstance), but this
+        // offscreen/render-thread device cannot: QRhiVulkanInitParams needs
+        // <vulkan/vulkan.h> at build time and this kit does not ship it, so the
+        // honest answer is a named refusal rather than a silent D3D11 device.
+        if (requested == QLatin1String("vulkan")) {
+            *error = QStringLiteral(
+                "GPU 3D offscreen has no Vulkan device in this build (no vulkan/vulkan.h); "
+                "the widget path still accepts CAPPEDWEATHER_VOLUME_RHI=vulkan");
+            return false;
+        }
+        if (!requested.isEmpty() && !volumeRhiOverrideIs("opengl") &&
+            !volumeRhiOverrideIs("d3d11")) {
+            *error = QStringLiteral("GPU 3D offscreen has no device for CAPPEDWEATHER_VOLUME_RHI=%1")
+                         .arg(requested);
+            return false;
+        }
+        const bool wantGl = volumeRhiOverrideIs("opengl");
+#if defined(Q_OS_WIN)
+        const bool useGl = wantGl;
+#else
+        const bool useGl = requested.isEmpty() || wantGl;
+#endif
+        if (useGl) {
+            glFallbackSurface_ = QRhiGles2InitParams::newFallbackSurface();
+            QRhiGles2InitParams params;
+            params.fallbackSurface = glFallbackSurface_;
+            rhi_.reset(QRhi::create(QRhi::OpenGLES2, &params));
+        } else {
+            QRhiD3D11InitParams params;
+            rhi_.reset(QRhi::create(QRhi::D3D11, &params));
+        }
         if (!rhi_) {
-            *error = QStringLiteral("Direct3D 11 device creation failed");
+            *error = useGl ? QStringLiteral("OpenGL device creation failed")
+                           : QStringLiteral("Direct3D 11 device creation failed");
             return false;
         }
         backend_ = QString::fromUtf8(rhi_->backendName());
@@ -740,6 +885,9 @@ private:
     }
 
     std::unique_ptr<QRhi> rhi_;
+    // Only set when the OpenGL backend is used: QRhi's GL device draws through
+    // this surface's context, so it must outlive rhi_.
+    QOffscreenSurface* glFallbackSurface_ = nullptr;
     std::unique_ptr<RhiVolumeRenderer> renderer_;
     QRhiTexture* target_ = nullptr;
     QRhiTextureRenderTarget* rt_ = nullptr;
@@ -888,9 +1036,38 @@ struct VolumeCanvas::Impl {
 };
 
 VolumeCanvas::VolumeCanvas(QWidget* parent) : QRhiWidget(parent), impl_(std::make_unique<Impl>()) {
+    // CAPPEDWEATHER_VOLUME_RHI forces the widget's API so the probe can present
+    // the same volume on every backend this machine has (card t_9691d611).
+    // Unset keeps the platform default, which on Windows means Direct3D 11.
+    if (volumeRhiOverrideIs("opengl")) {
+        setApi(QRhiWidget::Api::OpenGL);
+    } else if (volumeRhiOverrideIs("vulkan")) {
+        setApi(QRhiWidget::Api::Vulkan);
+    } else if (volumeRhiOverrideIs("d3d11")) {
+        setApi(QRhiWidget::Api::Direct3D11);
+    } else if (volumeRhiOverride() == QLatin1String("d3d12")) {
+        setApi(QRhiWidget::Api::Direct3D12);
+    } else if (volumeRhiOverride() == QLatin1String("metal")) {
+        setApi(QRhiWidget::Api::Metal);
+    } else {
 #if defined(Q_OS_WIN)
-    setApi(QRhiWidget::Api::Direct3D11);
+        setApi(QRhiWidget::Api::Direct3D11);
 #endif
+    }
+    // A backend that cannot start never reaches initialize(), so the host would
+    // sit on "initialising" forever and never fall back to the CPU march. Qt
+    // emits renderFailed() in that case; turn it into the same one-line
+    // gpuFailed() the paint-side failures use.
+    connect(this, &QRhiWidget::renderFailed, this, [this] {
+        if (impl_->failedEmitted) return;
+        if (impl_->error.isEmpty())
+            impl_->error = QStringLiteral("GPU 3D: no RHI device came up%1")
+                               .arg(impl_->backend.isEmpty()
+                                        ? QString()
+                                        : QStringLiteral(" (%1)").arg(impl_->backend));
+        impl_->failedEmitted = true;
+        emit gpuFailed(impl_->error);
+    });
 }
 
 VolumeCanvas::~VolumeCanvas() = default;
@@ -953,6 +1130,10 @@ QString VolumeCanvas::statusLine() const {
 QString VolumeCanvas::backendName() const {
     if (!impl_->backend.isEmpty()) return impl_->backend;
     return rhi() ? QString::fromUtf8(rhi()->backendName()) : QString();
+}
+
+QString VolumeCanvas::shaderSource() const {
+    return impl_->renderer ? impl_->renderer->shaderLabel() : QString();
 }
 
 QString VolumeCanvas::lastError() const { return impl_->error; }
@@ -1045,6 +1226,7 @@ VolumeGpuFrame renderVolumeOffscreen(const VolumeBrick& brick, const VolumeCamer
         frame.frameMs = one.frameMs; // last completed frame, resources resident
         frame.backend = one.backend;
         frame.device = one.device;
+        frame.shader = one.shader;
         if (!one.ok) {
             frame.error = one.error;
             frame.ok = false;

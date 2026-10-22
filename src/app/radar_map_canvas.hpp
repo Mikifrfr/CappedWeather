@@ -381,6 +381,9 @@ public:
     [[nodiscard]] bool volumeFrameGpu() const { return volumeFrameGpu_; }
     // One line explaining a CPU fallback; empty while the GPU is drawing.
     [[nodiscard]] QString volumeGpuError() const { return volumeGpuError_; }
+    // The RHI API that drew the published frame ("Direct3D 11", "OpenGL"),
+    // empty on a CPU frame. Same value the chip reads, exposed for probes.
+    [[nodiscard]] QString volumeGpuBackend() const { return volumeGpuBackend_; }
     // Everything the 3D chip's text is made of. Kept as data (not read from the
     // widget inside the formatter) so the UI suite can pin the honesty rules -
     // a CPU frame never names an API, a GPU frame names the one that drew it,
