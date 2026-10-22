@@ -2,6 +2,7 @@
 
 #include "app/http_client.hpp"
 #include "app/volume_camera.hpp"
+#include "app/volume_canvas.hpp"
 #include "core/radar_geometry.hpp"
 #include "core/scan_diagnostics.hpp"
 
@@ -17,6 +18,7 @@
 #include <QCache>
 #include <QClipboard>
 #include <QContextMenuEvent>
+#include <QDebug>
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QPointer>
@@ -5631,13 +5633,39 @@ void RadarMapCanvas::setVolume3dMode(const bool enabled) {
         volumeTarget_[0] = 0.0;
         volumeTarget_[1] = 0.0;
         volumeTarget_[2] = 7000.0;
+        // Toggling the view on is the operator asking again: retry a GPU that
+        // failed earlier instead of leaving the panel on the CPU march for the
+        // rest of the session. The failure stays sticky per frame (a dead device
+        // is not retried on every orbit), not per deliberate toggle.
+        volumeGpuFailed_ = false;
+        volumeGpuError_.clear();
         rebuildVolumeRender();
     }
     update();
     emit volume3dModeToggled(volume3d_);
 }
 
+void RadarMapCanvas::setVolume3dBackend(const VolumeBackend backend) {
+    if (volumeBackend_ == backend) return;
+    volumeBackend_ = backend;
+    // A deliberate re-selection is a retry: the sticky failure belongs to the
+    // previous attempt, not to this one.
+    volumeGpuFailed_ = false;
+    volumeGpuError_.clear();
+    if (volume3d_) rebuildVolumeRender();
+    update();
+}
+
 namespace {
+
+// The operator's escape hatch out of the GPU path, read once: the probe and the
+// bench A/B the two backends by setting CAPPEDWEATHER_VOLUME_GPU=0 on the same
+// binary. Not a UI action, so it does not get a shortcut-dialog line.
+bool volumeGpuDisabledByEnv() {
+    static const bool disabled = qEnvironmentVariableIsSet("CAPPEDWEATHER_VOLUME_GPU") &&
+                                 qEnvironmentVariableIntValue("CAPPEDWEATHER_VOLUME_GPU") == 0;
+    return disabled;
+}
 
 // Project an ENU point to panel pixels with a volume camera. False when the
 // point is behind the eye. Inverse of the marcher's pixel-to-ray mapping.
@@ -5681,13 +5709,22 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
     const auto orbitDistance = volumeDistance_;
     double orbitTarget[3] = {volumeTarget_[0], volumeTarget_[1], volumeTarget_[2]};
     // While orbiting, march at third resolution for responsiveness and
-    // refine on release; idle renders use half resolution.
+    // refine on release; idle renders use half resolution. Same policy on both
+    // backends so GPU and CPU frames describe the same rays.
     const int divisor = fast ? 3 : 2;
+    // Auto means "GPU unless it already failed or the operator turned it off";
+    // a failed device stays failed so a panel never slideshows on 900 ms CPU
+    // frames without saying so. The chip is set from this before the frame
+    // lands, so "pending" is never labelled with the wrong backend.
+    const bool useGpu = volumeBackend_ == VolumeBackend::Gpu ||
+                        (volumeBackend_ == VolumeBackend::Auto && !volumeGpuFailed_ &&
+                         !volumeGpuDisabledByEnv());
+    volumeFrameGpu_ = useGpu;
     const QPointer<RadarMapCanvas> guard(this);
     QThreadPool::globalInstance()->start(
         [guard, requestId, chunk, product, palette, customPalette, opacity, brick, brickChunk,
          brickProduct, logicalSize, orbitAzimuth, orbitElevation, orbitDistance, orbitTarget,
-         divisor] {
+         divisor, useGpu] {
             auto stale = [&] {
                 return !guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed);
             };
@@ -5723,12 +5760,64 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             const std::vector<RgbaStop> stops = volumeTransferStops(product, palette, customPalette);
             const int renderWidth = std::max(1, logicalSize.width() / divisor);
             const int renderHeight = std::max(1, logicalSize.height() / divisor);
-            QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
-            image.fill(Qt::transparent);
             const double frameTarget[3] = {brickNow->centerXMeters, brickNow->centerYMeters,
                                            orbitTarget[2]};
             const VolumeCamera camera =
                 volumeCameraFor(*brickNow, orbitAzimuth, orbitElevation, orbitDistance, frameTarget);
+            // One publish path for both backends: same staleness gate, same
+            // fields, so the chip, the orbit grid and the next frame never care
+            // which march produced the image.
+            const auto publish = [&](QImage rendered, const double renderMs, const bool gpu) {
+                if (stale()) return;
+                QMetaObject::invokeMethod(guard, [guard, requestId, brickNow,
+                                                 rendered = std::move(rendered), renderMs,
+                                                 logicalSize, orbitAzimuth, orbitElevation,
+                                                 orbitDistance, orbitTarget, gpu] {
+                    if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
+                        return;
+                    guard->brick_ = brickNow;
+                    guard->brickChunk_ = guard->chunk_;
+                    guard->brickProduct_ = guard->product_;
+                    guard->volumeImage_ = rendered;
+                    guard->volumeImageLogicalSize_ = logicalSize;
+                    guard->volumeRenderMs_ = renderMs;
+                    guard->volumeFrameGpu_ = gpu;
+                    if (gpu) {
+                        guard->volumeGpuFailed_ = false;
+                        guard->volumeGpuError_.clear();
+                    }
+                    guard->volumeImageAzimuth_ = orbitAzimuth;
+                    guard->volumeImageElevation_ = orbitElevation;
+                    guard->volumeImageDistance_ = orbitDistance;
+                    for (int axis = 0; axis < 3; ++axis)
+                        guard->volumeImageTarget_[axis] = orbitTarget[axis];
+                    guard->volumeTarget_[0] = brickNow->centerXMeters;
+                    guard->volumeTarget_[1] = brickNow->centerYMeters;
+                    guard->update();
+                }, Qt::QueuedConnection);
+            };
+            if (useGpu) {
+                const VolumeGpuFrame frame = renderVolumeResident(
+                    brickNow, camera, stops, opacity, QSize(renderWidth, renderHeight));
+                if (frame.ok) {
+                    publish(frame.image, frame.frameMs, true);
+                    return;
+                }
+                // One line, once: the panel is marching on the CPU because the
+                // device would not run, not because nobody asked. Then fall
+                // through, because this request still owes the panel a frame.
+                QMetaObject::invokeMethod(guard, [guard, message = frame.error] {
+                    if (!guard) return;
+                    if (guard->volumeGpuFailed_ && guard->volumeGpuError_ == message) return;
+                    guard->volumeGpuFailed_ = true;
+                    guard->volumeGpuError_ = message;
+                    guard->volumeFrameGpu_ = false;
+                    qWarning().noquote() << "3D: GPU raymarch failed, using the CPU march -" << message;
+                    guard->update();
+                }, Qt::QueuedConnection);
+            }
+            QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
+            image.fill(Qt::transparent);
             const double spanX = 2.0 * brickNow->halfExtentMeters / brickNow->nx;
             const double spanY = 2.0 * brickNow->halfExtentMeters / brickNow->ny;
             const double spanZ = brickNow->topMeters / brickNow->nz;
@@ -5803,28 +5892,7 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                 }
             }
             const double renderMs = static_cast<double>(timer.elapsed());
-            if (stale()) return;
-            QMetaObject::invokeMethod(guard, [guard, requestId, brickNow,
-                                             image = std::move(image), renderMs, logicalSize,
-                                             orbitAzimuth, orbitElevation, orbitDistance,
-                                             orbitTarget] {
-                if (!guard || requestId != guard->volumeRequestId_.load(std::memory_order_relaxed))
-                    return;
-                guard->brick_ = brickNow;
-                guard->brickChunk_ = guard->chunk_;
-                guard->brickProduct_ = guard->product_;
-                guard->volumeImage_ = image;
-                guard->volumeImageLogicalSize_ = logicalSize;
-                guard->volumeRenderMs_ = renderMs;
-                guard->volumeImageAzimuth_ = orbitAzimuth;
-                guard->volumeImageElevation_ = orbitElevation;
-                guard->volumeImageDistance_ = orbitDistance;
-                for (int axis = 0; axis < 3; ++axis)
-                    guard->volumeImageTarget_[axis] = orbitTarget[axis];
-                guard->volumeTarget_[0] = brickNow->centerXMeters;
-                guard->volumeTarget_[1] = brickNow->centerYMeters;
-                guard->update();
-            }, Qt::QueuedConnection);
+            publish(std::move(image), renderMs, false);
         });
 }
 
@@ -5857,14 +5925,30 @@ void RadarMapCanvas::paintVolume3d(QPainter& painter) {
     painter.setBrush(QColor(8, 15, 19, 205));
     const QRectF chip(12.0, 10.0, 330.0, 22.0);
     painter.drawRoundedRect(chip, 4, 4);
+    // The chip states the backend that produced the frame, not the one the build
+    // prefers: a panel that fell back to the CPU must never read "(GPU)".
     const QString label =
-        QStringLiteral("3D preview (CPU)  %1 %2  %3 ms")
+        QStringLiteral("3D preview (%1)  %2 %3  %4 ms")
+            .arg(volumeFrameGpu_ ? QStringLiteral("GPU") : QStringLiteral("CPU"))
             .arg(selectedRadar_.isEmpty() ? QStringLiteral("...") : selectedRadar_)
             .arg(shortName)
             .arg(static_cast<int>(volumeRenderMs_));
     painter.drawText(chip.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
                      painter.fontMetrics().elidedText(label, Qt::ElideRight,
                                                       static_cast<int>(chip.width()) - 16));
+    if (!volumeGpuError_.isEmpty()) {
+        // One line under the chip: the panel is marching on the CPU and this is
+        // why. Text, no icon, elided rather than wrapped.
+        const QRectF note(12.0, 34.0, qMin(560.0, static_cast<double>(width()) - 24.0), 18.0);
+        painter.setBrush(QColor(26, 14, 10, 215));
+        painter.setPen(QColor(240, 190, 150));
+        painter.drawRoundedRect(note, 4, 4);
+        painter.setFont(hudFont(8));
+        painter.drawText(note.adjusted(8.0, 0.0, -8.0, 0.0), Qt::AlignLeft | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(
+                             tr("CPU fallback: %1").arg(volumeGpuError_), Qt::ElideRight,
+                             static_cast<int>(note.width()) - 16));
+    }
     painter.setFont(hudFont(8));
     painter.setPen(QColor(160, 175, 182));
     painter.drawText(QRectF(12.0, height() - 30.0, width() - 24.0, 20.0),
@@ -6656,7 +6740,10 @@ void RadarMapCanvas::contextMenuEvent(QContextMenuEvent* event) {
     }
 
     menu.addSeparator();
-    const auto volume3dAction = menu.addAction(tr("3D volume preview (CPU)"));
+    // Backend-neutral on purpose: the 3D toggle picks GPU when the device starts
+    // and the CPU march otherwise, and the 3D view's own chip names whichever
+    // one is drawing. A "(CPU)" here would be a claim this menu cannot check.
+    const auto volume3dAction = menu.addAction(tr("3D volume preview"));
     volume3dAction->setCheckable(true);
     volume3dAction->setChecked(false);
     connect(volume3dAction, &QAction::toggled, this, [this](bool enabled) {

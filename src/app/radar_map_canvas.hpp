@@ -314,12 +314,23 @@ public:
     void setMeasureMode(bool enabled);
     void setCrossSectionMode(bool enabled);
     bool crossSectionMode() const { return crossSectionMode_; }
-    // M1 3D preview (CPU backend): any panel flips between the 2D map and a
-    // ray-marched view of its own current volume/product. The RHI backend
-    // lands later behind the same toggle; the brick and camera are shared.
+    // 3D preview: any panel flips between the 2D map and a ray-marched view of
+    // its own current volume/product. The GPU (resident D3D11) raymarch is the
+    // backend when it starts; the CPU march is the fallback and stays built.
     void setVolume3dMode(bool enabled);
     [[nodiscard]] bool volume3dMode() const { return volume3d_; }
-    // March time of the last completed CPU 3D frame, for probes and tests.
+    // Which raymarcher draws the 3D view. Auto = GPU when the device starts,
+    // CPU when it does not (the reason lands on the chip). There is no menu
+    // entry: the 3D toggle picks the backend, and this setter exists for the
+    // probe, the tests, and CAPPEDWEATHER_VOLUME_GPU=0.
+    enum class VolumeBackend { Auto, Gpu, Cpu };
+    void setVolume3dBackend(VolumeBackend backend);
+    [[nodiscard]] VolumeBackend volume3dBackend() const { return volumeBackend_; }
+    // True when the frame on screen came from the GPU march.
+    [[nodiscard]] bool volumeFrameGpu() const { return volumeFrameGpu_; }
+    // One line explaining a CPU fallback; empty while the GPU is drawing.
+    [[nodiscard]] QString volumeGpuError() const { return volumeGpuError_; }
+    // March time of the last completed 3D frame (GPU or CPU), for probes/tests.
     [[nodiscard]] double volumeRenderMs() const { return volumeRenderMs_; }
     void setVolumeQuality(int decodedChunks, int totalChunks, int failedChunks,
                           std::size_t rejectedMessages = 0, std::size_t rejectedBlocks = 0);
@@ -818,10 +829,16 @@ private:
     PaletteKind palette_ = PaletteKind::Capped;
     QVector<PaletteStop> customPalette_;
     // M1 3D preview state: orbit camera plus the panel's brick and its last
-    // CPU render. Brick rebuilds only when chunk/product change; camera moves
+    // render. Brick rebuilds only when chunk/product change; camera moves
     // re-march the cached brick. Same request-id abort pattern as the echo
     // overlay so fast orbits cancel stale marches instead of queueing them.
+    // The image is either the resident GPU raymarch's readback or the CPU
+    // march's QImage; the panel paints it the same way and the chip says which.
     bool volume3d_ = false;
+    VolumeBackend volumeBackend_ = VolumeBackend::Auto;
+    bool volumeFrameGpu_ = false;
+    bool volumeGpuFailed_ = false; // sticky: a dead device is never retried per frame
+    QString volumeGpuError_;
     bool volumeDragging_ = false;
     bool volumePanDragging_ = false; // middle-drag moves the focus point
     std::shared_ptr<const VolumeBrick> brick_;
