@@ -170,6 +170,12 @@ Same volume, same camera, same binary with the fill switched off and on
 | brick build | 166 ms | 230 ms |
 | frame | 643 ms | 1041 ms |
 
+`lit_fraction` in this table is the CPU panel grab **before** card t_cc6aa591
+fixed the preview's premultiplied alpha. The fix raises such a grab by ~12%
+relative (full-range box, same camera: 0.13734 -> 0.15426, see
+`docs/gpu-volume-rendering.md`); the fill-off/fill-on comparison is unaffected
+because both columns are pre-fix.
+
 The march costs 62% more because there is 4.5x more data to shade: gradient
 shading (`brickSurfaceNormal`, seven trilinear fetches per lit sample) is 507 ms
 of the 1041 ms frame. It lands on the 1048 ms budget this pass was measured
@@ -248,6 +254,10 @@ runs on a quiet machine for the first two columns, one run each for the last two
 | lit_fraction | 0.1373 | 0.1653 | 0.0061 | 0.0127 (chrome only) |
 | brick build | 285 ms | 310 ms | 312 ms | 242 ms |
 | frame | 1,283 ms | 6,392 ms | 120 ms | 2,538 ms |
+
+`lit_fraction` here is also a pre-t_cc6aa591 CPU panel grab (~12% low); the
+full-range box reads 0.15426 after the alpha fix, and the relative comparison
+across boxes is unaffected.
 
 The same grid is used for every box (256 x 256 x 128), so the voxel size is the
 whole point: a 60 km storm is 51 columns wide at full range and 256 columns wide

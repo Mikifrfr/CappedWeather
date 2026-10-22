@@ -421,6 +421,17 @@ public:
     // the RHI palette LUT both build from this, so the three views agree.
     static std::vector<RgbaStop> volumeTransferStops(ProductKind product, PaletteKind palette,
                                                      const QVector<PaletteStop>& custom = {});
+    // The CPU march accumulates premultiplied RGB (r += (1-a) * colour * shade
+    // * gate), so its image must be declared premultiplied too: Format_ARGB32 is
+    // straight alpha and QPainter would multiply by alpha a second time when
+    // painting it, dimming the preview below its own transfer function. Exposed
+    // so the hermetic test marches into the format the panel really ships.
+    static constexpr QImage::Format volumePreviewFormat = QImage::Format_ARGB32_Premultiplied;
+    // Packs one accumulated march sample into the byte volumePreviewFormat
+    // stores: premultiplied RGB plus coverage, scaled to 8 bits. The panel's
+    // march and the hermetic pixel-path test share this, so a drift back to
+    // straight alpha fails a test instead of quietly dimming the picture.
+    static QRgb volumePreviewPixel(float r, float g, float b, float a);
     QString probeText() const;
     QRectF infoCardRect() const { return pinnedInfoCardRect_; }
     double infoCardScrollOffset() const { return pinnedInfoScrollOffset_; }

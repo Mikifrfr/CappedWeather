@@ -6751,8 +6751,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         const double opacityScale = opacityPercent / 100.0;
 
         // CPU reference march, mirroring RadarMapCanvas::rebuildVolumeRender
-        // step for step but at test resolution.
-        QImage cpuImage(gpuSize, QImage::Format_ARGB32);
+        // step for step but at test resolution. It marches into the format the
+        // panel really ships (volumePreviewFormat), so this mirror cannot drift
+        // back to a straight-alpha image the panel no longer uses.
+        QImage cpuImage(gpuSize, RadarMapCanvas::volumePreviewFormat);
         cpuImage.fill(Qt::transparent);
         const double spanX = 2.0 * brick.halfExtentMeters / brick.nx;
         const double spanY = 2.0 * brick.halfExtentMeters / brick.ny;
@@ -6806,10 +6808,7 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
                     ++steps;
                 }
                 if (a <= 0.0F) continue;
-                scan[x] = qRgba(static_cast<int>(std::clamp(r, 0.0F, 1.0F) * 255.0F),
-                                static_cast<int>(std::clamp(g, 0.0F, 1.0F) * 255.0F),
-                                static_cast<int>(std::clamp(b, 0.0F, 1.0F) * 255.0F),
-                                static_cast<int>(std::clamp(a, 0.0F, 1.0F) * 255.0F));
+                scan[x] = RadarMapCanvas::volumePreviewPixel(r, g, b, a);
             }
         }
         const auto litFraction = [](const QImage& frame) {
@@ -6834,22 +6833,36 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             composer.drawImage(0, 0, cpuImage);
         }
         const double cpuLit = litFraction(cpuComposite);
-        // Diagnosis for the known gap: the panel stores premultiplied RGB in a
-        // Format_ARGB32 image, so QPainter multiplies by alpha a second time and
-        // the CPU preview paints dimmer than the GPU one (which composites
-        // once). Reinterpreting the same bytes as premultiplied is what the
-        // panel should paint; it must land closer to the GPU number.
-        QImage cpuPremultiplied(cpuImage.size(), QImage::Format_ARGB32_Premultiplied);
-        for (int y = 0; y < cpuImage.height(); ++y)
-            std::memcpy(cpuPremultiplied.scanLine(y), cpuImage.constScanLine(y),
-                        static_cast<std::size_t>(cpuImage.width()) * 4);
-        QImage cpuPremultipliedComposite(cpuPremultiplied.size(), QImage::Format_RGB32);
-        cpuPremultipliedComposite.fill(QColor(8, 13, 16));
+        // Pixel-path pin (hermetic, no volume): the march accumulates
+        // premultiplied colour, so one known sample — colour 0.5 at coverage
+        // 0.5 — must store the premultiplied byte (red 127) and paint it
+        // untouched over the panel's dark background (red ~131). A
+        // straight-alpha image paints ~67 instead: that is exactly the dimming
+        // card t_cc6aa591 fixed, so this cannot regress silently.
         {
-            QPainter composer(&cpuPremultipliedComposite);
-            composer.drawImage(0, 0, cpuPremultiplied);
+            const QRgb stored = RadarMapCanvas::volumePreviewPixel(0.5F, 0.0F, 0.0F, 0.5F);
+            if (qRed(stored) != 127 || qGreen(stored) != 0 || qBlue(stored) != 0 ||
+                qAlpha(stored) != 127) {
+                std::cerr << "3D preview pixel packing changed: stored=0x" << std::hex << stored
+                          << std::dec << " (expected 0x7f00007f)\n";
+                return 1;
+            }
+            QImage onePixel(1, 1, RadarMapCanvas::volumePreviewFormat);
+            onePixel.fill(Qt::transparent);
+            onePixel.setPixel(0, 0, stored);
+            QImage painted(1, 1, QImage::Format_RGB32);
+            painted.fill(QColor(8, 13, 16));
+            {
+                QPainter composer(&painted);
+                composer.drawImage(0, 0, onePixel);
+            }
+            const QRgb overBackground = painted.pixel(0, 0);
+            if (qRed(overBackground) < 129 || qRed(overBackground) > 133) {
+                std::cerr << "the 3D preview applied alpha twice: painted r=" << qRed(overBackground)
+                          << " (expected ~131 premultiplied, ~67 straight-alpha)\n";
+                return 1;
+            }
         }
-        const double cpuLitPremultiplied = litFraction(cpuPremultipliedComposite);
 
         const VolumeGpuFrame gpu =
             renderVolumeOffscreen(brick, camera, stops, opacityPercent, gpuSize, 2);
@@ -6860,14 +6873,7 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
             const double gpuLit = litFraction(gpu.image);
             std::cout << "GPU 3D raymarch: backend=" << gpu.backend.toStdString()
                       << " device=" << gpu.device.toStdString() << " frame_ms=" << gpu.frameMs
-                      << " lit_gpu=" << gpuLit << " lit_cpu=" << cpuLit
-                      << " lit_cpu_premultiplied=" << cpuLitPremultiplied << '\n';
-            if (std::abs(gpuLit - cpuLitPremultiplied) > std::abs(gpuLit - cpuLit)) {
-                std::cerr << "CPU/GPU 3D gap is not the premultiplied-alpha mismatch: gpu=" << gpuLit
-                          << " panel_composite=" << cpuLit
-                          << " premultiplied_composite=" << cpuLitPremultiplied << '\n';
-                return 1;
-            }
+                      << " lit_gpu=" << gpuLit << " lit_cpu=" << cpuLit << '\n';
             if (gpuLit < 0.02 || gpuLit > 0.95) {
                 std::cerr << "GPU 3D frame is empty or uniform: lit_fraction=" << gpuLit << '\n';
                 return 1;

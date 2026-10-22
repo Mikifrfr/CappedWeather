@@ -1972,6 +1972,18 @@ std::vector<RgbaStop> RadarMapCanvas::volumeTransferStops(const ProductKind prod
     return stops;
 }
 
+QRgb RadarMapCanvas::volumePreviewPixel(const float r, const float g, const float b,
+                                        const float a) {
+    // Same scale-and-clamp the march always used. What matters is the meaning of
+    // the byte: r/g/b arrive premultiplied (every contribution was already
+    // weighted by (1-a)), so they go into a premultiplied image untouched and
+    // QPainter applies the coverage exactly once.
+    const auto byte = [](const float value) {
+        return static_cast<int>(std::clamp(value, 0.0F, 1.0F) * 255.0F);
+    };
+    return qRgba(byte(r), byte(g), byte(b), byte(a));
+}
+
 QString RadarMapCanvas::probeText() const {
     return probeText_;
 }
@@ -5793,7 +5805,12 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             const std::vector<RgbaStop> stops = volumeTransferStops(product, palette, customPalette);
             const int renderWidth = std::max(1, logicalSize.width() / divisor);
             const int renderHeight = std::max(1, logicalSize.height() / divisor);
-            QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);
+            // The accumulation below is premultiplied (each colour term is
+            // weighted by (1-a)), so the image is declared premultiplied and
+            // QPainter applies the coverage exactly once. Storing these bytes in
+            // a straight-alpha format made the panel paint the preview dimmer
+            // than its own transfer function (card t_cc6aa591).
+            QImage image(renderWidth, renderHeight, volumePreviewFormat);
             image.fill(Qt::transparent);
             const double frameTarget[3] = {brickNow->centerXMeters, brickNow->centerYMeters,
                                            orbitTarget[2]};
@@ -5866,10 +5883,7 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
                         ++steps;
                     }
                     if (a <= 0.0F) continue;
-                    scan[x] = qRgba(static_cast<int>(std::clamp(r, 0.0F, 1.0F) * 255.0F),
-                                    static_cast<int>(std::clamp(g, 0.0F, 1.0F) * 255.0F),
-                                    static_cast<int>(std::clamp(b, 0.0F, 1.0F) * 255.0F),
-                                    static_cast<int>(std::clamp(a, 0.0F, 1.0F) * 255.0F));
+                    scan[x] = volumePreviewPixel(r, g, b, a);
                 }
             }
             const double renderMs = static_cast<double>(timer.elapsed());
