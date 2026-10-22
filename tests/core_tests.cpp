@@ -837,6 +837,158 @@ void testRainfallKdpAccumulationClosedForm() {
         assert(quietGrid.summary.incompleteGateCount == 0);
         assert(quietGrid.summary.inputClampedGateCount == 0);
     }
+
+    // Reflectivity's own sentinel under R(KDP). KDP is the rate input, so a
+    // missing or unclassified Z keeps the KDP depth while the column guard is
+    // blind; a measured dry Z still wins the veto. These are the rows the
+    // validation record's guard table now states.
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto withReflectivityCode = [&](const MomentEncoding encoding,
+                                          const std::uint16_t code) {
+        auto chunk = quietVolume(1.0);  // KDP = 1.0 deg/km -> 110 tenths
+        chunk.momentEncoding = encoding;
+        chunk.rays.front().fields.at(reflectivityIndex).assign(16, code);
+        return chunk;
+    };
+    const auto accumulateWith = [&](const DecodedChunk& chunk) {
+        const std::vector<RainfallSample> window{
+            {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+        return accumulateRainfall(window, 370.0,
+                                  std::numeric_limits<double>::quiet_NaN(), config);
+    };
+    {
+        // Message 31: 1 = range folded (missing). The KDP rate survives, the
+        // guard cannot run, and the gate is still a reflectivity gap.
+        const auto missing = withReflectivityCode(MomentEncoding::NexradMessage31, 1);
+        const auto grid = accumulateWith(missing);
+        assert(grid.summary.valid);
+        assert(grid.summary.depthGateCount == 16);
+        assert(grid.summary.noVerticalCheckGateCount == 16);
+        assert(grid.summary.incompleteGateCount == 16);
+        for (const auto& gate : grid.rays.front().gates) {
+            assert(gate.depthTenthsMillimeters == 110);
+            assert((gate.flags & RainfallGateNoVerticalCheck) != 0);
+            assert((gate.flags & RainfallGateIncomplete) != 0);
+        }
+        assert(grid.summary.quality == RainfallQuality::Marginal);
+    }
+    {
+        // A legacy chunk records no convention: same depth and guard flag, but
+        // the missing/absent distinction cannot be claimed.
+        const auto legacy = withReflectivityCode(MomentEncoding::Unknown, 1);
+        const auto grid = accumulateWith(legacy);
+        assert(grid.summary.valid);
+        assert(grid.summary.depthGateCount == 16);
+        assert(grid.summary.noVerticalCheckGateCount == 16);
+        assert(grid.summary.incompleteGateCount == 0);
+        for (const auto& gate : grid.rays.front().gates) {
+            assert(gate.depthTenthsMillimeters == 110);
+            assert((gate.flags & RainfallGateNoVerticalCheck) != 0);
+            assert((gate.flags & RainfallGateIncomplete) == 0);
+        }
+    }
+    {
+        // Message 31: 0 = below threshold. A measured dry gate, so KDP cannot
+        // mint rain there: zero depth, no flag.
+        const auto dry = withReflectivityCode(MomentEncoding::NexradMessage31, 0);
+        const auto grid = accumulateWith(dry);
+        assert(grid.summary.valid);
+        assert(grid.summary.depthGateCount == 0);
+        assert(grid.summary.noVerticalCheckGateCount == 0);
+        assert(grid.summary.incompleteGateCount == 0);
+        for (const auto& gate : grid.rays.front().gates) {
+            assert(gate.depthTenthsMillimeters == 0);
+            assert((gate.flags & RainfallGateNoVerticalCheck) == 0);
+            assert((gate.flags & RainfallGateIncomplete) == 0);
+        }
+    }
+}
+
+void testRainfallDualPolClampFlags() {
+    // The 150 mm/h rate ceiling is not KDP-only. At the 53 dBZ Z cap,
+    // Z^0.770 = 12050, so R(Z,ZDR) = 0.0142 * 12050 * 10^(-0.167 ZDR):
+    // 171.1 mm/h at ZDR 0 dB and 251.4 mm/h at the -1 dB ZDR clamp. A hail
+    // core with near-neutral ZDR therefore hits RateCapped, and that ceiling —
+    // not the 53 dBZ cap — is what bounds it.
+    const auto configFor = [](const RainfallRelation relation) {
+        RainfallConfig config;
+        config.relation = relation;
+        return config;
+    };
+    const auto fourSamples = [](const DecodedChunk& chunk) {
+        return std::vector<RainfallSample>{
+            {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    };
+    const auto accumulate = [&](const DecodedChunk& chunk, const RainfallRelation relation) {
+        return accumulateRainfall(fourSamples(chunk), 370.0,
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  configFor(relation));
+    };
+
+    // 55 dBZ + ZDR 0 dB: Z capped to 53 -> 171.1 mm/h -> ceiling 150 mm/h ->
+    // 150 * 0.25 h = 37.5 mm = 375 tenths per gate.
+    auto hail = rainVolume("KTLX", 55.0);
+    hail.momentEncoding = MomentEncoding::NexradMessage31;
+    attachRainCorrelation(hail.rays.front(), 0.98);
+    attachRainDifferentialReflectivity(hail.rays.front(), 0.0);
+    const auto hailGrid = accumulate(hail, RainfallRelation::Zdr);
+    assert(hailGrid.summary.valid);
+    assert(hailGrid.summary.relationAvailable);
+    assert(hailGrid.summary.hailCappedGateCount == 16);
+    assert(hailGrid.summary.rateCappedGateCount == 16);
+    assert(hailGrid.summary.inputClampedGateCount == 0);
+    for (const auto& gate : hailGrid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 375);
+        assert((gate.flags & RainfallGateHailCapped) != 0);
+        assert((gate.flags & RainfallGateRateCapped) != 0);
+        assert((gate.flags & RainfallGateInputClamped) == 0);
+    }
+    assert(std::abs(hailGrid.summary.maximumMillimeters - 37.5) < 1e-9);
+
+    // 40 dBZ + ZDR -5 dB: clamped to the -1 dB edge -> 25.0777 mm/h ->
+    // 25.0777 * 0.25 h = 6.2694 mm = 63 tenths per gate. Below the ceiling.
+    auto subRangeZdr = rainVolume("KTLX", 40.0);
+    subRangeZdr.momentEncoding = MomentEncoding::NexradMessage31;
+    attachRainCorrelation(subRangeZdr.rays.front(), 0.98);
+    attachRainDifferentialReflectivity(subRangeZdr.rays.front(), -5.0);
+    const auto subRangeGrid = accumulate(subRangeZdr, RainfallRelation::Zdr);
+    assert(subRangeGrid.summary.valid);
+    assert(subRangeGrid.summary.inputClampedGateCount == 16);
+    assert(subRangeGrid.summary.rateCappedGateCount == 0);
+    for (const auto& gate : subRangeGrid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 63);
+        assert((gate.flags & RainfallGateInputClamped) != 0);
+        assert((gate.flags & RainfallGateRateCapped) == 0);
+    }
+
+    // 40 dBZ + KDP 25 deg/km: magnitude clamped to 20 -> 44 * 20^0.822 =
+    // 516.3 mm/h -> ceiling 150 mm/h -> 375 tenths per gate, clamped and capped.
+    auto kdpSpike = rainVolume("KTLX", 40.0);
+    kdpSpike.momentEncoding = MomentEncoding::Odim;
+    attachRainSpecificDifferentialPhase(kdpSpike.rays.front(), 25.0);
+    const auto spikeGrid = accumulate(kdpSpike, RainfallRelation::Kdp);
+    assert(spikeGrid.summary.valid);
+    assert(spikeGrid.summary.relationAvailable);
+    assert(spikeGrid.summary.inputClampedGateCount == 16);
+    assert(spikeGrid.summary.rateCappedGateCount == 16);
+    for (const auto& gate : spikeGrid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 375);
+        assert((gate.flags & RainfallGateInputClamped) != 0);
+        assert((gate.flags & RainfallGateRateCapped) != 0);
+    }
+    assert(std::abs(spikeGrid.summary.maximumMillimeters - 37.5) < 1e-9);
+
+    std::cout << "dual-pol clamps: R(Z,ZDR) hail ZDR=0dB depth="
+              << hailGrid.rays.front().gates.front().depthTenthsMillimeters
+              << " tenths hail_capped=" << hailGrid.summary.hailCappedGateCount
+              << " rate_capped=" << hailGrid.summary.rateCappedGateCount
+              << "; R(Z,ZDR) ZDR=-5dB depth="
+              << subRangeGrid.rays.front().gates.front().depthTenthsMillimeters
+              << " tenths input_clamped=" << subRangeGrid.summary.inputClampedGateCount
+              << "; R(KDP) KDP=25deg/km depth="
+              << spikeGrid.rays.front().gates.front().depthTenthsMillimeters
+              << " tenths input_clamped=" << spikeGrid.summary.inputClampedGateCount
+              << " rate_capped=" << spikeGrid.summary.rateCappedGateCount << "\n";
 }
 
 void testRainfallDualPolUnavailable() {
@@ -4339,6 +4491,7 @@ int main() {
     testDualPolRateRelations();
     testRainfallZdrAccumulationClosedForm();
     testRainfallKdpAccumulationClosedForm();
+    testRainfallDualPolClampFlags();
     testRainfallDualPolUnavailable();
     testRainfallDualPolGuardParity();
     testStormTracker();

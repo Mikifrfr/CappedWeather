@@ -88,8 +88,11 @@ DerivedProductSummary appendDerivedProducts(DecodedChunk& chunk,
 //                 trusted.
 //   * hail      - reflectivity above hailCapDbz is capped before the Z-R and
 //                 R(Z,ZDR) relations, so a hail core cannot mint hundreds of
-//                 mm. R(KDP) is hail-insensitive by construction and is instead
-//                 limited by maximumRateMillimetersPerHour.
+//                 mm. That cap is not the whole bound for R(Z,ZDR): at 53 dBZ
+//                 the relation reaches 171 mm/h at ZDR 0 dB and 251 mm/h at the
+//                 -1 dB ZDR clamp, so the 150 mm/h rate ceiling binds it in
+//                 hail with near-neutral ZDR. R(KDP) is hail-insensitive by
+//                 construction and is bounded by the rate ceiling alone.
 
 // Rain-rate relation applied to every gate of every volume in the window.
 // Constants and the reasons each relation fails are recorded in
@@ -172,12 +175,17 @@ struct RainfallConfig {
     double kdpB = kKdpRelationB;
     double minimumKdpDegreesPerKm = 0.1;
     double maximumKdpDegreesPerKm = 20.0;
-    // Ceiling for every relation. 150 mm/h is the operational R(KDP) cap; the
-    // Z-R and R(Z,ZDR) hail caps already sit below it, so this only bites on a
-    // KDP spike. A gate it clamps is flagged RainfallGateRateCapped.
+    // Ceiling for every relation. 150 mm/h is the operational R(KDP) cap, and
+    // it is not KDP-only: at the 53 dBZ Z cap R(Z,ZDR) reaches 171.1 mm/h at
+    // ZDR 0 dB and 251.4 mm/h at the -1 dB ZDR clamp, so a hail core with
+    // near-neutral ZDR is RateCapped as well as HailCapped. Only Z-R stops
+    // below the ceiling (103.8 mm/h at its hail cap). A gate the ceiling clamps
+    // is flagged RainfallGateRateCapped.
     double maximumRateMillimetersPerHour = 150.0;
     double minimumReflectivityDbz = 5.0;  // below this the gate contributes 0
-    double hailCapDbz = 53.0;             // ~104 mm/h ceiling before the cap
+    // Z-input cap for Z-R and R(Z,ZDR): 103.8 mm/h for Z-R, 171.1 mm/h for
+    // R(Z,ZDR) at 0 dB ZDR (the ceiling, not this cap, bounds it there).
+    double hailCapDbz = 53.0;
     double maximumRangeMeters = 230000.0;
     double beamHeightFlagMeters = 2000.0;   // weakest contributing beam gets flagged above this
     double maximumBeamHeightMeters = 4000.0; // above this no depth is credited at all

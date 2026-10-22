@@ -43,13 +43,19 @@ Per-relation limits and clamps (all counted, none silent):
 | ZDR valid range (R(Z,ZDR)) | −1 … 8 dB | input clamped, `InputClamped`; a gate needing this is suspect |
 | KDP noise floor (R(KDP)) | 0.1 deg/km | below it the gate contributes no rate (light-rain noise) |
 | KDP valid range (R(KDP)) | ≤ 20 deg/km | magnitude clamped, `InputClamped` |
-| Rate ceiling (all) | 150 mm/h | rate clamped, `RateCapped`; binds on KDP spikes, not on the Z caps |
+| Rate ceiling (all) | 150 mm/h | rate clamped, `RateCapped`; bounds R(KDP) spikes and R(Z,ZDR) in hail at ZDR ≤ +0.34 dB; Z-R never reaches it |
 
-The 150 mm/h ceiling is the operational R(KDP) cap. Z-R and R(Z,ZDR) reach at
-most 103.8 mm/h at the 53 dBZ hail cap, so the ceiling only bites on a KDP
-spike. ZDR outside its range is clamped rather than dropped: the value is
-reported (`inputClampedGateCount`) so a product made mostly of clamped gates is
-visibly not a clean estimate.
+The 150 mm/h ceiling is the operational R(KDP) cap, and it is **not KDP-only**.
+Only Z-R stops below it: 103.8 mm/h at its 53 dBZ hail cap. R(Z,ZDR) does not —
+at the same 53 dBZ cap it reaches **171.1 mm/h at ZDR 0 dB** and **251.4 mm/h at
+the −1 dB ZDR clamp**, because the ZDR correction vanishes as ZDR approaches
+0 dB. The ceiling therefore binds R(Z,ZDR) whenever Z is at the cap and
+ZDR ≤ +0.34 dB — the hail / near-neutral-ZDR case limitation 9 describes, where
+the relation falls back toward Z-R behaviour. There the 150 mm/h ceiling, not
+the 53 dBZ cap, is what bounds the rate. ZDR outside its range is clamped rather
+than dropped: the value is reported (`inputClampedGateCount`) so a product made
+mostly of clamped gates is visibly not a clean estimate, and the same is true of
+`rateCappedGateCount`.
 
 Rain is integrated by **left hold** between volume times: the rate measured at
 volume *i* is credited over `[t_i, t_i+1)`. The last volume is credited nothing
@@ -141,8 +147,11 @@ application per gate per interval:
 | Moment absent | the newest volume carries no ZDR / KDP (or no reflectivity for the guard) | relation unavailable, reason named, no grid |
 | Moment absent, older volume | a sample inside the window lost the moment | zero depth, `Incomplete`; never Z-R |
 | Below threshold | the chunk's recorded convention says this code was below threshold | zero depth, no flag: measured, no echo |
-| Missing | the chunk's recorded convention says this code is missing (nodata / range folded) | zero depth, `Incomplete` |
+| Missing | the chunk's recorded convention says this code is missing (nodata / range folded) | zero depth, `Incomplete` — except under R(KDP) with a KDP rate, see the next rows |
 | Sentinel, no convention | `momentEncoding == Unknown` (legacy spill file) | zero depth, no flag: the gap cannot be claimed |
+| Missing, R(KDP) | reflectivity is missing at a gate where KDP has a rate (KDP is the rate input) | depth kept, `NoVerticalCheck` + `Incomplete`: the guard could not run and the gate is still a reflectivity gap |
+| Sentinel, no convention, R(KDP) | reflectivity's sentinel is unclassified on a legacy chunk while KDP has a rate | depth kept, `NoVerticalCheck`, no gap claim: the gap cannot be claimed from an unclassified code |
+| Below threshold, R(KDP) | reflectivity is a measured dry gate while KDP has a rate | zero depth, no flag: the two moments disagree and Z wins the veto |
 
 Codes 0 and 1 mean "below threshold" and "missing", but the two decoded formats
 disagree on which is which: NEXRAD Message 31 packs 0 = below threshold and
@@ -215,9 +224,11 @@ cannot be trusted for a while:
 9. **R(Z,ZDR) in mixed phase and hail.** Z and ZDR are both affected by hail;
    ZDR near 0 dB in a hail core makes the ZDR correction vanish, so the relation
    falls back toward Z-R behaviour exactly where Z is least trustworthy. The
-   53 dBZ cap bounds it; it does not correct it. Melting-layer ZDR bias and a
-   1 dB ZDR calibration error also move the rate (about 32% per dB at 1 dB
-   ZDR, from the 10^(-0.167·ZDR) factor), and ZDR is noisy at low Z.
+   53 dBZ cap bounds Z; it does not correct it, and at ZDR ≤ +0.34 dB it is the
+   150 mm/h rate ceiling, not the Z cap, that bounds the result (171.1 mm/h at
+   0 dB ZDR, 251.4 mm/h at the −1 dB clamp before the ceiling). Melting-layer
+   ZDR bias and a 1 dB ZDR calibration error also move the rate (about 32% per
+   dB at 1 dB ZDR, from the 10^(-0.167·ZDR) factor), and ZDR is noisy at low Z.
 10. **R(KDP) at low rates.** The relation is noisiest precisely where most rain
     volume is: below about 5-6 mm/h KDP estimates scatter and go negative, and
     the 0.1 deg/km floor turns that into a dry gate. It is also only as good as
@@ -263,9 +274,13 @@ are wired into the app yet — this is the plan, not a claim.
    whether the guard works; a dry day that accumulates rain fails the product
    outright, whatever the wet-day scores say.
 5. **Hail cap test (pass/fail, no gauge needed).**
-   On a hail case, no gate may exceed `53 dBZ` rate × credited intervals
-   (103.8 mm/h × hours). This proves the cap is applied, not that the total is
-   right.
+   On a hail case, no gate may exceed **its relation's** bound × credited
+   intervals: Z-R **103.8 mm/h** (53 dBZ), R(Z,ZDR) **150 mm/h** (the ceiling,
+   reached from ≤ 251.4 mm/h at the −1 dB ZDR clamp; the 53 dBZ cap alone would
+   allow 171.1 mm/h at 0 dB ZDR), R(KDP) **150 mm/h** (reached from ≤ 516.3 mm/h
+   at the 20 deg/km clamp). A single 103.8 mm/h bound is wrong for both dual-pol
+   relations. This proves the caps and the ceiling are applied, not that the
+   total is right.
 
 Scoring gates before the UI may state a value as an estimate rather than a
 number:
@@ -303,7 +318,13 @@ reflectivity + ZDR + RHOHV).
 
 The small totals are honest: one radial of weak rain, 0.1 mm storage. The
 same radial's Z-R output is unchanged by this change (the closed-form tests pin
-31 tenths for the 40 dBZ case and 110 for KDP = 1 deg/km).
+31 tenths for the 40 dBZ case and 110 for KDP = 1 deg/km). The clamp and ceiling
+paths are pinned by `testRainfallDualPolClampFlags`, which runs the real engine:
+R(Z,ZDR) with Z at the 53 dBZ cap and ZDR 0 dB gives **171.1 mm/h -> ceiling
+150 -> 375 tenths** per gate with `HailCapped` + `RateCapped`; ZDR at the −5 dB
+input clamp gives **25.0777 mm/h -> 63 tenths** with `InputClamped`; KDP at
+25 deg/km (clamped to 20) gives **516.3 mm/h -> ceiling 150 -> 375 tenths** with
+`InputClamped` + `RateCapped`.
 
 **KDP has no real-data run through the engine.** The card's premise that the
 ODIM DENE fixtures carry KDP is not what the repo contains: `odim_deneu_dbzh.h5`,
@@ -391,11 +412,20 @@ Empty by design. Add one row per scored case; do not delete rows that failed.
   relation whose newest-volume input is missing fails closed with
   `relationAvailable=false` and a reason instead of falling back to Z-R.
   New flags/counts: `InputClamped` (ZDR −1…8 dB, KDP ≤ 20 deg/km) and
-  `RateCapped` (150 mm/h ceiling). Closed-form tests:
+  `RateCapped` (150 mm/h ceiling, which binds R(Z,ZDR) in hail at ZDR
+  ≤ +0.34 dB: 171.1 mm/h at 0 dB ZDR and 251.4 mm/h at the −1 dB clamp, so the
+  ceiling — not the 53 dBZ cap — is what bounds that case). Closed-form tests:
   `testDualPolRateRelations`, `testRainfallZdrAccumulationClosedForm`,
-  `testRainfallKdpAccumulationClosedForm`, `testRainfallDualPolUnavailable`,
+  `testRainfallKdpAccumulationClosedForm`, `testRainfallDualPolClampFlags`
+  (RateCapped 375 tenths on R(Z,ZDR) hail, InputClamped 63 tenths on ZDR
+  −5 dB, InputClamped + RateCapped 375 tenths on KDP 25 deg/km),
+  `testRainfallDualPolUnavailable`,
   `testRainfallDualPolGuardParity`, plus a real-radial check
-  (`testRainfallDualPolRealArchive`). Still zero scored cases; R(KDP) has no
+  (`testRainfallDualPolRealArchive`). `testRainfallKdpAccumulationClosedForm`
+  also pins the R(KDP) sentinel rows: a missing or unclassified reflectivity
+  code keeps the KDP depth with `NoVerticalCheck` (plus `Incomplete` only for
+  the recorded missing code), and a measured dry reflectivity code vetoes the
+  gate. Still zero scored cases; R(KDP) has no
   real-data run because no openly published KDP volume was found (DENE has no
   KDP fixture; NEXRAD Level II has no KDP block).
 - 2026-10-20 — UI readout landed: control-dock `Rainfall (Z-R estimate)` block
