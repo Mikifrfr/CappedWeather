@@ -1955,13 +1955,46 @@ void MainWindow::buildUi() {
     displayGroup->addLayout(scanRow);
     displayPageLayout->addSpacing(2);
 
-    // Rainfall (Z-R estimate). A history product, not a measurement: the block
-    // leads with the product name and its peak, then the window it actually
-    // covered, then the quality flag with the dominant caveat. Nothing here is
-    // allowed to read as observed rainfall — that framing is enforced by the
-    // three text builders, which are unit-tested.
-    auto* rainfallGroup = makeGroup(displayPageLayout, QStringLiteral("Rainfall (Z-R estimate)"),
+    // Rainfall (estimate). A history product, not a measurement: the block
+    // names the relation it used, leads with its peak, then the window it
+    // actually covered, then the quality flag with the dominant caveat.
+    // Nothing here is allowed to read as observed rainfall — that framing is
+    // enforced by the three text builders, which are unit-tested.
+    auto* rainfallGroup = makeGroup(displayPageLayout, QStringLiteral("Rainfall (estimate)"),
                                     QStringLiteral("rainfall"));
+    auto* rainfallRelationRow = new QHBoxLayout();
+    auto* rainfallRelationCaption = new QLabel(QStringLiteral("Relation"), controlBody);
+    rainfallRelationRow->addWidget(rainfallRelationCaption);
+    rainfallRelationCombo_ = makeShrinkableCombo(new QComboBox(controlBody), 9);
+    rainfallRelationCombo_->setObjectName(QStringLiteral("rainfallRelationCombo"));
+    rainfallRelationCombo_->addItem(QStringLiteral("Z-R"),
+                                    static_cast<int>(RainfallRelation::MarshallPalmer));
+    rainfallRelationCombo_->addItem(QStringLiteral("R(Z,ZDR)"),
+                                    static_cast<int>(RainfallRelation::Zdr));
+    rainfallRelationCombo_->addItem(QStringLiteral("R(KDP)"),
+                                    static_cast<int>(RainfallRelation::Kdp));
+    rainfallRelationCombo_->setToolTip(
+        QStringLiteral("Rain-rate relation for the estimate. A dual-pol relation needs its moment "
+                       "on the newest volume's lowest reflectivity tilt; when that tilt does not "
+                       "carry it the block says so and never falls back to Z-R."));
+    rainfallRelationRow->addWidget(rainfallRelationCombo_, 1);
+    rainfallGroup->addLayout(rainfallRelationRow);
+    connect(rainfallRelationCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](const int index) {
+                if (!rainfallRelationCombo_) return;
+                const auto relation = static_cast<RainfallRelation>(
+                    rainfallRelationCombo_->itemData(index).toInt());
+                if (relation == rainfallRelation_) return;
+                rainfallRelation_ = relation;
+                // Drop the previous relation's grid before the new pass lands:
+                // a Z-R number under an R(KDP) heading would be a lie this
+                // block is not allowed to tell.
+                rainfallLatest_ = {};
+                rainfallLatest_.grid.summary.relation = relation;
+                scheduleRainfallEstimate();
+                refreshRainfallLabels();
+                populateRainfallDialog();
+            });
     rainfallEstimateLabel_ = new QLabel(QStringLiteral("Z-R estimate — no radar selected"), controlBody);
     rainfallEstimateLabel_->setObjectName(QStringLiteral("rainfallEstimateLabel"));
     rainfallEstimateLabel_->setWordWrap(true);
@@ -3291,16 +3324,23 @@ QString rainfallFlagShareText(const std::size_t flagged, const RainfallSummary& 
 }  // namespace
 
 QString MainWindow::rainfallEstimateLine(const RainfallSummary& summary) {
-    // Never a bare number: the product name travels with every value, and an
+    // Never a bare number: the product name travels with every value, an
     // unscorable window says so instead of showing 0.0 mm (which would read as
-    // a measured dry spell).
-    if (!summary.valid || summary.quality == RainfallQuality::Invalid)
-        return QStringLiteral("Z-R estimate — unavailable");
-    return QStringLiteral("Z-R estimate — peak %1 mm")
-        .arg(QString::number(summary.maximumMillimeters, 'f', 1));
+    // a measured dry spell), and a relation whose input the newest volume does
+    // not carry says "unavailable" instead of printing another relation's
+    // number or quietly falling back to Z-R.
+    const auto relation = QString::fromLatin1(rainfallRelationName(summary.relation));
+    if (!summary.relationUnavailableReason.empty() || !summary.valid ||
+        summary.quality == RainfallQuality::Invalid)
+        return QStringLiteral("%1 estimate — unavailable").arg(relation);
+    return QStringLiteral("%1 estimate — peak %2 mm")
+        .arg(relation, QString::number(summary.maximumMillimeters, 'f', 1));
 }
 
 QString MainWindow::rainfallCoverageLine(const RainfallSummary& summary) {
+    if (!summary.relationUnavailableReason.empty())
+        return QStringLiteral(
+            "No window scored — this relation's input is missing from the newest volume");
     if (!summary.valid || summary.quality == RainfallQuality::Invalid)
         return QStringLiteral("No window scored");
     return QStringLiteral("%1 credited of %2 window · %3 volumes")
@@ -3310,9 +3350,14 @@ QString MainWindow::rainfallCoverageLine(const RainfallSummary& summary) {
 
 QString MainWindow::rainfallQualityLine(const RainfallSummary& summary) {
     // Quality flag plus its dominant caveat, never just a colour or a word.
+    // An unavailable relation is not a quality downgrade and not a caveat: it is
+    // the reason the pass produced nothing at all, so it prints verbatim and
+    // outranks every caveat below.
     // Priority inside Marginal: a clamped gap shortens credited time first,
     // then the guard's blind spots, then rays missing an interval, then a short
     // window. The pop-out carries the full per-flag table either way.
+    if (!summary.relationUnavailableReason.empty())
+        return QString::fromStdString(summary.relationUnavailableReason);
     switch (summary.quality) {
         case RainfallQuality::Invalid: {
             QString reason = QStringLiteral("no usable reflectivity geometry");
@@ -3435,18 +3480,20 @@ void MainWindow::scheduleRainfallEstimate() {
     // Cheap by design: showFrame(), volume installs, selection changes and
     // archive loads all funnel here, so the only cost is a signature compare.
     // A resident/spilled swap does not change the signature because a spilled
-    // frame is still scored — it is faulted in on the worker, by path.
+    // frame is still scored — it is faulted in on the worker, by path. The
+    // relation is part of the signature: R(KDP) and Z-R over the same window
+    // are different products, not the same one re-rendered.
     const auto session = activeSession();
-    QString signature;
+    QString signature = QString::number(static_cast<int>(rainfallRelation_));
     if (!session) {
-        signature = QStringLiteral("no-session");
+        signature += QStringLiteral("|no-session");
     } else if (session->history.empty()) {
-        signature = session->radarId + QStringLiteral("|empty");
+        signature += QStringLiteral("|%1|empty").arg(session->radarId);
     } else {
-        signature = QStringLiteral("%1|%2|%3")
-                        .arg(session->radarId)
-                        .arg(session->history.size())
-                        .arg(session->history.back().volumeId);
+        signature += QStringLiteral("|%1|%2|%3")
+                         .arg(session->radarId)
+                         .arg(session->history.size())
+                         .arg(session->history.back().volumeId);
     }
     if (signature == rainfallSignature_) return;
     rainfallSignature_ = signature;
@@ -3460,7 +3507,9 @@ void MainWindow::scheduleRainfallEstimate() {
 void MainWindow::startRainfallCompute() {
     const auto session = activeSession();
     if (!session || session->history.size() < 2) {
+        const auto relation = rainfallRelation_;
         rainfallLatest_ = {};
+        rainfallLatest_.grid.summary.relation = relation;
         rainfallJobRadarId_.clear();
         refreshRainfallLabels();
         return;
@@ -3475,14 +3524,19 @@ void MainWindow::startRainfallCompute() {
     const auto frames = std::make_shared<std::vector<RainfallFrameSnapshot>>(
         rainfallFrameSnapshot(*session, 40));
     const QString radarId = session->radarId;
+    // Snapshot the relation on the GUI thread: the worker must score the
+    // product the block is showing, not whatever the combo says when it lands.
+    RainfallConfig rainfallConfig;
+    rainfallConfig.relation = rainfallRelation_;
     const QPointer<MainWindow> guard(this);
     rainfallJobRadarId_ = radarId;
     rainfallInFlight_ = true;
-    QThreadPool::globalInstance()->start([guard, frames, radarElevationMeters, radarId] {
+    QThreadPool::globalInstance()->start([guard, frames, radarElevationMeters, radarId,
+                                          rainfallConfig] {
         // Volume-sized work: one column pass per volume. Off the GUI thread so
         // playback and scrubbing never wait on it.
         auto result = std::make_shared<RainfallHistoryResult>(
-            accumulateRainfallHistory(*frames, radarElevationMeters));
+            accumulateRainfallHistory(*frames, radarElevationMeters, rainfallConfig));
         if (!guard) return;
         QMetaObject::invokeMethod(
             guard.data(),
@@ -3506,6 +3560,14 @@ void MainWindow::applyRainfallEstimate(RainfallHistoryResult result) {
         startRainfallCompute();
         return;
     }
+    if (result.grid.summary.relation != rainfallRelation_) {
+        // The relation changed while this grid was integrating: it describes a
+        // product the block no longer offers. Drop it and score the new one
+        // rather than printing Z-R under an R(KDP) heading.
+        rainfallDirty_ = false;
+        startRainfallCompute();
+        return;
+    }
     rainfallLatest_ = std::move(result);
     refreshRainfallLabels();
     populateRainfallDialog();
@@ -3520,21 +3582,24 @@ void MainWindow::refreshRainfallLabels() {
     const auto session = activeSession();
     const auto& grid = rainfallLatest_.grid;
     const auto& summary = grid.summary;
+    const auto selectedRelation = QString::fromLatin1(rainfallRelationName(rainfallRelation_));
     QString estimate;
     QString coverage;
     QString quality;
     if (!session) {
-        estimate = QStringLiteral("Z-R estimate — no radar selected");
+        estimate = QStringLiteral("%1 estimate — no radar selected").arg(selectedRelation);
         coverage = QStringLiteral("Pick a station to score the volumes it holds.");
     } else if (session->history.size() < 2) {
-        estimate = QStringLiteral("Z-R estimate — %1 of 2 volumes loaded")
+        estimate = QStringLiteral("%1 estimate — %2 of 2 volumes loaded")
+                       .arg(selectedRelation)
                        .arg(session->history.size());
         coverage = QStringLiteral("Needs two volumes with scan times before it can integrate.");
     } else if ((!rainfallLatest_.radarId.isEmpty() && rainfallLatest_.radarId != session->radarId) ||
                (summary.sampleCount == 0 && rainfallInFlight_)) {
         // Either the previous grid belongs to another radar or this window has
         // not been scored yet: say so instead of leaving a foreign number up.
-        estimate = QStringLiteral("Z-R estimate — scoring %1 volumes…")
+        estimate = QStringLiteral("%1 estimate — scoring %2 volumes…")
+                       .arg(selectedRelation)
                        .arg(session->history.size());
         coverage = QStringLiteral("Window and coverage land when the pass finishes.");
     } else {
@@ -3544,9 +3609,10 @@ void MainWindow::refreshRainfallLabels() {
     }
     rainfallEstimateLabel_->setText(estimate);
     rainfallEstimateLabel_->setToolTip(
-        QStringLiteral("Z-R relation on the lowest tilt of each volume in the window. The newest "
+        QStringLiteral("%1 relation on the lowest tilt of each volume in the window. The newest "
                        "volume is not credited (left hold), so this is a lower-bound estimate, "
-                       "never an observed rainfall total."));
+                       "never an observed rainfall total.")
+            .arg(selectedRelation));
     rainfallCoverageLabel_->setText(coverage);
     rainfallQualityLabel_->setText(quality);
     rainfallQualityLabel_->setVisible(!quality.isEmpty());
@@ -3849,6 +3915,19 @@ void MainWindow::restoreSettings() {
     for (auto* panel : maps_) panel->setCustomPalette(customStops);
     productCombo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("view/product"), 0).toInt(),
                                               0, productCombo_->count() - 1));
+    // The relation is a view setting like the product: a user who picked R(KDP)
+    // must not find Z-R silently back after a restart. An absent or unknown key
+    // reads as Z-R rather than as whichever relation the number happens to hit.
+    if (rainfallRelationCombo_) {
+        const auto storedRelation =
+            settings.value(QStringLiteral("rainfall/relation"), 0).toInt();
+        auto storedIndex = rainfallRelationCombo_->findData(storedRelation);
+        if (storedIndex < 0) storedIndex = 0;
+        rainfallRelation_ = static_cast<RainfallRelation>(
+            rainfallRelationCombo_->itemData(storedIndex).toInt());
+        const QSignalBlocker blocker(rainfallRelationCombo_);
+        rainfallRelationCombo_->setCurrentIndex(storedIndex);
+    }
     // Snap a foreign height (older builds, hand edits) to the nearest preset.
     {
         const double saved = settings.value(QStringLiteral("view/cappiHeightM"), 3000.0).toDouble();
@@ -3971,6 +4050,7 @@ void MainWindow::saveSettings() const {
     if (controlDock_ && controlDock_->isVisible())
         settings.setValue(QStringLiteral("window/controlDockWidth"), controlDock_->width());
     settings.setValue(QStringLiteral("view/product"), productCombo_->currentIndex());
+    settings.setValue(QStringLiteral("rainfall/relation"), static_cast<int>(rainfallRelation_));
     settings.setValue(QStringLiteral("view/cappiHeightM"), cappiHeightM_);
     settings.setValue(QStringLiteral("view/palette"), paletteCombo_->currentIndex());
     QStringList customStops;
@@ -4884,7 +4964,7 @@ void MainWindow::showCommandPalette() {
     addEntry(QStringLiteral("View: data-saver preset"), QStringLiteral("Flaky-cellular chase mode"),
              [this] { applyDataSaverPreset(); });
     addEntry(QStringLiteral("Analysis: rainfall estimate details"),
-             QStringLiteral("Z-R window, coverage and provenance flags"),
+             QStringLiteral("Relation, window, coverage and provenance flags"),
              [this] { showRainfallDetails(); });
     addEntry(QStringLiteral("Export: snapshot PNG"), QStringLiteral("Shortcut Ctrl+S"),
              [this] { exportSnapshot(); });
@@ -6102,13 +6182,24 @@ void MainWindow::populateRainfallDialog() {
     const auto radarId = !rainfallLatest_.radarId.isEmpty()
                              ? rainfallLatest_.radarId
                              : (session ? session->radarId : QString{});
+    const auto relationName = QString::fromLatin1(rainfallRelationName(summary.relation));
     rainfallDialog_->setWindowTitle(
-        radarId.isEmpty() ? QStringLiteral("Z-R rainfall estimate")
-                          : QStringLiteral("Z-R rainfall estimate — %1").arg(radarId));
+        radarId.isEmpty() ? QStringLiteral("%1 rainfall estimate").arg(relationName)
+                          : QStringLiteral("%1 rainfall estimate — %2").arg(relationName, radarId));
+    rainfallDialogSummary_->setText(rainfallEstimateLine(summary) + QLatin1Char('\n') +
+                                    rainfallCoverageLine(summary) + QLatin1Char('\n') +
+                                    rainfallQualityLine(summary));
+    if (!summary.relationUnavailableReason.empty()) {
+        // Named input missing, not a bad window: the pop-out says which product
+        // the relation needs and that nothing was substituted for it.
+        rainfallFlagTable_->setRowCount(0);
+        rainfallDialogNotes_->setText(QStringLiteral(
+            "The newest volume's lowest reflectivity tilt does not carry what this relation "
+            "needs, so nothing is scored and nothing falls back to Z-R. Pick another relation, "
+            "or load a volume that carries the moment. Guidance only, never warnings."));
+        return;
+    }
     if (!summary.valid || summary.quality == RainfallQuality::Invalid) {
-        rainfallDialogSummary_->setText(
-            rainfallEstimateLine(summary) + QLatin1Char('\n') + rainfallCoverageLine(summary) +
-            QLatin1Char('\n') + rainfallQualityLine(summary));
         rainfallFlagTable_->setRowCount(0);
         rainfallDialogNotes_->setText(QStringLiteral(
             "Nothing is scored until at least two volumes with scan times are in the window. "
@@ -6116,29 +6207,55 @@ void MainWindow::populateRainfallDialog() {
             "one. Guidance only, never warnings."));
         return;
     }
-    rainfallDialogSummary_->setText(
-        rainfallEstimateLine(summary) + QLatin1Char('\n') + rainfallCoverageLine(summary) +
-        QLatin1Char('\n') + rainfallQualityLine(summary));
+
+    // The clamp rows describe the relation that actually ran, so their bounds
+    // come from the same config the accumulator used rather than from a literal.
+    RainfallConfig bounds;
+    bounds.relation = summary.relation;
+    QString inputClampedLabel = QStringLiteral("Input clamped — Z-R has no secondary input");
+    if (summary.relation == RainfallRelation::Zdr) {
+        inputClampedLabel =
+            QStringLiteral("Input clamped — ZDR outside %1 to %2 dB, rate from the clamp")
+                .arg(QString::number(bounds.minimumZdrDb, 'f', 1),
+                     QString::number(bounds.maximumZdrDb, 'f', 1));
+    } else if (summary.relation == RainfallRelation::Kdp) {
+        inputClampedLabel =
+            QStringLiteral("Input clamped — KDP above %1 deg/km, rate from the clamp")
+                .arg(QString::number(bounds.maximumKdpDegreesPerKm, 'f', 1));
+    }
+    const auto rateCappedLabel = QStringLiteral("Rate capped — above the %1 mm/h ceiling")
+                                     .arg(QString::number(
+                                         bounds.maximumRateMillimetersPerHour, 'f', 0));
 
     struct FlagRow {
-        const char* label;
+        QString label;
         std::size_t count;
     };
     const FlagRow rows[] = {
-        {"Clutter suspect — strong echo with no column above 3 km", summary.clutterSuspectGateCount},
-        {"Non-meteorological — dual-pol CC below 0.80", summary.nonMeteorologicalGateCount},
-        {"Hail capped — reflectivity above 53 dBZ, rate clamped", summary.hailCappedGateCount},
-        {"Beam above 2 km MSL — depth kept, weak provenance", summary.beamHighGateCount},
-        {"Beyond the 230 km QPE range — no depth", summary.rangeLimitedGateCount},
-        {"Missing at least one volume — no depth for it", summary.incompleteGateCount},
-        {"Column guard could not run — depth kept, untested", summary.noVerticalCheckGateCount},
-        {"Gap-clamped interval — credited 600 s maximum", summary.gapClampedGateCount},
-        {"Depth saturated — hit the storage cap", summary.depthSaturatedGateCount},
+        {QStringLiteral("Clutter suspect — strong echo with no column above 3 km"),
+         summary.clutterSuspectGateCount},
+        {QStringLiteral("Non-meteorological — dual-pol CC below 0.80"),
+         summary.nonMeteorologicalGateCount},
+        {QStringLiteral("Hail capped — reflectivity above 53 dBZ, rate clamped"),
+         summary.hailCappedGateCount},
+        {QStringLiteral("Beam above 2 km MSL — depth kept, weak provenance"),
+         summary.beamHighGateCount},
+        {QStringLiteral("Beyond the 230 km QPE range — no depth"),
+         summary.rangeLimitedGateCount},
+        {QStringLiteral("Missing at least one volume — no depth for it"),
+         summary.incompleteGateCount},
+        {QStringLiteral("Column guard could not run — depth kept, untested"),
+         summary.noVerticalCheckGateCount},
+        {QStringLiteral("Gap-clamped interval — credited 600 s maximum"),
+         summary.gapClampedGateCount},
+        {QStringLiteral("Depth saturated — hit the storage cap"), summary.depthSaturatedGateCount},
+        {inputClampedLabel, summary.inputClampedGateCount},
+        {rateCappedLabel, summary.rateCappedGateCount},
     };
     const auto rowCount = static_cast<int>(std::size(rows));
     rainfallFlagTable_->setRowCount(rowCount);
     for (int row = 0; row < rowCount; ++row) {
-        auto* nameItem = new QTableWidgetItem(QString::fromUtf8(rows[row].label));
+        auto* nameItem = new QTableWidgetItem(rows[row].label);
         auto* countItem = new QTableWidgetItem(QString::number(rows[row].count));
         countItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         auto* shareItem = new QTableWidgetItem(
@@ -6192,12 +6309,61 @@ void MainWindow::populateRainfallDialog() {
                  .arg(rainfallLatest_.frameCount)
                  .arg(summary.rejectedSampleCount)
                  .arg(rainfallLatest_.unreadableSpillCount);
+    // The relation line names the formula that actually ran. Hardcoding the Z-R
+    // coefficients here would describe a different product than the numbers
+    // above it as soon as the user picks a dual-pol relation.
+    QString relationNote;
+    switch (summary.relation) {
+        case RainfallRelation::MarshallPalmer:
+            relationNote =
+                QStringLiteral("Relation: Z-R, R = (Z/%1)^(1/%2) mm/h on each volume's lowest "
+                               "tilt, %3 dBZ floor, %4 dBZ hail cap, %5 mm/h ceiling, %6 km "
+                               "range cap, beam trusted to %7 km MSL and refused above %8 km, "
+                               "column-top clutter veto, ground-range remap across changing gate "
+                               "geometries.")
+                    .arg(QString::number(bounds.zrA, 'g'))
+                    .arg(QString::number(bounds.zrB, 'g'))
+                    .arg(QString::number(bounds.minimumReflectivityDbz, 'f', 0))
+                    .arg(QString::number(bounds.hailCapDbz, 'f', 0))
+                    .arg(QString::number(bounds.maximumRateMillimetersPerHour, 'f', 0))
+                    .arg(QString::number(bounds.maximumRangeMeters / 1000.0, 'f', 0))
+                    .arg(QString::number(bounds.beamHeightFlagMeters / 1000.0, 'f', 1))
+                    .arg(QString::number(bounds.maximumBeamHeightMeters / 1000.0, 'f', 1));
+            break;
+        case RainfallRelation::Zdr:
+            relationNote =
+                QStringLiteral("Relation: R(Z,ZDR) = %1 Z^%2 Zdr^-%3 mm/h (S band, Ryzhkov et al. "
+                               "2005) on each volume's lowest tilt, ZDR clamped to %4 to %5 dB, "
+                               "%6 dBZ floor, %7 dBZ hail cap, %8 mm/h ceiling, %9 km range cap, "
+                               "column-top clutter veto, dual-pol CC veto.")
+                    .arg(QString::number(bounds.zdrA, 'g'))
+                    .arg(QString::number(bounds.zdrB, 'g'))
+                    .arg(QString::number(bounds.zdrC, 'g'))
+                    .arg(QString::number(bounds.minimumZdrDb, 'f', 1))
+                    .arg(QString::number(bounds.maximumZdrDb, 'f', 1))
+                    .arg(QString::number(bounds.minimumReflectivityDbz, 'f', 0))
+                    .arg(QString::number(bounds.hailCapDbz, 'f', 0))
+                    .arg(QString::number(bounds.maximumRateMillimetersPerHour, 'f', 0))
+                    .arg(QString::number(bounds.maximumRangeMeters / 1000.0, 'f', 0));
+            break;
+        case RainfallRelation::Kdp:
+            relationNote =
+                QStringLiteral("Relation: R(KDP) = %1 |KDP|^%2 sign(KDP) mm/h (S band, WSR-88D "
+                               "dual-pol QPE) on each volume's lowest tilt, KDP floored at %3 and "
+                               "clamped above %4 deg/km, %5 mm/h ceiling, %6 km range cap, "
+                               "column-top clutter veto, dual-pol CC veto.")
+                    .arg(QString::number(bounds.kdpA, 'g'))
+                    .arg(QString::number(bounds.kdpB, 'g'))
+                    .arg(QString::number(bounds.minimumKdpDegreesPerKm, 'f', 1))
+                    .arg(QString::number(bounds.maximumKdpDegreesPerKm, 'f', 0))
+                    .arg(QString::number(bounds.maximumRateMillimetersPerHour, 'f', 0))
+                    .arg(QString::number(bounds.maximumRangeMeters / 1000.0, 'f', 0));
+            break;
+    }
+    notes << relationNote;
     notes << QStringLiteral(
-        "Relation: R = (Z/300)^(1/1.4) mm/h on each volume's lowest tilt, 5 dBZ floor, 53 dBZ "
-        "hail cap, 230 km range cap, beam trusted to 2 km MSL and refused above 4 km, column-top "
-        "clutter veto, ground-range remap across changing gate geometries.");
-    notes << QStringLiteral(
-        "Not validated: zero cases scored against gauges or MRMS (docs/rainfall-validation.md). "
+        "Not validated: zero cases scored against gauges or MRMS for any of the three relations "
+        "(docs/rainfall-validation.md). "
         "Guidance only, never warnings. Left hold credits nothing after the newest volume, so "
         "this is a lower bound; codes 0/1 read as no rain where the format does not say which "
         "is which.");

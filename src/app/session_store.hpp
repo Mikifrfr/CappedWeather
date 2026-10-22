@@ -113,7 +113,7 @@ bool installPrefetchedChunk(RadarSession& session, const QString& volumeId,
                             std::shared_ptr<DecodedChunk> chunk, int maximumHistoryFrames);
 
 // ---------------------------------------------------------------------------
-// Z-R rainfall accumulation input (serialized for an off-thread call)
+// Rainfall accumulation input (serialized for an off-thread call)
 // ---------------------------------------------------------------------------
 // The engine needs one sample per volume with the volume's scan time, but a
 // DecodedChunk carries no time at all (and the CWDV spill format has none
@@ -146,9 +146,10 @@ struct RainfallHistoryResult {
 };
 
 // Off-GUI-thread half of the readout: faults spilled frames back in from disk
-// by path, pairs every volume with its frame time, and integrates the Z-R
-// estimate over the newest volume's lowest tilt. Unreadable spills are counted
-// and skipped, never guessed at. Touches no session state, so it is safe to run
+// by path, pairs every volume with its frame time, and integrates the chosen
+// rain-rate relation (Z-R by default, R(Z,ZDR) / R(KDP) via config.relation)
+// over the newest volume's lowest tilt. Unreadable spills are counted and
+// skipped, never guessed at. Touches no session state, so it is safe to run
 // on a worker while playback keeps scrubbing.
 RainfallHistoryResult accumulateRainfallHistory(const std::vector<RainfallFrameSnapshot>& frames,
                                                 double radarElevationMeters,

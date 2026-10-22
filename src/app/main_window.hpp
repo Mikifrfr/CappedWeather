@@ -139,11 +139,14 @@ public:
     // cappedweather::kScanStaleSeconds so the threshold has one home and this
     // symbol still exists for the suite that compiles against it.
     static constexpr qint64 kScanStaleSeconds = cappedweather::kScanStaleSeconds;
-    // Z-R rainfall readout (Display tab). A lower-bound estimate over the
-    // volume history the session actually holds — never a measurement, never a
-    // bare number. Line 1 names the estimate and its peak, line 2 its window
-    // and coverage, line 3 the quality flag and the dominant caveat. Public and
-    // static because the wording IS the honesty contract: unit-tested exactly.
+    // Rainfall readout (Display tab): one rain-rate relation at a time, Z-R by
+    // default, R(Z,ZDR) / R(KDP) when the newest volume carries the moment. A
+    // lower-bound estimate over the volume history the session actually holds —
+    // never a measurement, never a bare number, never another relation's number.
+    // Line 1 names the relation and its peak (or "unavailable"), line 2 the
+    // window and coverage, line 3 the quality flag and the dominant caveat — or
+    // the reason the relation cannot be computed at all. Public and static
+    // because the wording IS the honesty contract: unit-tested exactly.
     static QString rainfallEstimateLine(const RainfallSummary& summary);
     static QString rainfallCoverageLine(const RainfallSummary& summary);
     static QString rainfallQualityLine(const RainfallSummary& summary);
@@ -172,9 +175,9 @@ private slots:
     // Scan diagnostics pop-out: a real slot (not just a method) so tests,
     // the command palette, and the Details button share one entry point.
     void showScanDiagnostics();
-    // Z-R rainfall pop-out: the dock block's numbers plus the per-flag
-    // provenance table and the unvalidated warning. Real slot for the same
-    // reason (tests, palette, Details button share it).
+    // Rainfall pop-out: the dock block's numbers plus the per-flag provenance
+    // table, the relation's formula and the unvalidated warning. Real slot for
+    // the same reason (tests, palette, Details button share it).
     void showRainfallDetails();
     // RAOB sounding pop-out: hodograph plus sounding SRH ground truth and
     // freezing level for the current Bunkers motion. Real slot like above.
@@ -463,9 +466,13 @@ private:
     QCheckBox* trailCheck_ = nullptr;
     QCheckBox* smoothingCheck_ = nullptr;
     QLabel* scanDiagnosticsLabel_ = nullptr;
-    // Rainfall (Z-R estimate) block: three wrapped lines in the Display tab
-    // plus the pop-out that carries per-flag provenance. The grid is kept so
-    // the pop-out can name the peak gate and a future paint can reuse it.
+    // Rainfall estimate block: the relation selector, three wrapped lines in
+    // the Display tab plus the pop-out that carries per-flag provenance. The
+    // grid is kept so the pop-out can name the peak gate and a future paint can
+    // reuse it. rainfallRelation_ is the UI's choice; the grid's own summary
+    // carries the relation that actually produced it.
+    QComboBox* rainfallRelationCombo_ = nullptr;
+    RainfallRelation rainfallRelation_ = RainfallRelation::MarshallPalmer;
     QLabel* rainfallEstimateLabel_ = nullptr;
     QLabel* rainfallCoverageLabel_ = nullptr;
     QLabel* rainfallQualityLabel_ = nullptr;
