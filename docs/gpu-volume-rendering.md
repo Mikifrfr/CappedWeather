@@ -1,8 +1,67 @@
 # GPU volume rendering of live Level II: design
 
-Status: M2 spike measured 2026-10-21 (card t_710dd647). The raymarch renders on
-D3D11; it is not wired into the panel toggle yet (see "Spike results" below for
-what is proved and what is not). 2D stays the primary console.
+Status: wired into the panel on 2026-10-21 (card t_f71a0be0). The 3D toggle
+now draws through the resident D3D11 raymarch and falls back to the CPU march
+with the reason on the chip when the device cannot run. The CPU march stays
+built and selectable (`setVolume3dBackend()`, `CAPPEDWEATHER_VOLUME_GPU=0`).
+2D stays the primary console.
+
+
+## Panel integration: option 1, decided before the code (2026-10-21, card t_f71a0be0)
+
+The spike left two ways to put the GPU march behind the panel's existing 3D
+toggle. The decision is **option 1: render to an image on a worker thread and
+keep `volumeImage_` as the panel's only 3D surface**, with one change to the
+spike's shape: the device lives on a dedicated thread for the process and the
+brick stays uploaded on it, because device creation measures 91-132 ms and a
+per-frame device would eat the entire 4-8 ms win.
+
+Why not option 2 (a `QRhiWidget` child plus a transparent HUD overlay):
+
+- **The HUD is the panel, not a sticker.** `paintVolume3d` paints the volume
+  image, the orientation grid / range rings / site marker / height axis, the
+  backend chip, the Alt+drag box rectangle and the help line. Option 2 moves
+  that into an overlay widget that would have to composite over a native
+  child window on every platform; the grid is projected through the *same*
+  camera as the image (`volumeCameraFor`), so camera state would have to be
+  shared with a second widget anyway.
+- **Mouse handling is 170 lines of panel code** (orbit drag with middle-drag
+  focus, wheel dolly, right-click exit, Alt+drag ROI, and the gates that keep
+  those from firing while measure / cross-section / pinned-card modes are
+  active). A child widget receives the events, not the panel, so every one of
+  those paths would need an event filter or a move. Option 1 keeps the event
+  stream exactly where it is today.
+- **`QWidget::grab()` is the screenshot and test path** (`volume3d_probe`,
+  `readme_screenshots`, the UI suite). A native D3D11 swapchain child is not
+  guaranteed to appear in a grab; an image in the panel always does.
+- **Panel repaint semantics.** The 2D map underneath is a QPainter pass over
+  tiles that the panel owns; a child widget that owns its own swapchain
+  changes what "repaint the panel" means for every other overlay in that
+  widget.
+
+What option 1 costs, all measured: one readback per frame (1.3 MB at 720x450,
+5.2 MB at 1440x900), one device for the process (91-132 ms once), and a copy
+of the frame through a `QImage`. It buys the entire HUD, the ROI box, the
+camera maths, the mouse handling, the screenshot path and the failure text for
+free, because `volumeImage_` does not change shape.
+
+Consequences that stay true:
+
+- **The widget stays the proving path.** `VolumeCanvas : QRhiWidget` is not
+  dead code: `volume3d_probe --gpu` still renders through it to prove the
+  widget's presentation path matches the offscreen path (checksums in the
+  spike section below), and `tests/ui_smoke_test.cpp` drives it. If a future
+  card moves the panel to a widget, that comparison is the acceptance test.
+- **The GPU frame is opaque.** The shader composites over the 3D view
+  background and writes alpha 1.0, so the panel does not hit the
+  premultiplied-alpha defect that makes its CPU march paint dim (spike
+  section, "CPU vs GPU"). The two backends therefore differ in brightness
+  until that CPU bug is fixed; the chip says which one drew the frame.
+- **Resolution stays on the CPU policy** (half the panel while idle, a third
+  while dragging). The GPU could march the full panel for 8-12 ms, but a
+  sharper preview is a separate measured change; this card keeps GPU and CPU
+  comparable ray for ray.
+
 
 
 ## Decisions (2026-10-08)
@@ -267,13 +326,188 @@ backend; this spike ships no shader set for <backend>`).
 
 ### Not done (deliberately)
 
-- **No wiring into the panel toggle.** The 3D view is painted by
-  `RadarMapCanvas` with QPainter (image + orientation grid + chip + drag
-  rectangle). A full-size `QRhiWidget` child would cover that HUD, so making the
-  GPU path the panel's backend needs one of: (a) GPU render to an image on the
-  existing worker thread (adds a readback, keeps the HUD untouched), or (b) the
-  widget plus a transparent HUD overlay. Both are integration decisions with
-  their own measurements — a follow-up card, not part of the spike.
+- **No wiring into the panel toggle in the spike.** That was card t_f71a0be0 and
+  is done now — see "Panel integration results" below for the decision (option 1)
+  and the numbers.
 - Empty-space skipping (32^3 occupancy) — stretch, not required; the 4-8 ms
   frame leaves no reason to complicate the shader yet.
 - Backends other than D3D11, MSAA, multi-panel fill-rate policy.
+
+## Panel integration results — 2026-10-22 (card t_f71a0be0)
+
+The 3D toggle now draws through the resident D3D11 march, with the CPU march as
+the fallback and the reason on the chip. `volumeImage_`, the HUD, the camera
+maths, the Alt+drag box and every mouse path are unchanged; only the thread that
+fills that image is new.
+
+Both screenshots are the shipping panel on the real archive
+(`data/moore_replay/KTLX20130520_201229_V06`, KTLX 2013-05-20 20:12Z REF):
+
+- `docs/screenshots/volume3d-panel-gpu.png` — chip `3D preview (GPU) ... REF 31 ms`
+- `docs/screenshots/volume3d-panel-cpu-fallback.png` — broken HLSL: chip
+  `3D preview (CPU) ... REF 642 ms` plus one line
+  `CPU fallback: HLSL shader compilation failed: 0x80004005`, volume still drawn
+
+### Per-frame cost, same volume, same camera, same brick
+
+`volume3d_probe <archive> <out.png> ref 8000 --gpu` at a 1440x900 panel
+(idle box, RX 7800 XT; the CPU number is a 720x450 march because the policy is
+half resolution, the GPU numbers cover the panel size they name):
+
+| path | frame | notes |
+|---|---|---|
+| CPU march, panel as painted | 625-659 ms | the "before" of this card |
+| GPU offscreen, 1440x900 | 3.78-4.56 ms | private device, 3 frames |
+| GPU resident, 1440x900 | 3.76-4.22 ms | panel's device, texture already uploaded |
+| GPU resident, panel frame 720x450 | **1.79 ms** | after one orbit, `panel_gpu_settled` |
+| first frame on a fresh device | 108-143 ms | device + 16.8 MB upload, once |
+| first panel frame after a resize | 31.1-31.4 ms | includes the HLSL pipeline compile |
+| toggle -> first frame on screen | 198-236 ms | brick build + device + march |
+
+The brick is uploaded once and stays resident: `uploads=1 frames=2` across the
+two resident frames, and the UI suite proves the policy (`uploads=2 frames=4`
+for two frames on one brick, a resize, and one changed brick). GPU and
+offscreen frames are pixel-identical for the same camera (`checksum=331428282`
+on both), and `lit_fraction=0.08097` at 1440x900 matches the spike.
+
+### 2D paint while the 3D panel is live
+
+`pan_benchmark` (live KJAX, `grab()` of panel 0 after each drag step, i.e. a
+full synchronous 2D repaint):
+
+| run | samples | median | p95 |
+|---|---|---|---|
+| 1x1, no 3D | 40 | 23.03 ms | 63.32 ms |
+| 1x2 control (`--pair`), panel 1 on the 2D map | 60 | 14.69 ms | 19.68 ms |
+| 1x2 control, second run | 40 | 16.20 ms | 20.83 ms |
+| 1x2, GPU 3D panel orbiting | 60 | **14.78 ms** | **17.79 ms** |
+| 1x2, GPU 3D panel orbiting, second run | 40 | 17.17 ms | 44.82 ms |
+| 1x2, GPU 3D panel orbiting, third run | 40 | 15.83 ms | 19.45 ms |
+
+Median is flat against the same-layout control (+0.6%); p95 is not a stable
+statistic at 40-60 samples on a live feed (one slow overlay rebuild moves it:
+17.8, 19.5, 44.8 ms across three identical runs). What the numbers do establish
+is that a live GPU 3D panel does not stall the 2D paint path: the GPU thread
+marches, the GUI thread paints, and the 2D median stays where the control is.
+The 1x1 row is not a comparison — panel 0 is wider there, so it paints more.
+
+### Fallback, proved with a broken shader
+
+`CAPPEDWEATHER_VOLUME_BREAK_SHADER=1 volume3d_probe ... --gpu`:
+
+```
+gpu_offscreen failed error="HLSL shader compilation failed: 0x80004005"
+gpu_widget ready=0 backend=D3D11 frames=0 status="HLSL shader compilation failed: 0x80004005"
+gpu_resident failed error="HLSL shader compilation failed: 0x80004005"
+3D: GPU raymarch failed, using the CPU march - HLSL shader compilation failed: 0x80004005
+panel_gpu backend=CPU render_ms=642.0 gpu_error="HLSL shader compilation failed: 0x80004005"
+panel_gpu_settled backend=CPU render_ms=709.00 frames=0 applied_ms=8365.0
+cpu backend=CPU lit_fraction=0.05990 checksum=327495561 render_ms=616.0
+```
+
+`frames=0` on the second line is the sticky part: after one failure the panel
+does not keep retrying the device per orbit, it marches on the CPU and says why.
+Toggling the 3D view off and on again is treated as a deliberate retry.
+
+### Honest limits of this integration
+
+- **The chip's `ms` is a march time, not a presented frame.** It is the readback
+  interval on the GPU thread, the same field the CPU path always reported.
+- **The first GPU frame of a panel is slower than the rest** (31 ms at 720x450):
+  the shader pipeline is compiled on the first draw after a new render target.
+  The frame after it is 1.8 ms. Nothing is smoothed over; the chip shows what
+  the frame cost.
+- **Resolution stays on the CPU policy** (half resolution idle, a third while
+  dragging), so the GPU is not being asked to do more than the CPU was. Raising
+  it is a separate measured change.
+- **One process-wide device, one frame at a time.** Two 3D panels serialize on
+  the GPU thread; each still gets 2-8 ms frames because the texture is resident.
+
+
+## The chip names the backend, and the resident texture follows the brick — 2026-10-22 (card t_51d7af1a)
+
+Two things were missing once the wiring landed on `main`: a reader could not tell
+which raymarcher drew the frame, and the resident 3D texture was created once and
+never resized when a brick with a different grid arrived on the same device.
+
+### Chip
+
+`3D  <radar> <product>  <ms> ms  (<backend>)` followed by the existing box and
+interpolation disclosures, so the operator reads the backend and the honesty
+caveats on the same line:
+
+- GPU frame: `3D  KTLX REF  50 ms  (Direct3D 11)  - 17 tilts interpolated (78% reconstructed)`
+  (`docs/screenshots/volume3d-chip-gpu.png`)
+- CPU frame: `3D  KTLX REF  1154 ms  (CPU)  - 17 tilts interpolated (78% reconstructed)`
+  (`docs/screenshots/volume3d-chip-cpu-fallback.png`)
+
+`(Direct3D 11)` is the string the RHI reported (`rhi_->backendName()`), not a
+constant, so a GL shader set (card t_9691d611) will name OpenGL without a code
+change. The frame's backend and its cost are written together by `publish()`, and
+`volumeFrameGpu_` no longer flips optimistically at request time: a chip that says
+`(Direct3D 11)` is always describing the pixels on screen. A panel with no frame
+yet reads `3D  KTLX REF  rendering (GPU)`, never a backend paired with a cost it
+did not measure. Returning to a backend (`setVolume3dBackend`) drops the old
+frame, its label and its ms, so the transition cannot show the previous
+backend's number under the new backend's name.
+
+The text rules are pinned hermetically in `ui_smoke_test` through
+`RadarMapCanvas::volume3dChipLabel(Volume3dChipState)`: a GPU frame names its
+API, a CPU frame never names one (even with a stale backend string), and no cost
+is claimed before a frame has measured one.
+
+### The crash the test found
+
+`cappedweather_ui_tests -platform offscreen` died with exit 139 the moment the
+resident device was asked for a brick whose grid was not the one already
+resident: the 3D texture was created on first upload and then reused for every
+later brick, so a 40x40x20 upload went into a texture still sized 256x256x128.
+D3D11 walked the old row pitch off the end of the byte array — an access
+violation inside the QRhi batch (`sev=c0000005` inside
+`endOffscreenFrame()`), not a failure the caller could catch. It reproduced only
+when a differently-shaped brick followed another on the same device, which is why
+the probe (one grid per run) never saw it.
+
+The fix keeps the texture's grid and depth next to it and replaces the texture
+when the brick changes shape, recreating the SRB and pipeline with it (they bind
+the texture by pointer). `ui_smoke_test` now marches a 24x24x12 brick on the
+device that just uploaded a 40x40x20 one: `uploads=3 frames=5` and a non-null
+image. Before the fix that frame was the crash.
+
+### Numbers, same binary, real archive, 1440x900
+
+`volume3d_probe data/moore_replay/KTLX20130520_201229_V06 <out> ref 8000 --gpu
+--size=1440x900` (KTLX 2013-05-20 20:12Z, RX 7800 XT, one machine):
+
+| path | frame | lit_fraction | note |
+|---|---|---|---|
+| shipping panel, CPU backend | **1254 ms** | 0.13713 | what a user had before the wiring |
+| shipping panel, GPU backend (first frame) | 50.4 ms | 0.14938 | includes the pipeline compile |
+| shipping panel, GPU backend (after one orbit) | **1.79 ms** | 0.14479 | `panel_gpu_settled` |
+| GPU offscreen frame | 4.44 ms | 0.13691 | private device, 3 frames |
+| GPU resident frame | 6.02 ms | 0.13691 | texture resident, `uploads=1 frames=2` |
+
+The panel rows carry the HUD (grid, rings, chip), so their `lit_fraction` is not
+comparable to the raw frames; the structural comparison is GPU 0.13691 against
+the CPU panel 0.13713 (0.16% apart) at the same camera, plus the hermetic
+GPU/CPU frame check in `ui_smoke_test` (0.0891 vs 0.0839 lit).
+
+### Fallback, proved with a broken shader at 1440x900
+
+`CAPPEDWEATHER_VOLUME_BREAK_SHADER=1 volume3d_probe ... --gpu --size=1440x900`:
+
+```
+gpu_offscreen failed error="HLSL shader compilation failed: 0x80004005"
+3D: GPU raymarch failed, using the CPU march - HLSL shader compilation failed: 0x80004005
+panel_gpu backend=CPU render_ms=1154.0 toggle_first_frame_ms=1517.0 lit_fraction=0.13914 gpu_error="HLSL shader compilation failed: 0x80004005"
+panel_gpu_settled backend=CPU render_ms=1320.00 frames=0 applied_ms=8409.0 lit_fraction=0.13583
+cpu backend=CPU lit_fraction=0.13712 checksum=444961060 render_ms=1179.0
+```
+
+The panel drew a volume (`lit_fraction=0.13914`, not a black panel), the chip
+said `(CPU)`, and the one line under it named the reason.
+
+### Still open
+
+- D3D11 is the only shader set; the GLSL/qsb port is card t_9691d611.
+- The `ms` remains a march time, not a presented frame (unchanged by this card).
