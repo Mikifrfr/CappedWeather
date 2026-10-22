@@ -3,6 +3,12 @@
 Status: design. Supersedes the render-path sections of `gpu-volume-rendering.md`;
 the `VolumeBrick` data layer from that doc is kept unchanged.
 
+Shader status: since 2026-10-22 (card t_9691d611) the raymarch is one GLSL
+source (`src/app/shaders/volume.{vert,frag}`) baked by Qt Shader Tools into a
+cross-API `.qsb` — Direct3D 11, OpenGL and Vulkan frames are measured on this
+machine; D3D12 is refused by name and Metal is baked but unmeasured. See
+`gpu-volume-rendering.md`, section "Cross-API shader set".
+
 Target look: the aguacerowx 3D NEXRAD view / CM1-style storm rendering — a lit,
 semi-transparent volume you can orbit, with the storm reading as a solid object
 rather than colored fog.

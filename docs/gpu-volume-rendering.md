@@ -1,10 +1,13 @@
 # GPU volume rendering of live Level II: design
 
 Status: wired into the panel on 2026-10-21 (card t_f71a0be0). The 3D toggle
-now draws through the resident D3D11 raymarch and falls back to the CPU march
-with the reason on the chip when the device cannot run. The CPU march stays
-built and selectable (`setVolume3dBackend()`, `CAPPEDWEATHER_VOLUME_GPU=0`).
-2D stays the primary console.
+now draws through the resident raymarch and falls back to the CPU march
+with the reason on the chip when the device cannot run. Since 2026-10-22
+(card t_9691d611) the raymarch is one GLSL source baked to a cross-API `.qsb`,
+so the GPU path runs on Direct3D 11, OpenGL and Vulkan (Vulkan measured in the
+widget; the offscreen/render-thread device is D3D11/OpenGL on this kit). The CPU
+march stays built and selectable (`setVolume3dBackend()`,
+`CAPPEDWEATHER_VOLUME_GPU=0`). 2D stays the primary console.
 
 
 ## Panel integration: option 1, decided before the code (2026-10-21, card t_f71a0be0)
@@ -335,9 +338,11 @@ difference that is invisible at 1440x900. Reported, not papered over.
    `Qt6::ShaderTools`, no `QShaderBaker`), so GLSL/SPIR-V could not be compiled
    into a cross-API `.qsb`. The shader is HLSL (Shader Model 5) built into a
    `QShader` at runtime; QRhi's D3D11 backend compiles it through D3DCompile.
-   Consequence: the spike is **D3D11 only**. Vulkan/Metal/GL need the Shader
-   Tools module in the build (or checked-in `.qsb` files); a packaging decision
-   for the cross-API plan, not a code problem.
+   Consequence: the spike was **D3D11 only**. *(Superseded 2026-10-22, card
+   t_9691d611: qtshadertools is installed in the kit, `find_package(Qt6
+   COMPONENTS ShaderTools)` is part of the build, and the shipping shader is
+   now the GLSL source in `src/app/shaders` baked to `:/shaders/volume.*.qsb`.
+   The HLSL string stays as the fallback for a kit without the module.)*
 3. **`QRhiTexture::OneDimensional` fails on D3D11** in this Qt build, so the
    palette LUT is a 256x1 2-D texture sampled at `u = (255*t + 0.5)/256`.
 4. **3-D texture uploads need one entry per depth slice.** A single
@@ -553,5 +558,138 @@ said `(CPU)`, and the one line under it named the reason.
 
 ### Still open
 
-- D3D11 is the only shader set; the GLSL/qsb port is card t_9691d611.
 - The `ms` remains a march time, not a presented frame (unchanged by this card).
+- Metal is baked but not measured (no macOS here); see the cross-API section
+  below.
+
+## Cross-API shader set — 2026-10-22 (card t_9691d611)
+
+The raymarch used to be an HLSL string compiled at runtime, so `create()` had to
+refuse every backend except D3D11. That is gone: the shader is GLSL 450 in
+`src/app/shaders/volume.{vert,frag}`, Qt Shader Tools bakes it at build time into
+`:/shaders/volume.{vert,frag}.qsb`, and each `.qsb` carries **SPIR-V (Vulkan),
+GLSL 150 (OpenGL), HLSL 5.0 (D3D11) and MSL 1.2 (Metal)**. `volume_canvas.cpp`
+loads the qsb whenever the build has it, keeps the HLSL string as the
+D3D11-only fallback for a kit without Shader Tools, and accepts D3D11, OpenGL,
+Vulkan and Metal. D3D12 is refused by name: it needs HLSL 6/DXIL stages the bake
+does not produce.
+
+Two build details that cost time and are now pinned in `CMakeLists.txt`:
+
+- The bake targets are `GLSL 150 HLSL 50 MSL 12`, not the Qt default
+  `GLSL 100 es,120,150`: the march loop bound (`maxSteps`) is a uniform, and
+  GLSL 100 es/120 require constant loop bounds. SPIR-V is always baked and
+  QRhi's OpenGL backend needs GL 3.3 / GLSL 150 anyway.
+- The qrc is attached to each executable (`CappedWeather`,
+  `cappedweather_ui_tests`, `volume3d_probe`, `pan_benchmark`), not to
+  `cappedweather_ui`: a resource inside a static library is dropped by the
+  linker unless a consumer calls `Q_INIT_RESOURCE()`.
+
+`CAPPEDWEATHER_VOLUME_RHI=opengl|vulkan|d3d11|d3d12|metal` forces the widget and
+the offscreen/render-thread device, so one binary can be measured on every API
+the machine has. `volume3d_probe --backend=<name>` sets it and prints
+`backend_requested`, `backend=`, `shader=` (`qsb` or `HLSL`) and `api=` next to
+the existing numbers.
+
+`CAPPEDWEATHER_REQUIRE_SHADER_TOOLS` (default OFF, env override) makes a release
+configure fail instead of silently shipping the HLSL/D3D11-only path. Proved
+both ways on this kit:
+
+```
+-DCMAKE_DISABLE_FIND_PACKAGE_Qt6ShaderTools=ON -DCAPPEDWEATHER_REQUIRE_SHADER_TOOLS=ON
+  CMake Error at CMakeLists.txt (message): CAPPEDWEATHER_REQUIRE_SHADER_TOOLS=ON
+  but Qt6::ShaderTools was not found   [exit 1]
+-DCMAKE_DISABLE_FIND_PACKAGE_Qt6ShaderTools=ON -DCAPPEDWEATHER_REQUIRE_SHADER_TOOLS=OFF
+  -- Qt Shader Tools (qsb) not found: the 3D volume keeps the HLSL/D3D11-only shader
+  -- Configuring done   [exit 0]
+```
+
+### Backends that actually render on this machine
+
+Real archive `data/moore_replay/KTLX20130520_201229_V06` (KTLX 2013-05-20
+20:12Z, REF, 256x256x128 brick), RX 7800 XT, Qt 6.8.3 / MSVC 2022, 2026-10-22.
+"Widget" is the `VolumeCanvas` QRhiWidget; "resident" is the process-wide device
+the shipping panel draws through.
+
+| backend | widget | offscreen | resident | panel | shader |
+|---|---|---|---|---|---|
+| Direct3D 11 | frame, 0.13691 lit | frame, 4.82 ms | frame, 6.43 ms | GPU, 2.69 ms settled | qsb (HLSL 5.0) |
+| OpenGL (4.6 compat) | frame, 0.13691 lit | frame, 3.03 ms | frame, 2.99 ms | GPU, 2.26 ms settled | qsb (GLSL 150) |
+| Vulkan | **frame, 0.13691 lit** | refused (no `vulkan.h`) | refused (no `vulkan.h`) | CPU, named reason | qsb (SPIR-V) |
+| D3D12 | refused (`no shader set for the D3D12 backend`) | refused | refused | CPU, named reason | none |
+| Metal | not measured (no macOS) | not measured | not measured | not measured | qsb (MSL 12) |
+
+The Vulkan widget frame is the SPIR-V variant: `gpu_widget ready=1 backend=Vulkan
+shader=qsb frames=4 lit_fraction=0.13691`. The panel refuses Vulkan *in the
+resident device only*, because `QRhiVulkanInitParams` needs `<vulkan/vulkan.h>`
+at build time and this kit ships none; QRhiWidget presents Vulkan because Qt
+owns the VkInstance internally.
+
+### Same volume, same camera, 1440x900 — the two shipping backends
+
+```
+volume3d_probe <V06> <out> ref 6000 --gpu --size=1440x900 [--backend=opengl]
+
+                    D3D11                       OpenGL
+gpu_offscreen       4.82 ms  lit 0.13691         3.03 ms  lit 0.13691
+                    checksum 399665052           checksum 399665022
+gpu_widget          frames=4 lit 0.13691         frames=4 lit 0.13691
+gpu_resident        6.43 ms  lit 0.13691         2.99 ms  lit 0.13691
+                    uploads=1 frames=2           uploads=1 frames=2
+panel_gpu           89.7 ms  lit 0.14939         36.2 ms  lit 0.14930
+panel_gpu_settled   2.69 ms  lit 0.14480         2.26 ms  lit 0.14441
+cpu reference       1807 ms  lit 0.13714         1378 ms  lit 0.13713
+```
+
+The two backends agree: identical `lit_fraction` on the raw frames, checksums
+30 apart out of 3.99e8 (floating-point rounding in a different rasterizer), and
+the panel rows differ by 0.06% of lit pixels. The D3D11 image is unchanged from
+the HLSL-string shader: `lit_fraction` 0.13691 and the same panel numbers as the
+t_51d7af1a run. The offscreen `ms` (4.44 -> 4.82) is box load, not the shader —
+the CPU reference in these runs was 1807 ms against 1254 ms in that one.
+Screenshots: `docs/screenshots/volume3d-panel-gl.png` (panel chip names
+`(OpenGL)`) and `docs/screenshots/volume3d-widget-vulkan.png` (widget frame on
+Vulkan).
+
+### CPU fallback when a backend cannot come up
+
+`--backend=vulkan` (offscreen/resident refuse) and `--backend=d3d12` (no HLSL 6
+in the bake) both end with a CPU frame and the reason in `gpu_error`, not a black
+panel:
+
+```
+panel_gpu backend=CPU api= render_ms=1259.0 toggle_first_frame_ms=1541.0 lit_fraction=0.14002 gpu_error="GPU 3D offscreen has no Vulkan device in this build (no vulkan/vulkan.h); the widget path still accepts CAPPEDWEATHER_VOLUME_RHI=vulkan"
+panel_gpu backend=CPU api= render_ms=1357.0 toggle_first_frame_ms=1670.0 lit_fraction=0.13970 gpu_error="GPU 3D offscreen has no device for CAPPEDWEATHER_VOLUME_RHI=d3d12"
+```
+
+`CAPPEDWEATHER_VOLUME_BREAK_SHADER=1` now poisons the *qsb* pair instead of the
+HLSL source, so the common path is the one proved to fall back:
+
+```
+gpu_offscreen failed error="No HLSL (shader model 5.0) code found in baked shader QShader(...)"
+gpu_widget ready=0 backend=D3D11 shader=broken frames=0 ...
+panel_gpu backend=CPU render_ms=1184.0 toggle_first_frame_ms=1511.0 lit_fraction=0.13996 gpu_error="No HLSL (shader model 5.0) code found in baked shader QShader(...)"
+```
+
+A backend that never brings up an RHI device at all used to leave the widget on
+"initialising" forever; it now reports through `QRhiWidget::renderFailed()` into
+the same one-line `gpuFailed()` path.
+
+### Known Qt caveat
+
+Creating the GL fallback surface on the render thread prints
+`Attempting to create QWindow-based QOffscreenSurface outside the gui thread.
+Expect failures.` on Qt 6.8.3/Windows. The frames still complete — resident
+`uploads=1 frames=2`, 2.99 ms, `lit_fraction=0.13691`, checksum identical to the
+offscreen GL frame — but the warning is recorded here so it is not a mystery in a
+support report.
+
+### Repro
+
+```
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:$PATH"
+export QT_PLUGIN_PATH="C:/Qt/6.8.3/msvc2022_64/plugins"
+./build/Release/volume3d_probe.exe data/moore_replay/KTLX20130520_201229_V06 \
+  "$SCRATCH/gl" ref 6000 --gpu --size=1440x900 --backend=opengl
+```
+
