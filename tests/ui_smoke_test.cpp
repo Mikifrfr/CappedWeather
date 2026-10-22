@@ -2175,6 +2175,214 @@ static bool testViewHistory(QString* error) {
     return true;
 }
 
+// The 3D brick is built over a box the user drags, not over a guess. A drag on
+// the ground plane must produce exactly that rectangle in ENU metres, a stray
+// two-pixel drag must clamp to the minimum instead of a degenerate grid, and a
+// reset must come back to the full-range box. Hermetic: every gate here is
+// built in memory, nothing is read from disk and nothing is fetched.
+static bool testVolume3dBoxDrag(QString* error) {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    const auto productIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    constexpr int kAzimuths = 240; // 1.5 degree rays
+    constexpr int kGates = 231;    // 0..230 km at 1 km, so the coverage clamp has room
+    for (int azimuth = 0; azimuth < kAzimuths; ++azimuth) {
+        DecodedRay ray;
+        ray.azimuthDegrees = static_cast<float>(azimuth) * 1.5F;
+        ray.elevationDegrees = 0.5F;
+        ray.elevationNumber = 1;
+        ray.gateCount = kGates;
+        ray.fields.at(productIndex).assign(kGates, 0);
+        // 40 dBZ from 20 km out: a box in the middle-distance has real gates in
+        // it, and the first 20 km stay honestly empty.
+        for (int gate = 20; gate < kGates; ++gate)
+            ray.fields.at(productIndex).at(gate) =
+                static_cast<std::uint16_t>(40.0 * 2.0 + 66.0);
+        ray.firstGateByProduct.at(productIndex) = 0;
+        ray.gateSpacingByProduct.at(productIndex) = 1000;
+        ray.scaleByProduct.at(productIndex) = 2.0F;
+        ray.offsetByProduct.at(productIndex) = 66.0F;
+        chunk.rays.push_back(ray);
+    }
+
+    RadarMapCanvas canvas;
+    canvas.resize(1200, 800);
+    canvas.setDecodedChunk(chunk, QDateTime::currentDateTimeUtc());
+    canvas.setProduct(ProductKind::Reflectivity);
+    canvas.setVolume3dMode(true);
+    const auto pump = [](const auto& ready, const int budgetMs) {
+        QElapsedTimer timer;
+        timer.start();
+        while (!ready() && timer.elapsed() < budgetMs) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            QTest::qWait(5);
+        }
+        return ready();
+    };
+    if (!pump([&] { return canvas.volume3dBrick() != nullptr; }, 60000)) {
+        *error = QStringLiteral("the first 3D brick never arrived");
+        return false;
+    }
+    if (!canvas.volume3dBox().fullRange()) {
+        *error = QStringLiteral("a fresh 3D view must start on the full-range box");
+        return false;
+    }
+    if (canvas.volume3dBrick()->measuredVoxels == 0) {
+        *error = QStringLiteral("the full-range brick has no measured voxels");
+        return false;
+    }
+
+    // The real gesture: both corners on the ground plane, and the box that gets
+    // built is the drag rectangle in ENU metres, within one voxel.
+    const QPoint start(480, 470);
+    const QPoint end(720, 640);
+    double startX = 0.0;
+    double startY = 0.0;
+    double endX = 0.0;
+    double endY = 0.0;
+    if (!canvas.volume3dGroundPointAt(start, &startX, &startY) ||
+        !canvas.volume3dGroundPointAt(end, &endX, &endY)) {
+        *error = QStringLiteral("the test drag must sit below the horizon");
+        return false;
+    }
+    const double dragCentreX = 0.5 * (startX + endX);
+    const double dragCentreY = 0.5 * (startY + endY);
+    const double dragHalf = 0.5 * std::max(std::abs(endX - startX), std::abs(endY - startY));
+    if (!canvas.applyVolume3dBoxDrag(start, end)) {
+        *error = QStringLiteral("the ground-plane drag mapped to no ground point");
+        return false;
+    }
+    const auto box = canvas.volume3dBox();
+    const double voxel = 2.0 * box.halfExtentMeters / 256.0; // nx is 256
+    if (std::abs(box.centerXMeters - dragCentreX) > voxel ||
+        std::abs(box.centerYMeters - dragCentreY) > voxel) {
+        *error = QStringLiteral("boxed centre %1,%2 m does not match the drag centre %3,%4 m "
+                                "(one voxel is %5 m)")
+                     .arg(box.centerXMeters, 0, 'f', 0)
+                     .arg(box.centerYMeters, 0, 'f', 0)
+                     .arg(dragCentreX, 0, 'f', 0)
+                     .arg(dragCentreY, 0, 'f', 0)
+                     .arg(voxel, 0, 'f', 0);
+        return false;
+    }
+    if (std::abs(box.halfExtentMeters - dragHalf) > voxel) {
+        *error = QStringLiteral("boxed half extent %1 m does not match the drag half %2 m "
+                                "(one voxel is %3 m)")
+                     .arg(box.halfExtentMeters, 0, 'f', 0)
+                     .arg(dragHalf, 0, 'f', 0)
+                     .arg(voxel, 0, 'f', 0);
+        return false;
+    }
+    // The screen mapping is a real round trip: the drag's own ground points
+    // project back onto the pixels that were dragged.
+    QPointF backStart;
+    QPointF backEnd;
+    if (!canvas.volume3dProjectPoint(startX, startY, 0.0, &backStart) ||
+        !canvas.volume3dProjectPoint(endX, endY, 0.0, &backEnd)) {
+        *error = QStringLiteral("the box corners did not project back to the panel");
+        return false;
+    }
+    const auto pixelDistance = [](const QPointF& a, const QPointF& b) {
+        return std::hypot(a.x() - b.x(), a.y() - b.y());
+    };
+    if (pixelDistance(backStart, QPointF(start)) > 2.0 ||
+        pixelDistance(backEnd, QPointF(end)) > 2.0) {
+        *error = QStringLiteral("the ground mapping is not the inverse of the projector: "
+                                "start %1 px, end %2 px off")
+                     .arg(pixelDistance(backStart, QPointF(start)), 0, 'f', 2)
+                     .arg(pixelDistance(backEnd, QPointF(end)), 0, 'f', 2);
+        return false;
+    }
+
+    // The brick that lands is that box, and it holds the field: not an empty
+    // grid with a plausible frame time.
+    if (!pump([&] {
+            const auto brick = canvas.volume3dBrick();
+            return brick && std::abs(brick->centerXMeters - box.centerXMeters) <= voxel &&
+                   std::abs(brick->centerYMeters - box.centerYMeters) <= voxel &&
+                   std::abs(brick->halfExtentMeters - box.halfExtentMeters) <= voxel;
+        }, 60000)) {
+        *error = QStringLiteral("the dragged box never reached the brick");
+        return false;
+    }
+    const auto boxedBrick = canvas.volume3dBrick();
+    if (boxedBrick->measuredVoxels + boxedBrick->interpolatedVoxels == 0) {
+        *error = QStringLiteral("the dragged box %1,%2 half %3 m built an empty brick")
+                     .arg(boxedBrick->centerXMeters, 0, 'f', 0)
+                     .arg(boxedBrick->centerYMeters, 0, 'f', 0)
+                     .arg(boxedBrick->halfExtentMeters, 0, 'f', 0);
+        return false;
+    }
+    if (std::abs(boxedBrick->halfExtentMeters - box.halfExtentMeters) > 1e-6 ||
+        boxedBrick->nx != 256) {
+        *error = QStringLiteral("the brick is not the box: brick half %1 m, box half %2 m, nx %3")
+                     .arg(boxedBrick->halfExtentMeters, 0, 'f', 3)
+                     .arg(box.halfExtentMeters, 0, 'f', 3)
+                     .arg(boxedBrick->nx);
+        return false;
+    }
+
+    // A two-pixel drag clamps to the 8 km floor instead of building a grid with
+    // 30 m cells of nothing. The clamp lands before the build, so the brick that
+    // arrives is the clamped box.
+    if (!canvas.applyVolume3dBoxDrag(QPoint(600, 400), QPoint(602, 402))) {
+        *error = QStringLiteral("the two-pixel drag mapped to no ground point");
+        return false;
+    }
+    const auto clamped = canvas.volume3dBox();
+    const double minimumHalf = RadarMapCanvas::kVolume3dMinimumBoxMeters / 2.0;
+    if (std::abs(clamped.halfExtentMeters - minimumHalf) > 1.0) {
+        *error = QStringLiteral("a sub-minimum drag should clamp to %1 m per side, got %2 m")
+                     .arg(RadarMapCanvas::kVolume3dMinimumBoxMeters)
+                     .arg(clamped.widthMeters());
+        return false;
+    }
+    if (!pump([&] {
+            const auto brick = canvas.volume3dBrick();
+            return brick && std::abs(brick->halfExtentMeters - clamped.halfExtentMeters) < 1.0 &&
+                   std::abs(brick->centerXMeters - clamped.centerXMeters) < 1.0 &&
+                   std::abs(brick->centerYMeters - clamped.centerYMeters) < 1.0;
+        }, 60000)) {
+        *error = QStringLiteral("the clamped box never reached the brick");
+        return false;
+    }
+
+    // Reset: back to the full-range box, and the full-range brick is not empty.
+    canvas.resetVolume3dBox();
+    if (!canvas.volume3dBox().fullRange()) {
+        *error = QStringLiteral("reset should return to the full-range box");
+        return false;
+    }
+    if (!pump([&] {
+            const auto brick = canvas.volume3dBrick();
+            return brick && std::abs(brick->halfExtentMeters -
+                                     RadarMapCanvas::kVolume3dFullRangeHalfMeters) < 1.0;
+        }, 60000)) {
+        *error = QStringLiteral("the full-range box never reached the brick after reset");
+        return false;
+    }
+    if (canvas.volume3dBrick()->measuredVoxels == 0) {
+        *error = QStringLiteral("the full-range brick after reset is empty");
+        return false;
+    }
+
+    // Clamp rule, checked without a widget: a box out at the coverage edge is
+    // pulled in and stays inside the radar's own range.
+    const auto clampedEdge = RadarMapCanvas::clampVolume3dBox(
+        RadarMapCanvas::Volume3dBox{300000.0, 0.0, 50000.0}, 100000.0);
+    const double farCornerX = std::abs(clampedEdge.centerXMeters) + clampedEdge.halfExtentMeters;
+    const double farCornerY = std::abs(clampedEdge.centerYMeters) + clampedEdge.halfExtentMeters;
+    if (clampedEdge.halfExtentMeters > 50000.0 + 1.0 ||
+        std::hypot(farCornerX, farCornerY) > 100000.0 + 1.0) {
+        *error = QStringLiteral("a box outside coverage was not clamped: centre %1,%2 half %3")
+                     .arg(clampedEdge.centerXMeters, 0, 'f', 0)
+                     .arg(clampedEdge.centerYMeters, 0, 'f', 0)
+                     .arg(clampedEdge.halfExtentMeters, 0, 'f', 0);
+        return false;
+    }
+    return true;
+}
+
 static bool testPinnedLock(QString* error) {
     const auto warningA =
         smokeWarning(QStringLiteral("pin-A"), QStringLiteral("Tornado Warning"),
@@ -5933,6 +6141,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testViewHistory(&failure)) {
             std::cerr << "View history failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testVolume3dBoxDrag(&failure)) {
+            std::cerr << "3D box drag failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testWheelSubStepZoom(&failure)) {

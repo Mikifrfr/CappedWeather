@@ -325,6 +325,51 @@ public:
     [[nodiscard]] std::shared_ptr<const VolumeBrick> volume3dBrick() const { return brick_; }
     [[nodiscard]] double volume3dRenderMilliseconds() const { return volumeRenderMs_; }
     [[nodiscard]] double volume3dBuildMilliseconds() const { return volumeBuildMs_; }
+    // --- 3D brick box (ROI) -------------------------------------------------
+    // The ENU square the 3D preview builds its brick over. Square because the
+    // brick's nx and ny share one half extent (src/core/volume_brick.hpp);
+    // only a square box can be built, so the wireframe drawn during a drag is
+    // that square, and the box the user drags is the box that gets built.
+    // Defaults to the full +-150 km box, which is never empty for a live
+    // volume; a reset returns to it. Never persisted: a view action.
+    struct Volume3dBox {
+        double centerXMeters = 0.0;
+        double centerYMeters = 0.0;
+        double halfExtentMeters = 150000.0;
+        [[nodiscard]] bool fullRange() const;
+        [[nodiscard]] double widthMeters() const { return 2.0 * halfExtentMeters; }
+    };
+    // Smallest box a drag may produce, per side (8 km). A two-pixel drag is
+    // clamped here rather than building a degenerate grid.
+    static constexpr double kVolume3dMinimumBoxMeters = 8000.0;
+    static constexpr double kVolume3dFullRangeHalfMeters = 150000.0;
+    [[nodiscard]] Volume3dBox volume3dBox() const { return volumeBox_; }
+    // Radius the box is clamped to: the ground range of the farthest decoded
+    // gate in this panel's chunk (the radar's own coverage), capped.
+    [[nodiscard]] double volume3dCoverageMeters() const;
+    // Shrink a requested box to the coverage circle and the minimum size,
+    // keeping it square and its bearing. Pure, so tests and the probe check the
+    // rule without a widget. A box centred outside coverage is pulled in along
+    // its own bearing rather than snapped onto the site.
+    [[nodiscard]] static Volume3dBox clampVolume3dBox(Volume3dBox box, double coverageMeters);
+    // Apply a box: clamp, refit the camera to it, rebuild the brick, re-render.
+    void setVolume3dBox(const Volume3dBox& box);
+    // Back to the full-range box and the default full-range camera.
+    void resetVolume3dBox();
+    // Alt+left-drag entry point: map both corners onto the ground plane with
+    // the camera the current frame was marched with, square the box, clamp,
+    // rebuild. False when the drag mapped to no ground point at all.
+    bool applyVolume3dBoxDrag(const QPoint& start, const QPoint& end);
+    [[nodiscard]] bool volume3dBoxDragActive() const { return volumeBoxDragActive_; }
+    // The box the in-progress drag would build (painted as the wireframe).
+    [[nodiscard]] Volume3dBox volume3dBoxDragPreview() const { return volumeBoxDragPreview_; }
+    // Test/probe hooks for the frame's own camera: project ENU metres to panel
+    // pixels (false behind the eye) and map a panel pixel back onto the ground
+    // plane (false above the horizon, where a pixel has no ground point).
+    [[nodiscard]] bool volume3dProjectPoint(double xMeters, double yMeters, double zMeters,
+                                            QPointF* out) const;
+    [[nodiscard]] bool volume3dGroundPointAt(const QPoint& pixel, double* xMeters,
+                                             double* yMeters) const;
     void setVolumeQuality(int decodedChunks, int totalChunks, int failedChunks,
                           std::size_t rejectedMessages = 0, std::size_t rejectedBlocks = 0);
     void setLoading(bool loading, const QString& message = {});
@@ -529,6 +574,10 @@ private:
     void rebuildVolumeRender(bool fast);
     void paintVolume3d(QPainter& painter);
     void paintVolumeGrid(QPainter& painter);
+    // 3D box plumbing: the box a drag maps to (clamped), and the camera refit
+    // applied when a box lands.
+    Volume3dBox volumeBoxFromDrag(const QPoint& start, const QPoint& end, bool* mapped) const;
+    void fitVolumeCameraToBox();
     QString elidedStatusText() const;
     void invalidateStatusText();
     void updateProbe(const QPointF& point);
@@ -840,6 +889,13 @@ private:
     double volumeImageTarget_[3] = {0.0, 0.0, 7000.0};
     double volumeRenderMs_ = 0.0;
     double volumeBuildMs_ = 0.0; // cost of the last brick build (0 = reused a cached brick)
+    Volume3dBox volumeBox_;  // box the next brick build uses, ENU metres
+    Volume3dBox brickBox_;   // box the cached brick was actually built over
+    bool volumeBoxDragActive_ = false;
+    QPoint volumeBoxDragStart_;
+    QPoint volumeBoxDragEnd_;
+    Volume3dBox volumeBoxDragPreview_;
+    bool volumeBoxDragPreviewValid_ = false;
     std::atomic<int> volumeRequestId_{0};
     int radarOpacity_ = 80;
     int warningOpacity_ = 90;

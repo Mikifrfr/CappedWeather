@@ -190,6 +190,114 @@ removed it exits 1 at `core_tests.cpp:4044`.
 Screenshots: `docs/screenshots/volume3d-shells.png` (before, no fill) and
 `docs/screenshots/volume3d-filled.png` (after).
 
+## Phase 1.2 — the brick box is the user's, not a guess (implemented)
+
+The brick used to be the full +-150 km box, always. Automatic ROI selection was
+attempted three times and failed three times, each time painting a
+healthy-looking empty frame:
+
+1. box centred on the radar site -> a storm 60 km out fell outside it;
+2. box centred on the echoed centroid -> a scattered field averages to the gap
+   between cells, so the box framed nothing;
+3. box sized to the echo bounding box -> far-range speckle inflated it back to
+   full range and the storm became a dot.
+
+None of those reported an error; each reported a plausible frame time. The
+lesson is not "a better heuristic" — it is that the box is the user's decision.
+`Alt+left-drag` inside the 3D view now defines it.
+
+### The rule
+
+- **Drag on the ground plane.** Both drag corners are mapped onto z = 0 with the
+  same camera the frame was marched with (same aspect, same focal), so the box
+  lands where the pixel looks. A corner above the horizon has no ground point;
+  it clamps to the coverage circle along its own heading rather than inventing a
+  distance.
+- **Square, and shown before release.** The brick has one half extent for x and
+  y (`VolumeBrickDims::halfExtentMeters`), so the box that can be built around a
+  rectangle is the square that covers it. The drag paints that square live
+  (dashed wireframe), so the box on screen is the box built: nothing is expanded
+  or moved after the mouse comes up.
+- **Clamped, not rejected.** Minimum 8 km per side: a two-pixel drag builds an
+  8 km box (31 m voxels at 256 columns) instead of a degenerate grid. The box is
+  clamped to the radar's own coverage — the ground range of the farthest decoded
+  gate (459 km on this KTLX volume) — by shrinking the half extent and pulling
+  the centre in along its own bearing. A box centred outside coverage is moved
+  in, never snapped onto the site.
+- **Reset** via the 3D right-click menu ("Reset 3D box to full range"): the
+  full +-150 km box and the default camera. The full-range box is the default and
+  is never empty on a live volume. Nothing is persisted; this is a view action,
+  not a setting.
+- **An empty box says so.** If no gate lands inside the box the chip reads
+  `- no gates in box` instead of showing a quiet frame that looks like calm
+  weather. This is the exact failure mode the three automatic attempts had.
+
+### Measured, KTLX 2013-05-20 20:12Z REF, 1440x900
+
+`tools/volume3d_probe` gained `--box cx_km,cy_km,half_km | --box full` and
+`--drag x0,y0,x1,y1` (panel pixels, the same entry point the mouse uses), plus
+`box_center_km/brick_center_km/box_matches_brick`. Median of three alternating
+runs on a quiet machine for the first two columns, one run each for the last two:
+
+| | full range | 60 km box (dragged) | 8 km box (clamped) | empty 40 km box |
+|---|---|---|---|---|
+| brick half extent | 150 km | 29.998 km | 4 km | 20 km |
+| voxel (x/y) | 1172 m | 234 m | 31 m | 156 m |
+| occupied voxels | 1,132,399 | 1,594,302 | 4,623 | 0 |
+| reconstructed share | 78% | 74% | 27% | - |
+| lit_fraction | 0.1373 | 0.1653 | 0.0061 | 0.0127 (chrome only) |
+| brick build | 285 ms | 310 ms | 312 ms | 242 ms |
+| frame | 1,283 ms | 6,392 ms | 120 ms | 2,538 ms |
+
+The same grid is used for every box (256 x 256 x 128), so the voxel size is the
+whole point: a 60 km storm is 51 columns wide at full range and 256 columns wide
+in a 60 km box — 5x finer across the storm, in both axes and in height.
+
+Screenshot pairs: `docs/screenshots/volume3d-roi-full.png` (full range, the box
+wireframe now marks what the frame covers), `volume3d-roi-storm.png` (the Moore
+supercell in a 60 km box) and `volume3d-roi-empty.png` (a box with no gates, with
+the chip saying so).
+
+### What this exposes: a closer box is not a cheaper frame
+
+The march step is `0.5 x max(voxel dimension)` and the step count is bounded by
+the box diagonal, so a small box takes about the same number of steps per ray as
+the full-range pancake (746 vs 727). What grows is how much of the screen the box
+covers: at 420 km the 300 km x 20 km pancake intersects a thin horizontal band of
+the frame; at 84 km the 60 km x 20 km box fills a large part of it. Same steps,
+~5x the pixels, and the gradient shading is seven trilinear fetches per lit
+sample. Result: **6.4 s per frame for the storm box against 1.3 s for the full
+range**, and 2.5 s for a box with *no gates at all* (nothing stops the march
+early). The 8 km box is fast only because it is a small spec on screen.
+
+This is recorded, not solved here: the fix is empty-space skipping plus the GPU
+march (`t_710dd647`), and a box view that looks this much better while costing
+5x is exactly the case the GPU spike exists to prove. Until then the chip states
+the frame time it actually took, so a 6 s box never reads as instant.
+
+### Tests
+
+`testVolume3dBoxDrag` (hermetic: every gate is built in memory) asserts, against
+the brick the canvas actually publishes:
+
+- a drag's two ground points map back onto the same pixels through the projector
+  (two-way, within 2 px), so the screen mapping is not one-way;
+- the built brick's centre and half extent equal the drag rectangle's in ENU
+  metres, within one voxel (voxel = 2 x half / 256);
+- the dragged brick is not empty;
+- a two-pixel drag clamps to 8 km and the clamped box is what reaches the brick;
+- `resetVolume3dBox()` returns the full-range box and the full-range brick after
+  reset is not empty;
+- `clampVolume3dBox` keeps a box out at 300 km inside a 100 km coverage circle.
+
+Failing first: with the box removed from the brick dimensions (the pre-change
+behaviour: always the default full-range `VolumeBrickDims`) `cappedweather_ui_tests`
+exits 1 with `3D box drag failed: the dragged box never reached the brick`
+(`testVolume3dBoxDrag`, `tests/ui_smoke_test.cpp`). Headless on the real volume,
+the pre-change probe binary ignores `--box` entirely and reports the full-range
+brick whatever box is asked for: `lit_fraction=0.134265 ... frame_ms=1347`,
+1172 m voxels, 51 columns across the storm.
+
 ## Phase 2 specification
 
 - `VolumeCanvas : QRhiWidget`, own top-level widget inside the panel stack, not
