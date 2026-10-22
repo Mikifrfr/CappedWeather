@@ -435,6 +435,81 @@ constexpr double kRainfallPoorContaminationFraction = 0.05;
 constexpr int kRainfallMinimumSamplesForGood = 4;
 constexpr double kRainfallDepthStorageCapTenths = 65535.0;
 
+// The product a relation needs besides reflectivity. Reflectivity itself is
+// always required: it is the only source for the AP/clutter guard's columns.
+std::optional<ProductKind> relationSecondaryMoment(const RainfallRelation relation) {
+    switch (relation) {
+    case RainfallRelation::MarshallPalmer: return std::nullopt;
+    case RainfallRelation::Zdr: return ProductKind::DifferentialReflectivity;
+    case RainfallRelation::Kdp: return ProductKind::SpecificDifferentialPhase;
+    }
+    return std::nullopt;
+}
+
+// Empty reason: the relation can be computed. Non-empty: the newest volume does
+// not carry what the relation needs on the reference grid, so the whole pass is
+// unavailable. Checked before any grid is built; the accumulator never falls
+// back to Z-R.
+std::optional<std::string> relationInputProblem(const DecodedChunk& chunk,
+                                                const RainfallRelation relation) {
+    const std::string name = rainfallRelationName(relation);
+    const auto tilts = reflectivityTilts(chunk);
+    if (tilts.empty())
+        return name + " needs " + std::string(productDescriptor(ProductKind::Reflectivity).label) +
+               " for the AP/clutter guard; the newest volume does not carry it";
+    if (const auto kind = relationSecondaryMoment(relation)) {
+        // Availability is about the reference grid: the newest volume's lowest
+        // reflectivity tilt. A moment that exists only on higher tilts cannot
+        // produce this product and must say so instead of an all-Incomplete
+        // "valid" grid.
+        const auto& lowest = tilts.front();
+        const bool carries =
+            std::any_of(lowest.rayIndexes.cbegin(), lowest.rayIndexes.cend(),
+                        [&chunk, kind](const std::size_t rayIndex) {
+                            return chunk.rays.at(rayIndex).has(*kind);
+                        });
+        if (!carries)
+            return name + " needs " + std::string(productDescriptor(*kind).label) +
+                   " on the newest volume's lowest reflectivity tilt; that tilt does not carry it";
+    }
+    return std::nullopt;
+}
+
+enum class MomentState {
+    Usable,        // carries a finite value
+    Dry,           // measured below the radar's threshold (no value)
+    Missing,       // no measurement (nodata / range folded / no such gate)
+    Undetermined,  // legacy chunk: encoded <= 1 but the convention is unknown
+};
+
+struct MomentReading {
+    MomentState state = MomentState::Missing;
+    double value = 0.0;
+};
+
+// One gate of one moment under the chunk's recorded sentinel convention. Same
+// rules as the Z-R path: a below-threshold gate is a measurement, a missing
+// gate is a gap, and a legacy chunk cannot claim either.
+MomentReading readMoment(const DecodedRay& ray, const std::size_t productIndex,
+                         const std::size_t gate, const MomentEncoding encoding) {
+    const auto& field = ray.fields.at(productIndex);
+    if (gate >= field.size()) return {MomentState::Missing, 0.0};
+    const auto raw = field.at(gate);
+    switch (momentGateState(encoding, raw)) {
+    case MomentGateState::Valid: {
+        const auto value =
+            nativeValue(raw, ray.scaleByProduct.at(productIndex),
+                        ray.offsetByProduct.at(productIndex));
+        if (!value || !std::isfinite(*value)) return {MomentState::Missing, 0.0};
+        return {MomentState::Usable, *value};
+    }
+    case MomentGateState::BelowThreshold: return {MomentState::Dry, 0.0};
+    case MomentGateState::Missing: return {MomentState::Missing, 0.0};
+    case MomentGateState::Undetermined: return {MomentState::Undetermined, 0.0};
+    }
+    return {MomentState::Missing, 0.0};
+}
+
 } // namespace
 
 // Pure VILD helper (unit-test hook): VIL [kg/m^2] / thickness [m] -> [kg/m^3].
@@ -624,17 +699,82 @@ std::optional<double> zrRateMillimetersPerHour(const double reflectivityDbz, con
     return rate;
 }
 
+const char* rainfallRelationName(const RainfallRelation relation) noexcept {
+    switch (relation) {
+    case RainfallRelation::MarshallPalmer: return "Z-R";
+    case RainfallRelation::Zdr: return "R(Z,ZDR)";
+    case RainfallRelation::Kdp: return "R(KDP)";
+    }
+    return "unknown relation";
+}
+
+std::optional<double> zzdrRateMillimetersPerHour(const double reflectivityDbz,
+                                                 const double differentialReflectivityDb,
+                                                 const double a, const double b,
+                                                 const double c) {
+    if (!std::isfinite(reflectivityDbz) || !std::isfinite(differentialReflectivityDb) ||
+        !std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c))
+        return std::nullopt;
+    if (a <= 0.0 || b <= 0.0 || c < 0.0) return std::nullopt;
+    const auto linearReflectivity = std::pow(10.0, reflectivityDbz / 10.0);
+    const auto linearZdr = std::pow(10.0, differentialReflectivityDb / 10.0);
+    if (!std::isfinite(linearReflectivity) || linearReflectivity < 0.0) return std::nullopt;
+    if (!std::isfinite(linearZdr) || linearZdr <= 0.0) return std::nullopt;
+    const auto rate = a * std::pow(linearReflectivity, b) * std::pow(linearZdr, -c);
+    if (!std::isfinite(rate) || rate < 0.0) return std::nullopt;
+    return rate;
+}
+
+std::optional<double> kdpRateMillimetersPerHour(const double kdpDegreesPerKm, const double a,
+                                                const double b) {
+    if (!std::isfinite(kdpDegreesPerKm) || !std::isfinite(a) || !std::isfinite(b))
+        return std::nullopt;
+    if (a <= 0.0 || b <= 0.0) return std::nullopt;
+    const auto magnitude = std::abs(kdpDegreesPerKm);
+    const auto rate = a * std::pow(magnitude, b);
+    if (!std::isfinite(rate)) return std::nullopt;
+    // The published form carries sign(KDP): negative KDP is no rain and the
+    // accumulator reads the negative rate as a zero contribution.
+    return kdpDegreesPerKm < 0.0 ? -rate : rate;
+}
+
 RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
                                 const double radarElevationMeters,
                                 const double endSecondsSinceEpoch,
                                 const RainfallConfig config) {
     RainfallGrid grid;
     RainfallSummary& summary = grid.summary;
+    summary.relation = config.relation;
 
     // Fail closed on a relation or cap that cannot produce an honest number.
-    if (!(config.zrA > 0.0) || !(config.zrB > 0.0) ||
-        !(config.maximumIntervalSeconds > 0.0) || !std::isfinite(radarElevationMeters))
+    // Only the configured relation's constants are validated, so a ZDR/KDP
+    // configuration is not held hostage to an unused Z-R coefficient.
+    if (!(config.maximumIntervalSeconds > 0.0) ||
+        !(config.maximumRateMillimetersPerHour > 0.0) ||
+        !std::isfinite(radarElevationMeters))
         return grid;
+    switch (config.relation) {
+    case RainfallRelation::MarshallPalmer:
+        if (!(config.zrA > 0.0) || !(config.zrB > 0.0)) return grid;
+        break;
+    case RainfallRelation::Zdr:
+        if (!(config.zdrA > 0.0) || !(config.zdrB > 0.0) || !(config.zdrC >= 0.0) ||
+            !std::isfinite(config.zdrC) || !std::isfinite(config.minimumZdrDb) ||
+            !std::isfinite(config.maximumZdrDb) ||
+            !(config.minimumZdrDb < config.maximumZdrDb))
+            return grid;
+        break;
+    case RainfallRelation::Kdp:
+        if (!(config.kdpA > 0.0) || !(config.kdpB > 0.0) ||
+            !std::isfinite(config.minimumKdpDegreesPerKm) ||
+            !std::isfinite(config.maximumKdpDegreesPerKm) ||
+            !(config.minimumKdpDegreesPerKm >= 0.0) ||
+            !(config.minimumKdpDegreesPerKm < config.maximumKdpDegreesPerKm))
+            return grid;
+        break;
+    default:
+        return grid;
+    }
 
     // Order by volume time and drop unusable or duplicate entries. Sorting here
     // means a caller that hands in a reversed history still gets an honest
@@ -664,6 +804,17 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
     }
     summary.sampleCount = static_cast<int>(ordered.size());
     if (!ordered.empty()) grid.radarId = ordered.back().chunk->radarId;
+    if (!ordered.empty()) {
+        // Relation availability is decided by the newest volume, which is the
+        // reference grid. An older volume that lost the moment is handled as
+        // per-gate coverage below; it is never silently replaced by Z-R.
+        if (const auto problem = relationInputProblem(*ordered.back().chunk, config.relation)) {
+            summary.relationAvailable = false;
+            summary.relationUnavailableReason = *problem;
+            return grid;
+        }
+        summary.relationAvailable = true;
+    }
     if (ordered.size() < 2) return grid;  // no interval: Invalid, nothing invented
 
     summary.windowSeconds =
@@ -761,6 +912,24 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
             }
             const auto& sourceEncoded = sourceRay.fields.at(reflectivityIndex);
             const auto& sourceCorrelation = sourceRay.fields.at(correlationIndex);
+            // A dual-pol relation reads its second moment at the reflectivity
+            // source gate, so the moment must share this ray's range table. A
+            // volume assembled from separate per-moment rays (unmerged SCAN
+            // parts) or a coarser moment is a coverage gap, not a value.
+            const auto secondary = relationSecondaryMoment(config.relation);
+            const auto secondaryIndex =
+                secondary ? static_cast<std::size_t>(*secondary) : kProductCount;
+            if (secondary) {
+                const bool readable =
+                    !sourceRay.fields.at(secondaryIndex).empty() &&
+                    sourceRay.firstGateByProduct.at(secondaryIndex) == sourceFirstGate &&
+                    sourceRay.gateSpacingByProduct.at(secondaryIndex) == sourceSpacing;
+                if (!readable) {
+                    std::fill(incomplete[rayIndex].begin(), incomplete[rayIndex].end(),
+                              static_cast<std::uint8_t>(1));
+                    continue;
+                }
+            }
             // Size the map from this ray's own gates: partial rays in one tilt
             // need not match the first ray's count.
             const auto referenceGateCount = outRay.gates.size();
@@ -802,7 +971,6 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
                     incomplete[rayIndex][gate] = 1;
                     continue;
                 }
-                const auto raw = sourceEncoded[sourceGate];
                 // Codes 0 and 1 mean "below threshold" and "missing", and the
                 // two decoded formats swap which is which, so the chunk's
                 // recorded convention is the only honest source for the
@@ -812,22 +980,60 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
                 // dry gate. A chunk that records no convention (legacy spill
                 // file) keeps the old, weaker reading: zero depth and no claim
                 // either way. None of the three invents rain.
-                switch (momentGateState(ordered[sampleIndex].chunk->momentEncoding, raw)) {
-                case MomentGateState::Valid:
-                    break;
-                case MomentGateState::BelowThreshold:
-                    continue;
-                case MomentGateState::Missing:
-                    incomplete[rayIndex][gate] = 1;
-                    continue;
-                case MomentGateState::Undetermined:
-                    continue;  // legacy chunk: cannot claim a gap
+                const auto reflectivityReading =
+                    readMoment(sourceRay, reflectivityIndex, sourceGate,
+                               ordered[sampleIndex].chunk->momentEncoding);
+                std::optional<double> reflectivity;
+                if (reflectivityReading.state == MomentState::Usable)
+                    reflectivity = reflectivityReading.value;
+
+                // The relation's second input. Dry KDP is a measured zero
+                // phase shift; dry or missing ZDR has no usable value. A
+                // missing input is a coverage gap, a legacy sentinel cannot be
+                // claimed either way, and neither ever falls back to Z-R.
+                std::optional<double> zdr;
+                std::optional<double> kdp;
+                if (config.relation == RainfallRelation::Zdr) {
+                    const auto reading =
+                        readMoment(sourceRay, secondaryIndex, sourceGate,
+                                   ordered[sampleIndex].chunk->momentEncoding);
+                    if (reading.state == MomentState::Usable) {
+                        zdr = reading.value;
+                    } else if (reading.state == MomentState::Undetermined) {
+                        continue;  // legacy chunk: cannot claim a gap
+                    } else {
+                        incomplete[rayIndex][gate] = 1;
+                        continue;
+                    }
+                } else if (config.relation == RainfallRelation::Kdp) {
+                    const auto reading =
+                        readMoment(sourceRay, secondaryIndex, sourceGate,
+                                   ordered[sampleIndex].chunk->momentEncoding);
+                    if (reading.state == MomentState::Usable) {
+                        kdp = reading.value;
+                    } else if (reading.state == MomentState::Dry) {
+                        kdp = 0.0;  // measured, no measurable phase shift
+                    } else if (reading.state == MomentState::Missing) {
+                        incomplete[rayIndex][gate] = 1;
+                        continue;
+                    } else {
+                        continue;  // legacy chunk: cannot claim a gap
+                    }
                 }
-                const auto value = nativeValue(raw, sourceRay.scaleByProduct.at(reflectivityIndex),
-                                               sourceRay.offsetByProduct.at(reflectivityIndex));
-                if (!value || !std::isfinite(*value)) {
-                    incomplete[rayIndex][gate] = 1;
-                    continue;
+
+                // Reflectivity is the rate input for Z-R and R(Z,ZDR), and the
+                // AP/clutter guard's column source for all three relations.
+                if (!reflectivity) {
+                    if (reflectivityReading.state == MomentState::Missing)
+                        incomplete[rayIndex][gate] = 1;
+                    if (config.relation != RainfallRelation::Kdp) continue;
+                    // A dry reflectivity gate under R(KDP) is a measured dry
+                    // gate: the two moments disagree, and Z wins the veto.
+                    if (reflectivityReading.state == MomentState::Dry) continue;
+                    // Missing or legacy reflectivity: KDP still has a value,
+                    // but the column guard cannot run. Keep the depth and say
+                    // the guard was blind.
+                    cell.flags |= RainfallGateNoVerticalCheck;
                 }
 
                 // Dual-pol veto first: CC sees non-meteorological returns that a
@@ -846,29 +1052,75 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
                     }
                 }
 
-                double reflectivity = *value;
-                if (reflectivity >= config.clutterReflectivityDbz) {
-                    // Vertical check: strong echo with a column that stops below
-                    // the melt-level floor is clutter or anomalous propagation.
-                    // If the volume never looked above that height at this range,
-                    // say so instead of pretending the check passed.
-                    const auto ceiling = profile.observedCeilingMeters[sourceGate];
-                    const auto columnTop = profile.echoTopMeters[sourceGate];
-                    if (!std::isfinite(ceiling) || ceiling < config.clutterTopMeters) {
-                        cell.flags |= RainfallGateNoVerticalCheck;
-                    } else if (std::isfinite(columnTop) && columnTop < config.clutterTopMeters) {
-                        cell.flags |= RainfallGateClutterSuspect;
-                        continue;
+                if (reflectivity) {
+                    double reflectivityDbz = *reflectivity;
+                    if (reflectivityDbz >= config.clutterReflectivityDbz) {
+                        // Vertical check: strong echo with a column that stops
+                        // below the melt-level floor is clutter or anomalous
+                        // propagation. If the volume never looked above that
+                        // height at this range, say so instead of pretending
+                        // the check passed.
+                        const auto ceiling = profile.observedCeilingMeters[sourceGate];
+                        const auto columnTop = profile.echoTopMeters[sourceGate];
+                        if (!std::isfinite(ceiling) || ceiling < config.clutterTopMeters) {
+                            cell.flags |= RainfallGateNoVerticalCheck;
+                        } else if (std::isfinite(columnTop) &&
+                                   columnTop < config.clutterTopMeters) {
+                            cell.flags |= RainfallGateClutterSuspect;
+                            continue;
+                        }
                     }
+                    // The hail cap is a Z-input cap: it applies to the two
+                    // relations that use Z. R(KDP) is hail-insensitive and is
+                    // bounded by the rate ceiling instead.
+                    if (config.relation != RainfallRelation::Kdp &&
+                        reflectivityDbz > config.hailCapDbz) {
+                        reflectivityDbz = config.hailCapDbz;
+                        cell.flags |= RainfallGateHailCapped;
+                    }
+                    if (reflectivityDbz < config.minimumReflectivityDbz) continue;
+                    reflectivity = reflectivityDbz;
                 }
-                if (reflectivity > config.hailCapDbz) {
-                    reflectivity = config.hailCapDbz;
-                    cell.flags |= RainfallGateHailCapped;
+
+                std::optional<double> rate;
+                switch (config.relation) {
+                case RainfallRelation::MarshallPalmer:
+                    rate = zrRateMillimetersPerHour(*reflectivity, config.zrA, config.zrB);
+                    break;
+                case RainfallRelation::Zdr: {
+                    double value = *zdr;
+                    if (value < config.minimumZdrDb) {
+                        value = config.minimumZdrDb;
+                        cell.flags |= RainfallGateInputClamped;
+                    } else if (value > config.maximumZdrDb) {
+                        value = config.maximumZdrDb;
+                        cell.flags |= RainfallGateInputClamped;
+                    }
+                    rate = zzdrRateMillimetersPerHour(*reflectivity, value, config.zdrA,
+                                                      config.zdrB, config.zdrC);
+                    break;
                 }
-                if (reflectivity < config.minimumReflectivityDbz) continue;
-                const auto rate =
-                    zrRateMillimetersPerHour(reflectivity, config.zrA, config.zrB);
+                case RainfallRelation::Kdp: {
+                    double value = *kdp;
+                    // |KDP| below the floor is light-rain noise, not a
+                    // measurement worth a rate.
+                    if (std::abs(value) < config.minimumKdpDegreesPerKm) continue;
+                    if (std::abs(value) > config.maximumKdpDegreesPerKm) {
+                        value = std::copysign(config.maximumKdpDegreesPerKm, value);
+                        cell.flags |= RainfallGateInputClamped;
+                    }
+                    const auto signedRate =
+                        kdpRateMillimetersPerHour(value, config.kdpA, config.kdpB);
+                    if (!signedRate || !(*signedRate > 0.0)) continue;  // negative KDP: no rain
+                    rate = *signedRate;
+                    break;
+                }
+                }
                 if (!rate) continue;
+                if (*rate > config.maximumRateMillimetersPerHour) {
+                    *rate = config.maximumRateMillimetersPerHour;
+                    cell.flags |= RainfallGateRateCapped;
+                }
                 depths[rayIndex][gate] += *rate * tenthsPerInterval;
                 if (mapped.beamHeightMeters > config.beamHeightFlagMeters)
                     cell.flags |= RainfallGateBeamHigh;
@@ -916,6 +1168,8 @@ RainfallGrid accumulateRainfall(const std::vector<RainfallSample>& samples,
             if (cell.flags & RainfallGateNoVerticalCheck) ++summary.noVerticalCheckGateCount;
             if (cell.flags & RainfallGateGapClamped) ++summary.gapClampedGateCount;
             if (cell.flags & RainfallGateDepthSaturated) ++summary.depthSaturatedGateCount;
+            if (cell.flags & RainfallGateInputClamped) ++summary.inputClampedGateCount;
+            if (cell.flags & RainfallGateRateCapped) ++summary.rateCappedGateCount;
         }
     }
     if (summary.depthGateCount > 0)

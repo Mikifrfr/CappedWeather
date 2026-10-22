@@ -699,6 +699,316 @@ void testRainfallPartialReferenceRays() {
     assert(grid.summary.depthGateCount == 26);
 }
 
+// ---------------------------------------------------------------------------
+// Dual-pol rain-rate relations beside the Z-R path
+// ---------------------------------------------------------------------------
+
+// ZDR on the WSR-88D Message 31 packing (scale 16, offset 129), attached to the
+// same gate count/geometry as reflectivity so the relation can read it.
+void attachRainDifferentialReflectivity(DecodedRay& ray,
+                                        const double differentialReflectivityDb) {
+    const auto index = static_cast<std::size_t>(ProductKind::DifferentialReflectivity);
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto count = ray.fields.at(reflectivityIndex).size();
+    const auto encoded = static_cast<std::uint16_t>(std::clamp<long>(
+        std::lround(differentialReflectivityDb * 16.0 + 129.0), 2, 65535));
+    ray.fields.at(index).assign(count, encoded);
+    ray.firstGateByProduct.at(index) = ray.firstGateByProduct.at(reflectivityIndex);
+    ray.gateSpacingByProduct.at(index) = ray.gateSpacingByProduct.at(reflectivityIndex);
+    ray.scaleByProduct.at(index) = 16.0F;
+    ray.offsetByProduct.at(index) = 129.0F;
+}
+
+// KDP on the ODIM 16-bit packing the reader emits (scale 1023.9375,
+// offset 32768), attached to the reflectivity geometry.
+void attachRainSpecificDifferentialPhase(DecodedRay& ray, const double kdpDegreesPerKm) {
+    const auto index = static_cast<std::size_t>(ProductKind::SpecificDifferentialPhase);
+    const auto reflectivityIndex = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto count = ray.fields.at(reflectivityIndex).size();
+    const auto encoded = static_cast<std::uint16_t>(std::clamp<long>(
+        std::lround(kdpDegreesPerKm * 1023.9375 + 32768.0), 2, 65534));
+    ray.fields.at(index).assign(count, encoded);
+    ray.firstGateByProduct.at(index) = ray.firstGateByProduct.at(reflectivityIndex);
+    ray.gateSpacingByProduct.at(index) = ray.gateSpacingByProduct.at(reflectivityIndex);
+    ray.scaleByProduct.at(index) = 1023.9375F;
+    ray.offsetByProduct.at(index) = 32768.0F;
+}
+
+void testDualPolRateRelations() {
+    // R(Z,ZDR) = 0.0142 * Z^0.770 * 10^(-0.167 ZDR), Z in mm^6/m^3.
+    // 40 dBZ -> Z = 10000; 10000^0.770 = 1202.264; 10^-0.167 = 0.680769:
+    // R = 0.0142 * 1202.264 * 0.680769 = 11.6222 mm/h.
+    const auto at40 = zzdrRateMillimetersPerHour(40.0, 1.0);
+    assert(at40 && std::abs(*at40 - 11.6222) < 1e-3);
+    // At the same Z a larger drop (higher ZDR) gives a lower rate.
+    const auto at43 = zzdrRateMillimetersPerHour(40.0, 3.0);
+    assert(at43 && std::abs(*at43 - 5.38627) < 1e-3 && *at43 < *at40);
+    // R(KDP) = 44 |KDP|^0.822 sign(KDP): KDP = 1 -> exactly 44 mm/h,
+    // KDP = 2 -> 44 * 2^0.822 = 77.7856 mm/h.
+    const auto kdp1 = kdpRateMillimetersPerHour(1.0);
+    assert(kdp1 && std::abs(*kdp1 - 44.0) < 1e-12);
+    const auto kdp2 = kdpRateMillimetersPerHour(2.0);
+    assert(kdp2 && std::abs(*kdp2 - 77.7856) < 1e-3);
+    const auto kdpNegative = kdpRateMillimetersPerHour(-2.0);
+    assert(kdpNegative && std::abs(*kdpNegative + 77.7856) < 1e-3);
+    // Unusable constants or inputs fail closed instead of inventing a rate.
+    assert(!zzdrRateMillimetersPerHour(std::numeric_limits<double>::quiet_NaN(), 1.0));
+    assert(!zzdrRateMillimetersPerHour(40.0, std::numeric_limits<double>::quiet_NaN()));
+    assert(!zzdrRateMillimetersPerHour(40.0, 1.0, 0.0, 0.770, 1.67));
+    assert(!zzdrRateMillimetersPerHour(40.0, 1.0, 0.0142, 0.0, 1.67));
+    assert(!zzdrRateMillimetersPerHour(40.0, 1.0, 0.0142, 0.770, -1.0));
+    assert(!kdpRateMillimetersPerHour(std::numeric_limits<double>::quiet_NaN()));
+    assert(!kdpRateMillimetersPerHour(1.0, 0.0, 0.822));
+    assert(!kdpRateMillimetersPerHour(1.0, 44.0, 0.0));
+}
+
+void testRainfallZdrAccumulationClosedForm() {
+    // Uniform 40 dBZ and +1.0 dB ZDR: R = 11.6222 mm/h. Three 300 s intervals
+    // credit 11.6222 * 0.25 h = 2.9056 mm -> 29 tenths per gate.
+    auto chunk = rainVolume("KTLX", 40.0);
+    chunk.momentEncoding = MomentEncoding::NexradMessage31;
+    attachRainCorrelation(chunk.rays.front(), 0.98);
+    attachRainDifferentialReflectivity(chunk.rays.front(), 1.0);
+    const std::vector<RainfallSample> samples{
+        {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    RainfallConfig config;
+    config.relation = RainfallRelation::Zdr;
+    const auto grid = accumulateRainfall(samples, 370.0,
+                                         std::numeric_limits<double>::quiet_NaN(), config);
+    assert(grid.summary.valid);
+    assert(grid.summary.relationAvailable);
+    assert(grid.summary.relationUnavailableReason.empty());
+    assert(grid.summary.relation == RainfallRelation::Zdr);
+    assert(grid.rays.size() == 1);
+    assert(grid.rays.front().gates.size() == 16);
+    for (const auto& gate : grid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 29);
+        assert((gate.flags & RainfallGateIncomplete) == 0);
+        assert((gate.flags & RainfallGateInputClamped) == 0);
+        assert((gate.flags & RainfallGateRateCapped) == 0);
+    }
+    assert(std::abs(grid.summary.maximumMillimeters - 2.9) < 1e-9);
+    assert(grid.summary.quality == RainfallQuality::Good);
+    // The Z-R path on the same volume is untouched: 3.06 mm -> 31 tenths.
+    const auto zr = accumulateRainfall(samples, 370.0);
+    assert(zr.rays.front().gates.front().depthTenthsMillimeters == 31);
+}
+
+void testRainfallKdpAccumulationClosedForm() {
+    // Reflectivity is guard-only for R(KDP); KDP = 1.0 deg/km -> 44 mm/h.
+    // Three 300 s intervals: 44 * 0.25 h = 11.0 mm -> 110 tenths per gate.
+    auto chunk = rainVolume("KTLX", 40.0);
+    chunk.momentEncoding = MomentEncoding::Odim;
+    attachRainSpecificDifferentialPhase(chunk.rays.front(), 1.0);
+    const std::vector<RainfallSample> samples{
+        {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    RainfallConfig config;
+    config.relation = RainfallRelation::Kdp;
+    const auto grid = accumulateRainfall(samples, 370.0,
+                                         std::numeric_limits<double>::quiet_NaN(), config);
+    assert(grid.summary.valid);
+    assert(grid.summary.relationAvailable);
+    assert(grid.summary.relation == RainfallRelation::Kdp);
+    for (const auto& gate : grid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 110);
+        assert((gate.flags & RainfallGateIncomplete) == 0);
+        assert((gate.flags & RainfallGateInputClamped) == 0);
+        assert((gate.flags & RainfallGateRateCapped) == 0);
+    }
+    assert(std::abs(grid.summary.maximumMillimeters - 11.0) < 1e-9);
+    assert(grid.summary.quality == RainfallQuality::Good);
+
+    // Below the noise floor and negative KDP are measured no-rain gates: zero
+    // depth, no coverage gap, no clamp.
+    const auto quietVolume = [](const double kdp) {
+        auto quiet = rainVolume("KTLX", 40.0);
+        quiet.momentEncoding = MomentEncoding::Odim;
+        attachRainSpecificDifferentialPhase(quiet.rays.front(), kdp);
+        return quiet;
+    };
+    for (const double kdp : {0.05, -1.0}) {
+        const auto quiet = quietVolume(kdp);
+        const std::vector<RainfallSample> quietSamples{
+            {&quiet, 0.0}, {&quiet, 300.0}, {&quiet, 600.0}, {&quiet, 900.0}};
+        const auto quietGrid = accumulateRainfall(
+            quietSamples, 370.0, std::numeric_limits<double>::quiet_NaN(), config);
+        assert(quietGrid.summary.valid);
+        assert(quietGrid.summary.depthGateCount == 0);
+        assert(quietGrid.summary.incompleteGateCount == 0);
+        assert(quietGrid.summary.inputClampedGateCount == 0);
+    }
+}
+
+void testRainfallDualPolUnavailable() {
+    // A single-pol chunk carries neither ZDR nor KDP. Both dual-pol relations
+    // must report unavailability with the missing product named, and neither
+    // may fall back to Z-R.
+    const auto singlePol = rainVolume("KTLX", 40.0);
+    const std::vector<RainfallSample> samples{
+        {&singlePol, 0.0}, {&singlePol, 300.0}, {&singlePol, 600.0}, {&singlePol, 900.0}};
+    for (const auto relation : {RainfallRelation::Zdr, RainfallRelation::Kdp}) {
+        RainfallConfig config;
+        config.relation = relation;
+        const auto grid = accumulateRainfall(samples, 370.0,
+                                             std::numeric_limits<double>::quiet_NaN(), config);
+        assert(!grid.summary.valid);
+        assert(grid.summary.quality == RainfallQuality::Invalid);
+        assert(!grid.summary.relationAvailable);
+        assert(grid.summary.relation == relation);
+        const std::string expected = relation == RainfallRelation::Zdr
+                                         ? "Differential reflectivity"
+                                         : "Specific differential phase";
+        assert(grid.summary.relationUnavailableReason.find(expected) != std::string::npos);
+        assert(grid.rays.empty());
+        // The window itself was fine: the failure is the relation's input.
+        assert(grid.summary.sampleCount == 4);
+    }
+    // Z-R is still available on that same volume.
+    const auto zr = accumulateRainfall(samples, 370.0);
+    assert(zr.summary.valid);
+    assert(zr.summary.relationAvailable);
+    assert(zr.summary.relation == RainfallRelation::MarshallPalmer);
+    assert(zr.rays.front().gates.front().depthTenthsMillimeters == 31);
+
+    // A moment that exists only on a higher tilt cannot produce the reference
+    // grid's product: unavailable, not an all-Incomplete "valid" grid.
+    RainfallConfig zdrConfig;
+    zdrConfig.relation = RainfallRelation::Zdr;
+    DecodedChunk higherTiltOnly;
+    higherTiltOnly.radarId = "KTLX";
+    higherTiltOnly.rays.push_back(
+        syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, 16, 40.0));
+    auto upperTilt = syntheticRainRay(90.0F, 2, 30.0F, 10000, 1000, 60, 40.0);
+    attachRainDifferentialReflectivity(upperTilt, 1.0);
+    higherTiltOnly.rays.push_back(upperTilt);
+    const std::vector<RainfallSample> higherSamples{
+        {&higherTiltOnly, 0.0}, {&higherTiltOnly, 300.0},
+        {&higherTiltOnly, 600.0}, {&higherTiltOnly, 900.0}};
+    const auto higherGrid = accumulateRainfall(higherSamples, 370.0,
+                                               std::numeric_limits<double>::quiet_NaN(),
+                                               zdrConfig);
+    assert(!higherGrid.summary.valid);
+    assert(!higherGrid.summary.relationAvailable);
+    assert(higherGrid.summary.relationUnavailableReason.find("lowest reflectivity tilt") !=
+           std::string::npos);
+    assert(higherGrid.rays.empty());
+
+    // An older volume that lost ZDR is a coverage gap, never a Z-R substitute:
+    // the newest volume carries ZDR, so the relation stays available and only
+    // the 600-900 s interval is credited (2.9056 / 3 mm -> 10 tenths).
+    auto withZdr = rainVolume("KTLX", 40.0);
+    attachRainDifferentialReflectivity(withZdr.rays.front(), 1.0);
+    const auto withoutZdr = rainVolume("KTLX", 40.0);
+    const std::vector<RainfallSample> mixed{{&withoutZdr, 0.0}, {&withoutZdr, 300.0},
+                                            {&withZdr, 600.0}, {&withZdr, 900.0}};
+    const auto mixedGrid = accumulateRainfall(mixed, 370.0,
+                                              std::numeric_limits<double>::quiet_NaN(),
+                                              zdrConfig);
+    assert(mixedGrid.summary.valid);
+    assert(mixedGrid.summary.relationAvailable);
+    assert(mixedGrid.summary.incompleteGateCount == 16);
+    for (const auto& gate : mixedGrid.rays.front().gates) {
+        assert(gate.depthTenthsMillimeters == 10);
+        assert((gate.flags & RainfallGateIncomplete) != 0);
+    }
+    // 10 tenths, not the 31 a silent Z-R fallback would have produced.
+    assert(mixedGrid.summary.quality == RainfallQuality::Marginal);
+}
+
+void testRainfallDualPolGuardParity() {
+    // The AP/clutter guard, the gap clamp and the vertical-check accounting are
+    // the same code for all three relations: same flags, same depth fate.
+    const auto withDualPol = [](const bool echoAloft, const double reflectivityDbz,
+                                const double zdrDb, const double kdp) {
+        DecodedChunk chunk;
+        chunk.radarId = "KTLX";
+        chunk.momentEncoding = MomentEncoding::NexradMessage31;
+        chunk.rays.push_back(
+            syntheticRainRay(90.0F, 1, 0.5F, 10000, 1000, 16, reflectivityDbz));
+        chunk.rays.push_back(
+            syntheticRainRay(90.0F, 2, 30.0F, 10000, 1000, 60,
+                             echoAloft ? reflectivityDbz : 0.0, echoAloft));
+        attachRainCorrelation(chunk.rays.front(), 0.98);
+        attachRainDifferentialReflectivity(chunk.rays.front(), zdrDb);
+        attachRainSpecificDifferentialPhase(chunk.rays.front(), kdp);
+        return chunk;
+    };
+    const auto configFor = [](const RainfallRelation relation) {
+        RainfallConfig config;
+        config.relation = relation;
+        return config;
+    };
+    const auto fourSamples = [](const DecodedChunk& chunk) {
+        return std::vector<RainfallSample>{
+            {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+    };
+
+    // Strong low echo with no column above 3 km: clutter or AP. Every relation
+    // must drop all 16 gates and say why.
+    const auto clutter = withDualPol(false, 45.0, 0.0, 1.0);
+    for (const auto relation : {RainfallRelation::MarshallPalmer, RainfallRelation::Zdr,
+                                RainfallRelation::Kdp}) {
+        const auto grid = accumulateRainfall(fourSamples(clutter), 370.0,
+                                             std::numeric_limits<double>::quiet_NaN(),
+                                             configFor(relation));
+        assert(grid.summary.valid);
+        assert(grid.summary.clutterSuspectGateCount == 16);
+        assert(grid.summary.depthGateCount == 0);
+        assert(grid.summary.quality == RainfallQuality::Poor);
+        for (const auto& gate : grid.rays.front().gates) {
+            assert(gate.depthTenthsMillimeters == 0);
+            assert((gate.flags & RainfallGateClutterSuspect) != 0);
+        }
+    }
+
+    // Single-tilt volume: the column guard cannot run. Same NoVerticalCheck
+    // accounting for all three, depth kept at each relation's own rate.
+    const auto blind = withDualPol(false, 45.0, 0.0, 1.0);
+    DecodedChunk singleTilt;
+    singleTilt.radarId = "KTLX";
+    singleTilt.momentEncoding = MomentEncoding::NexradMessage31;
+    singleTilt.rays.push_back(blind.rays.front());
+    // 45 dBZ, 0 dB ZDR: R = 41.4275 mm/h -> 103.57 tenths -> 104.
+    const std::uint16_t expectedBlind[3] = {70, 104, 110};
+    int index = 0;
+    for (const auto relation : {RainfallRelation::MarshallPalmer, RainfallRelation::Zdr,
+                                RainfallRelation::Kdp}) {
+        const auto grid = accumulateRainfall(fourSamples(singleTilt), 370.0,
+                                             std::numeric_limits<double>::quiet_NaN(),
+                                             configFor(relation));
+        assert(grid.summary.valid);
+        assert(grid.summary.noVerticalCheckGateCount == 16);
+        assert(grid.summary.clutterSuspectGateCount == 0);
+        assert(grid.summary.quality == RainfallQuality::Marginal);
+        for (const auto& gate : grid.rays.front().gates) {
+            assert(gate.depthTenthsMillimeters == expectedBlind[index]);
+            assert((gate.flags & RainfallGateNoVerticalCheck) != 0);
+        }
+        ++index;
+    }
+
+    // A 20 min volume gap is credited as 600 s and flagged for every relation.
+    // 45 dBZ + real column: Z-R 46 tenths (600 s), R(Z,ZDR) 69, R(KDP) 73.
+    const auto storm = withDualPol(true, 45.0, 0.0, 1.0);
+    const std::vector<RainfallSample> gapSamples{{&storm, 0.0}, {&storm, 1200.0}};
+    const std::uint16_t expectedGap[3] = {46, 69, 73};
+    index = 0;
+    for (const auto relation : {RainfallRelation::MarshallPalmer, RainfallRelation::Zdr,
+                                RainfallRelation::Kdp}) {
+        const auto grid = accumulateRainfall(gapSamples, 370.0,
+                                             std::numeric_limits<double>::quiet_NaN(),
+                                             configFor(relation));
+        assert(grid.summary.valid);
+        assert(grid.summary.gapClampedIntervalCount == 1);
+        assert(grid.summary.gapClampedGateCount == 16);
+        for (const auto& gate : grid.rays.front().gates) {
+            assert(gate.depthTenthsMillimeters == expectedGap[index]);
+            assert((gate.flags & RainfallGateGapClamped) != 0);
+        }
+        ++index;
+    }
+}
+
 static RadarStormFeature syntheticFeature(const double lat, const double lon, const double dbz,
                                                  const bool rotating = false) {
     RadarStormFeature feature;
@@ -2380,6 +2690,59 @@ std::vector<std::byte> readFixtureBytes(const char* name) {
     return {};
 }
 
+void testRainfallDualPolRealArchive() {
+    // Real KTLX 2013-05-20 (Moore) radial, sliced from an archive volume:
+    // reflectivity, ZDR and RHOHV are real decoded gates. NEXRAD Message 31
+    // has no DPKP block, so R(KDP) must be unavailable on the same bytes —
+    // the real single-pol-moment case, not a synthetic stand-in.
+    const auto bytes = readFixtureBytes("level2_radial_ktlx_20130520_vcp12.bin");
+    assert(!bytes.empty());
+    const auto chunk = decodeMessage31Chunk(bytes, "KTLX");
+    assert(chunk.rays.size() == 1);
+    const auto& ray = chunk.rays.front();
+    assert(ray.has(ProductKind::Reflectivity));
+    assert(ray.has(ProductKind::DifferentialReflectivity));
+    assert(ray.has(ProductKind::CorrelationCoefficient));
+    assert(!ray.has(ProductKind::SpecificDifferentialPhase));
+    const std::vector<RainfallSample> samples{
+        {&chunk, 0.0}, {&chunk, 300.0}, {&chunk, 600.0}, {&chunk, 900.0}};
+
+    const auto zr = accumulateRainfall(samples, 370.0);
+    assert(zr.summary.valid);
+    assert(zr.summary.relationAvailable);
+    assert(zr.summary.relation == RainfallRelation::MarshallPalmer);
+
+    RainfallConfig zdrConfig;
+    zdrConfig.relation = RainfallRelation::Zdr;
+    const auto zdr = accumulateRainfall(samples, 370.0,
+                                        std::numeric_limits<double>::quiet_NaN(), zdrConfig);
+    assert(zdr.summary.valid);
+    assert(zdr.summary.relationAvailable);
+    assert(zdr.summary.relation == RainfallRelation::Zdr);
+    assert(zdr.summary.depthGateCount > 0);
+    assert(zdr.summary.nonMeteorologicalGateCount <= zr.summary.nonMeteorologicalGateCount);
+
+    RainfallConfig kdpConfig;
+    kdpConfig.relation = RainfallRelation::Kdp;
+    const auto kdp = accumulateRainfall(samples, 370.0,
+                                        std::numeric_limits<double>::quiet_NaN(), kdpConfig);
+    assert(!kdp.summary.valid);
+    assert(!kdp.summary.relationAvailable);
+    assert(kdp.summary.relationUnavailableReason.find("Specific differential phase") !=
+           std::string::npos);
+
+    std::cout << "real KTLX Moore radial: Z-R peak=" << zr.summary.maximumMillimeters
+              << " mm mean=" << zr.summary.meanMillimeters
+              << " gates=" << zr.summary.depthGateCount
+              << " no_vertical_check=" << zr.summary.noVerticalCheckGateCount
+              << "; R(Z,ZDR) peak=" << zdr.summary.maximumMillimeters
+              << " mm mean=" << zdr.summary.meanMillimeters
+              << " gates=" << zdr.summary.depthGateCount
+              << " input_clamped=" << zdr.summary.inputClampedGateCount
+              << " rate_capped=" << zdr.summary.rateCappedGateCount
+              << "; R(KDP): " << kdp.summary.relationUnavailableReason << "\n";
+}
+
 void testLevel2VolumeCoveragePattern() {
     // Real Message 31 radials sliced verbatim out of archive volumes under
     // data/ (provenance: docs/vcp-parsing.md). Byte 40 of each radial's RVOL
@@ -3973,6 +4336,11 @@ int main() {
     testRainfallSentinelConvention();
     testRainfallInvalidWindows();
     testRainfallPartialReferenceRays();
+    testDualPolRateRelations();
+    testRainfallZdrAccumulationClosedForm();
+    testRainfallKdpAccumulationClosedForm();
+    testRainfallDualPolUnavailable();
+    testRainfallDualPolGuardParity();
     testStormTracker();
     testVolumeBrickTrilinear();
     testVolumeBrick();
@@ -4005,6 +4373,7 @@ int main() {
     testMessage31RealArchiveChunkSentinelConvention();
     testMessage31MalformedInputs();
     testLevel2VolumeCoveragePattern();
+    testRainfallDualPolRealArchive();
     testLevel2VolumeCoveragePatternSyntheticBytesOnly();
     testOptionalRealChunk();
     testLightningJumpDetection();

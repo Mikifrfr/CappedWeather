@@ -1,6 +1,9 @@
-# Z-R rainfall accumulation — validation record and limits
+# Rainfall accumulation (Z-R, R(Z,ZDR), R(KDP)) — validation record and limits
 
-Status: **not validated. Zero cases scored.**
+Status: **not validated. Zero cases scored.** All three relations share this
+record. R(KDP) additionally has **no real-data run through the engine**: no
+openly published product checked for this card carries a KDP moment, and NEXRAD
+Level II Message 31 has no KDP block (see "Real-data check").
 
 The engine exists (`accumulateRainfall` in `src/core/derived_products.cpp`) and
 is exercised by closed-form core tests, but it has **never been compared with a
@@ -8,24 +11,45 @@ gauge or with MRMS**. The app shows it as an unvalidated estimate with its
 window and coverage (see "What the UI says"), never as a measurement: nothing
 may be presented as one until the gates in "Comparison plan" below are met and
 logged in "Scoring log". Until then every number it produces is a lower-bound
-guidance estimate derived from reflectivity, not observed rainfall.
+guidance estimate derived from radar moments, not observed rainfall.
 
 This file is the record that makes the absence of validation explicit. It is
 required by the honesty bar: no precision claim without a scored record.
 
 ## What the engine computes
 
-A single Z-R relation per gate on the lowest reflectivity tilt of each volume:
+One rain-rate relation per gate on the lowest reflectivity tilt of each volume.
+The relation, its inputs and its range limits are configuration
+(`RainfallConfig`); the relation functions are the single source of each
+formula so tests and any future UI cannot drift apart.
 
-```text
-Z  = 10^(dBZ/10)                [mm^6/m^3]
-Z' = min(Z, 10^(53/10))         [hail cap]
-R  = (Z' / 300)^(1/1.4)         [mm/h]   (Marshall-Palmer)
-```
+| Relation | Formula | Needs (besides reflectivity) | Source |
+|---|---|---|---|
+| `MarshallPalmer` (default) | `R = (Z / 300)^(1/1.4)` | none | Marshall–Palmer, maritime default |
+| `Zdr` — R(Z,ZDR) | `R = 0.0142 · Z^0.770 · Zdr^-1.67`, `Zdr = 10^(ZDR/10)` | differential reflectivity (ZDR) | Ryzhkov, Giangrande & Schuur (2005), NSSL report, Eq. (3); Oklahoma DSD statistics, equilibrium drop shapes |
+| `Kdp` — R(KDP) | `R = 44.0 · \|KDP\|^0.822 · sign(KDP)`, KDP in deg/km | specific differential phase (KDP) | WSR-88D operational dual-pol QPE relation (Ryzhkov et al. 2005; Giangrande & Ryzhkov 2008; NWS Surface Precipitation Rate description) |
 
-Defaults live in `RainfallConfig`; `A = 300`, `b = 1.4`, gate floor 5 dBZ, hail
-cap 53 dBZ (103.8 mm/h). `zrRateMillimetersPerHour` is the single source of the
-relation, so tests and the UI cannot drift apart.
+All three are **S-band** relations. The app also reads C-band OPERA volumes;
+applying these coefficients there is a known, unscored extrapolation
+(limitation 8 below). Reflectivity is required for every relation even when it
+is not part of the rate: it is the only source for the AP/clutter guard's
+vertical columns.
+
+Per-relation limits and clamps (all counted, none silent):
+
+| Limit | Default | Effect |
+|---|---|---|
+| Z hail cap (Z-R, R(Z,ZDR)) | 53 dBZ | Z clamped before the relation, `HailCapped` |
+| ZDR valid range (R(Z,ZDR)) | −1 … 8 dB | input clamped, `InputClamped`; a gate needing this is suspect |
+| KDP noise floor (R(KDP)) | 0.1 deg/km | below it the gate contributes no rate (light-rain noise) |
+| KDP valid range (R(KDP)) | ≤ 20 deg/km | magnitude clamped, `InputClamped` |
+| Rate ceiling (all) | 150 mm/h | rate clamped, `RateCapped`; binds on KDP spikes, not on the Z caps |
+
+The 150 mm/h ceiling is the operational R(KDP) cap. Z-R and R(Z,ZDR) reach at
+most 103.8 mm/h at the 53 dBZ hail cap, so the ceiling only bites on a KDP
+spike. ZDR outside its range is clamped rather than dropped: the value is
+reported (`inputClampedGateCount`) so a product made mostly of clamped gates is
+visibly not a clean estimate.
 
 Rain is integrated by **left hold** between volume times: the rate measured at
 volume *i* is credited over `[t_i, t_i+1)`. The last volume is credited nothing
@@ -34,11 +58,37 @@ volumes are missing, so it is credited as 600 s and every gate it touched is
 flagged `GapClamped` — a multi-hour gap is never poured through one rate.
 
 Output is per gate in **0.1 mm** (a tipping-bucket resolution, not a claim of
-Z-R accuracy), plus a summary of what the number is actually made of: samples
-used, window length, credited seconds, gap-clamped intervals, and per-flag gate
-counts. The reference grid is the newest volume's lowest tilt, so the
-accumulation lines up with the reflectivity the user is looking at; each ray
-reports the reference chunk's ray index.
+rainfall accuracy), plus a summary of what the number is actually made of:
+samples used, window length, credited seconds, gap-clamped intervals, and
+per-flag gate counts. The reference grid is the newest volume's lowest
+reflectivity tilt for **every** relation, so the three relations line up gate
+for gate; each ray reports the reference chunk's ray index.
+
+## Relation availability: missing dual-pol is missing
+
+The newest volume decides whether a relation can be computed at all. If it does
+not carry the relation's inputs, `accumulateRainfall` returns an invalid grid
+with `relationAvailable == false` and `relationUnavailableReason` naming the
+missing product; it **never falls back to Z-R**. The same rule applies to a
+volume that carries no reflectivity (the guard cannot run).
+
+An older volume inside the window that lost the moment is a coverage gap, not a
+substitution: every gate it would have covered gets zero depth and
+`Incomplete` (which downgrades quality to Marginal). It is never filled from
+another relation.
+
+The dual-pol moment is read at the reflectivity source gate only when it shares
+that ray's range table (same first gate and spacing). A volume assembled from
+separate, unmerged per-moment rays (a SCAN assembly that appends one ray per
+moment) therefore reports `Incomplete` gates rather than reading a value from
+the wrong range. The app's live OPERA path currently downloads DBZH only, so
+that limitation is not exposed until a dual-pol moment is wired into the feed.
+
+R(KDP) still applies the 5 dBZ reflectivity floor as a consistency gate: where
+reflectivity is present and says the gate is dry, KDP cannot mint rain there.
+Where reflectivity is missing entirely at a gate, the KDP rate is kept (KDP is
+the rate input) and the gate is flagged `NoVerticalCheck`, because the column
+guard could not run. Reflectivity below threshold is always a measured dry gate.
 
 ## What history the app can actually hand it
 
@@ -79,8 +129,17 @@ application per gate per interval:
 | Dual-pol | CC present and < 0.80 | no depth, `NonMeteorological` |
 | Vertical | Z >= 40 dBZ and column echo top < 3000 m MSL, with the volume having observed above 3000 m at that range | no depth, `ClutterSuspect` |
 | Vertical, blind | Z >= 40 dBZ but no tilt at that range reached 3000 m (single-tilt volume, short range) | depth kept, `NoVerticalCheck` |
-| Hail | Z > 53 dBZ | rate clamped at 53 dBZ, `HailCapped` |
+| Hail | Z > 53 dBZ (Z-R, R(Z,ZDR)) | rate clamped at 53 dBZ, `HailCapped` |
+| Relation input | R(Z,ZDR): ZDR < −1 or > 8 dB | input clamped, `InputClamped` |
+| Relation input | R(KDP): \|KDP\| < 0.1 deg/km | no rate: light-rain noise floor |
+| Relation input | R(KDP): \|KDP\| > 20 deg/km | magnitude clamped, `InputClamped` |
+| Rate ceiling | any relation: rate > 150 mm/h | rate clamped, `RateCapped` |
 | Structural gap | no ray at the azimuth, or the gate lies beyond that sample's ray | no depth, `Incomplete` |
+| Dual-pol gap | R(Z,ZDR): ZDR missing or unusable at a rain-bearing gate | no depth, `Incomplete` |
+| Dual-pol gap | R(KDP): KDP missing at a gate | no depth, `Incomplete` |
+| Dual-pol dry | R(KDP): KDP below threshold | zero rate, no flag: measured, no phase shift |
+| Moment absent | the newest volume carries no ZDR / KDP (or no reflectivity for the guard) | relation unavailable, reason named, no grid |
+| Moment absent, older volume | a sample inside the window lost the moment | zero depth, `Incomplete`; never Z-R |
 | Below threshold | the chunk's recorded convention says this code was below threshold | zero depth, no flag: measured, no echo |
 | Missing | the chunk's recorded convention says this code is missing (nodata / range folded) | zero depth, `Incomplete` |
 | Sentinel, no convention | `momentEncoding == Unknown` (legacy spill file) | zero depth, no flag: the gap cannot be claimed |
@@ -114,8 +173,11 @@ Product quality (about whether the number may be read as a total):
   `Incomplete` gate, or any `NoVerticalCheck` gate.
 - **Good** — none of the above.
 
-Beam-height, range and hail flags are provenance, not quality downgrades: they
-say *where* the estimate is weak and are counted separately for the UI.
+Beam-height, range, hail, input-clamp and rate-cap flags are provenance, not
+quality downgrades: they say *where* the estimate is weak and are counted
+separately for the UI. ZDR/KDP clamping and the rate ceiling do not by
+themselves make a window Marginal; a product made mostly of clamped gates is a
+sign to distrust it, which is why the count is reported next to the depth.
 
 ## Where it breaks down
 
@@ -146,9 +208,31 @@ cannot be trusted for a while:
    a small number is normal, a large number means the total covers less ground
    than it appears to.
 8. **C-band OPERA.** Attenuation and lower Nyquist structure differ from S-band;
-   the same relation is used, and it has not been compared on European data.
-9. **No gauge truth yet.** Everything above is method criticism, not a measured
-   error. The point of the plan below is to replace it with numbers.
+   the same relation is used, and it has not been compared on European data. All
+   three coefficient sets are S-band; R(KDP) in particular has a different
+   coefficient/exponent at C band, so a C-band OPERA KDP volume would be read
+   with the wrong relation until band-specific coefficients exist.
+9. **R(Z,ZDR) in mixed phase and hail.** Z and ZDR are both affected by hail;
+   ZDR near 0 dB in a hail core makes the ZDR correction vanish, so the relation
+   falls back toward Z-R behaviour exactly where Z is least trustworthy. The
+   53 dBZ cap bounds it; it does not correct it. Melting-layer ZDR bias and a
+   1 dB ZDR calibration error also move the rate (about 32% per dB at 1 dB
+   ZDR, from the 10^(-0.167·ZDR) factor), and ZDR is noisy at low Z.
+10. **R(KDP) at low rates.** The relation is noisiest precisely where most rain
+    volume is: below about 5-6 mm/h KDP estimates scatter and go negative, and
+    the 0.1 deg/km floor turns that into a dry gate. It is also only as good as
+    the KDP retrieval (smoothing, ΦDP unfolding, backscatter phase removal),
+    which this app does not perform: it consumes a KDP moment if the volume
+    carries one. NEXRAD Level II Message 31 has no DPKP block, so the relation
+    is unavailable on US Level II data by construction; KDP exists only in
+    ODIM-style volumes (and in NEXRAD Level III product 163, which the app does
+    not decode).
+11. **Moment geometry.** The relation reads ZDR/KDP from the same ray and range
+    table as reflectivity. A volume whose dual-pol moment is a separate
+    unmerged ray (per-moment SCAN assembly) reports `Incomplete` instead of a
+    value, so a real window can look emptier than the moments in it.
+12. **No gauge truth yet.** Everything above is method criticism, not a measured
+    error. The point of the plan below is to replace it with numbers.
 
 ## Comparison plan
 
@@ -194,6 +278,53 @@ number:
 - The dry-day test must pass before any wet-day number is shown, because a
   contaminated total is worse than no total.
 
+Each relation is scored **separately on the same windows**: a Z-R table does not
+validate R(Z,ZDR), and a wet R(Z,ZDR) score does not validate R(KDP). R(KDP)
+additionally needs a real KDP source before it can enter the plan at all — this
+app currently decodes KDP only from ODIM_H5 volumes, and no openly published
+KDP-carrying volume was found for this card (see "Real-data check").
+
+## Real-data check (not a validation)
+
+Run 2026-10-22 through `cappedweather_core_tests`. Times are synthetic (the same
+real gates handed in four times, 300 s apart); the gates are real archive data,
+so the numbers show what the relation does on a real radial, not that it is
+right.
+
+Source: `tests/fixtures/level2_radial_ktlx_20130520_vcp12.bin`, a real KTLX
+Message 31 radial from the 2013-05-20 Moore tornado volume (0.68 deg, real
+reflectivity + ZDR + RHOHV).
+
+| Relation | Peak gate | Mean (scored gates) | Gates with depth | Flags |
+|---|---|---|---|---|
+| Z-R | 0.4 mm | 0.267 mm | 6 | none on the rain gates (weak echo, vertical guard not triggered) |
+| R(Z,ZDR) | 0.4 mm | 0.150 mm | 6 | `InputClamped` 7 (ZDR outside −1…8 dB at rain gates), `RateCapped` 0 |
+| R(KDP) | unavailable | — | — | reason: `R(KDP) needs Specific differential phase on the newest volume's lowest reflectivity tilt; that tilt does not carry it` |
+
+The small totals are honest: one radial of weak rain, 0.1 mm storage. The
+same radial's Z-R output is unchanged by this change (the closed-form tests pin
+31 tenths for the 40 dBZ case and 110 for KDP = 1 deg/km).
+
+**KDP has no real-data run through the engine.** The card's premise that the
+ODIM DENE fixtures carry KDP is not what the repo contains: `odim_deneu_dbzh.h5`,
+`odim_deneu_uzdr.h5`, `odim_deneu_urhohv.h5` and `odim_deneu_uphidp.h5` decode
+real DWD sweeps for DBZH, UZDR, URHOHV and UPHIDP; there is no KDP file. The
+only KDP-bearing container in `tests/fixtures/` is
+`odim_specshape_dualpol_3ray.h5`, which is constructed byte by byte
+(`make_odim_dualpol_specshape.py`), so it proves the decode/load path and
+nothing about the geophysics. Sources probed on 2026-10-22 and found to publish
+**no** KDP moment: DWD `sweep_vol_{z,zdr,rhohv,phidp}` (no KDP product); the
+first ~11.9k keys of the OPERA `openradar-24h` bucket for the day were
+DBZH/TH/VRAD/VRADH only, and NL PVOL carries ZDR/RHOHV/PHIDP but no KDP; the
+sampled FMI volume carried TH only; CHMI opendata publishes Z, U, V, W, ZDR,
+RHOHV and PHIDP. NEXRAD Level II Message 31 has no DPKP block; NEXRAD Level III
+product 163 does carry KDP but this app has no Level III decoder.
+
+Consequence: R(KDP) ships as a **closed-form-tested, unscored** relation whose
+availability on real volumes is proven only by the fail-closed test above. The
+first real KDP volume (ODIM with a KDP moment, or a Level III 163 reader)
+must be scored before any KDP number is shown as an estimate.
+
 ## What the UI says
 
 The readout is in the control dock's Display tab (`Rainfall (Z-R estimate)`),
@@ -204,6 +335,13 @@ frames are faulted in from disk by path, so the pass never blocks the GUI
 thread or shifts the RAM budget while it runs. The `Details` pop-out (and the
 command palette's `Analysis: rainfall estimate details`) carries the per-flag
 provenance table and the caveats.
+
+The dock readout is still **Z-R only** and its wording is unchanged by the
+dual-pol engine work: selecting R(Z,ZDR) or R(KDP) there is a follow-on in
+`main_window.cpp` (manager's lane). The engine already exposes
+`RainfallSummary::relation`, `relationAvailable` and
+`relationUnavailableReason` for that readout, and
+`rainfallRelationName()` for its label.
 
 The dock block is three lines, in the SCAN age block's style:
 
@@ -246,6 +384,20 @@ Empty by design. Add one row per scored case; do not delete rows that failed.
 
 ## Change history
 
+- 2026-10-22 — dual-pol relations added: `RainfallRelation` (`MarshallPalmer`,
+  `Zdr`, `Kdp`) in `RainfallConfig`, with `zzdrRateMillimetersPerHour` /
+  `kdpRateMillimetersPerHour` as their single sources. All three reuse the same
+  window, reference grid, AP/clutter guard, gap clamp and provenance flags; a
+  relation whose newest-volume input is missing fails closed with
+  `relationAvailable=false` and a reason instead of falling back to Z-R.
+  New flags/counts: `InputClamped` (ZDR −1…8 dB, KDP ≤ 20 deg/km) and
+  `RateCapped` (150 mm/h ceiling). Closed-form tests:
+  `testDualPolRateRelations`, `testRainfallZdrAccumulationClosedForm`,
+  `testRainfallKdpAccumulationClosedForm`, `testRainfallDualPolUnavailable`,
+  `testRainfallDualPolGuardParity`, plus a real-radial check
+  (`testRainfallDualPolRealArchive`). Still zero scored cases; R(KDP) has no
+  real-data run because no openly published KDP volume was found (DENE has no
+  KDP fixture; NEXRAD Level II has no KDP block).
 - 2026-10-20 — UI readout landed: control-dock `Rainfall (Z-R estimate)` block
   (peak, credited window, volume count, quality flag + dominant caveat) and a
   Details pop-out with the per-flag provenance table. The pass runs off the GUI
