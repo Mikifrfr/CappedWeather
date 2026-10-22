@@ -4,10 +4,11 @@ Status: **not validated. Zero cases scored.**
 
 The engine exists (`accumulateRainfall` in `src/core/derived_products.cpp`) and
 is exercised by closed-form core tests, but it has **never been compared with a
-gauge or with MRMS**. Nothing in the app presents it as a measurement, and
-nothing may until the gates in "Comparison plan" below are met and logged in
-"Scoring log". Until then every number it produces is a lower-bound guidance
-estimate derived from reflectivity, not observed rainfall.
+gauge or with MRMS**. The app shows it as an unvalidated estimate with its
+window and coverage (see "What the UI says"), never as a measurement: nothing
+may be presented as one until the gates in "Comparison plan" below are met and
+logged in "Scoring log". Until then every number it produces is a lower-bound
+guidance estimate derived from reflectivity, not observed rainfall.
 
 This file is the record that makes the absence of validation explicit. It is
 required by the honesty bar: no precision claim without a scored record.
@@ -193,19 +194,47 @@ number:
 - The dry-day test must pass before any wet-day number is shown, because a
   contaminated total is worse than no total.
 
-## What the UI may say (when it lands)
+## What the UI says
 
-No surface exists yet; the core function is only reachable from `core_tests`.
-When a panel or pop-out is wired:
+The readout is in the control dock's Display tab (`Rainfall (Z-R estimate)`),
+next to the SCAN age block. It is computed on a worker thread from the active
+session's frame times and re-scored whenever the window changes (a new volume,
+a radar switch, an archive load); resident frames are borrowed and spilled
+frames are faulted in from disk by path, so the pass never blocks the GUI
+thread or shifts the RAM budget while it runs. The `Details` pop-out (and the
+command palette's `Analysis: rainfall estimate details`) carries the per-flag
+provenance table and the caveats.
 
-- Label it as an estimate with its window and coverage, e.g.
-  `Z-R estimate — 58 min scored of 60 min, 20 volumes` in the same style as the
-  SCAN age block. Never a bare `12.4 mm`, never "rainfall" as a measured
-  quantity, never a diameter or warning style.
-- Show the quality flag and the dominant caveat (`Marginal: 37 gates within
-  9 km where the column guard could not run`) instead of hiding it.
-- A stale history must say so: if `coveredSeconds` is well short of the
-  requested window, the number is a partial total and must be labelled as one.
+The dock block is three lines, in the SCAN age block's style:
+
+```text
+Z-R estimate — peak 12.4 mm
+55 min credited of 55 min window · 12 volumes
+Quality: Good — window fully credited, guard ran where it mattered
+```
+
+- Line 1 names the product and the **peak gate** total (the deepest column in
+  the window) — never a bare `12.4 mm`, never "rainfall" as a measured
+  quantity. An unscorable window reads `Z-R estimate — unavailable` instead of
+  `0.0 mm`, which would read as a measured dry spell.
+- Line 2 is the window and the coverage: `coveredSeconds` credited against
+  `windowSeconds` plus the usable volume count. The newest volume is not
+  credited (left hold), so the total is a lower bound by construction; the
+  tooltip and the pop-out both say so.
+- Line 3 is the quality flag plus its dominant caveat. Inside Marginal the
+  order is: a gap-clamped interval (it shortens credited time), then gates
+  where the column guard could not run, then gates missing an interval, then a
+  short window. Poor reports the coverage share first, the clutter/CC
+  contamination share when coverage is fine.
+- The pop-out adds the peak gate's azimuth and range, the mean over scored
+  gates, the reference grid geometry, the credited window as UTC times, frames
+  handed in / rejected samples / unreadable spills, the relation and caps in
+  force, and the unvalidated status pointing back at this file.
+
+Nothing in the readout claims a measurement, and the dock never shows a
+precision claim. The scoring gates below are still the bar: until they pass,
+the wording stays "Z-R estimate", the coverage ratio stays visible, and no
+percentile, gauge agreement, or "storm total" claim may appear.
 
 ## Scoring log
 
@@ -217,6 +246,12 @@ Empty by design. Add one row per scored case; do not delete rows that failed.
 
 ## Change history
 
+- 2026-10-20 — UI readout landed: control-dock `Rainfall (Z-R estimate)` block
+  (peak, credited window, volume count, quality flag + dominant caveat) and a
+  Details pop-out with the per-flag provenance table. The pass runs off the GUI
+  thread over the session window using `RadarFrame::dataTime` (spilled frames
+  faulted in by path, never by mtime). Scoring plan unchanged: still zero
+  scored cases, so the wording stays estimate-only.
 - 2026-10-20 — engine, AP/clutter guard, quality flags and closed-form tests
   added; this record created with zero scored cases. No UI surface yet; the
   display wiring is a follow-up.

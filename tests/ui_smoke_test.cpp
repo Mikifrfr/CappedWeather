@@ -43,6 +43,8 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDir>
+#include <QDialog>
+#include <QTableWidget>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QFile>
@@ -2626,6 +2628,253 @@ static bool testMomentEncodingMerge(MainWindow* window, QString* error) {
         return false;
     }
     panel->setSelectedRadar(previousRadar);
+    return true;
+}
+
+// --- Z-R rainfall readout -------------------------------------------------
+// Same volume shape the core Z-R tests use: a 0.5 degree lowest tilt over
+// 10-25 km plus a 30 degree tilt that actually samples above 3 km, so the
+// column guard can run and a clean window can reach Good quality.
+static DecodedChunk rainfallSmokeVolume(const double reflectivityDbz) {
+    DecodedChunk chunk;
+    chunk.radarId = "KTLX";
+    const auto index = static_cast<std::size_t>(ProductKind::Reflectivity);
+    const auto makeRay = [index, reflectivityDbz](const float elevation, const std::uint8_t number,
+                                                  const std::size_t gates) {
+        DecodedRay ray;
+        ray.azimuthDegrees = 90.0F;
+        ray.azimuthResolutionDegrees = 1.0F;
+        ray.elevationNumber = number;
+        ray.elevationDegrees = elevation;
+        ray.fields.at(index).assign(
+            gates, static_cast<std::uint16_t>(std::lround(reflectivityDbz * 2.0 + 66.0)));
+        ray.firstGateByProduct.at(index) = 10000;
+        ray.gateSpacingByProduct.at(index) = 1000;
+        ray.scaleByProduct.at(index) = 2.0F;
+        ray.offsetByProduct.at(index) = 66.0F;
+        return ray;
+    };
+    chunk.rays.push_back(makeRay(0.5F, 1, 16));
+    chunk.rays.push_back(makeRay(30.0F, 2, 60));
+    return chunk;
+}
+
+static bool testRainfallReadout(MainWindow* window, QString* error) {
+    // The display contract first: a value never travels alone. Every line
+    // carries the product name, the window/coverage or the quality flag, and
+    // the estimate line can never be a bare "12.4 mm".
+    RainfallSummary good;
+    good.valid = true;
+    good.quality = RainfallQuality::Good;
+    good.sampleCount = 12;
+    good.intervalCount = 11;
+    good.windowSeconds = 55.0 * 60.0;
+    good.coveredSeconds = 55.0 * 60.0;
+    good.maximumMillimeters = 12.4;
+    good.meanMillimeters = 3.2;
+    good.depthGateCount = 400;
+    const auto estimate = MainWindow::rainfallEstimateLine(good);
+    if (estimate != QStringLiteral("Z-R estimate — peak 12.4 mm")) {
+        *error = QStringLiteral("rainfall estimate line wrong, got '%1'").arg(estimate);
+        return false;
+    }
+    if (!estimate.contains(QStringLiteral("Z-R estimate")) ||
+        estimate.contains(QStringLiteral("rainfall is"))) {
+        *error = QStringLiteral("estimate line must name the product, got '%1'").arg(estimate);
+        return false;
+    }
+    const auto coverage = MainWindow::rainfallCoverageLine(good);
+    if (coverage != QStringLiteral("55 min credited of 55 min window · 12 volumes")) {
+        *error = QStringLiteral("rainfall coverage line wrong, got '%1'").arg(coverage);
+        return false;
+    }
+    const auto goodQuality = MainWindow::rainfallQualityLine(good);
+    if (goodQuality !=
+        QStringLiteral("Quality: Good — window fully credited, guard ran where it mattered")) {
+        *error = QStringLiteral("rainfall Good line wrong, got '%1'").arg(goodQuality);
+        return false;
+    }
+    // Marginal: the dominant caveat has to ride along with the flag.
+    auto marginal = good;
+    marginal.quality = RainfallQuality::Marginal;
+    marginal.gapClampedIntervalCount = 1;
+    marginal.maximumMillimeters = 3.1;
+    const auto gapLine = MainWindow::rainfallQualityLine(marginal);
+    if (gapLine != QStringLiteral("Quality: Marginal — 1 gap-clamped interval (missing volumes)")) {
+        *error = QStringLiteral("rainfall gap caveat wrong, got '%1'").arg(gapLine);
+        return false;
+    }
+    marginal.gapClampedIntervalCount = 0;
+    marginal.noVerticalCheckGateCount = 37;
+    const auto blindLine = MainWindow::rainfallQualityLine(marginal);
+    if (blindLine !=
+        QStringLiteral("Quality: Marginal — 37 gates (9% of echo gates) where the column guard could not run")) {
+        *error = QStringLiteral("rainfall blind-guard caveat wrong, got '%1'").arg(blindLine);
+        return false;
+    }
+    // A gap outranks a blind spot: it shortens credited time.
+    marginal.gapClampedIntervalCount = 2;
+    if (!MainWindow::rainfallQualityLine(marginal).startsWith(
+            QStringLiteral("Quality: Marginal — 2 gap-clamped intervals"))) {
+        *error = QStringLiteral("rainfall caveat priority wrong, got '%1'")
+                     .arg(MainWindow::rainfallQualityLine(marginal));
+        return false;
+    }
+    // Poor: coverage shortfall, then contamination when coverage is fine.
+    auto poor = good;
+    poor.quality = RainfallQuality::Poor;
+    poor.coveredSeconds = 20.0 * 60.0;
+    poor.windowSeconds = 60.0 * 60.0;
+    if (MainWindow::rainfallQualityLine(poor) !=
+        QStringLiteral("Quality: Poor — only 33% of the window covered")) {
+        *error = QStringLiteral("rainfall Poor coverage line wrong, got '%1'")
+                     .arg(MainWindow::rainfallQualityLine(poor));
+        return false;
+    }
+    poor.coveredSeconds = poor.windowSeconds;
+    poor.clutterSuspectGateCount = 30;
+    poor.nonMeteorologicalGateCount = 10;
+    if (MainWindow::rainfallQualityLine(poor) !=
+        QStringLiteral("Quality: Poor — clutter or non-meteorological echo on 9% of echo gates")) {
+        *error = QStringLiteral("rainfall Poor contamination line wrong, got '%1'")
+                     .arg(MainWindow::rainfallQualityLine(poor));
+        return false;
+    }
+    // Invalid: the reason, never a zero that would read as a dry spell.
+    RainfallSummary invalid;
+    if (MainWindow::rainfallEstimateLine(invalid) != QStringLiteral("Z-R estimate — unavailable") ||
+        MainWindow::rainfallCoverageLine(invalid) != QStringLiteral("No window scored") ||
+        MainWindow::rainfallQualityLine(invalid) !=
+            QStringLiteral("Quality: Invalid — fewer than 2 usable volumes")) {
+        *error = QStringLiteral("rainfall Invalid lines wrong");
+        return false;
+    }
+    invalid.sampleCount = 3;
+    if (MainWindow::rainfallQualityLine(invalid) !=
+        QStringLiteral("Quality: Invalid — no time span between volumes")) {
+        *error = QStringLiteral("rainfall Invalid reason wrong, got '%1'")
+                     .arg(MainWindow::rainfallQualityLine(invalid));
+        return false;
+    }
+
+    // The dock block exists, leads with the estimate, and its Details button
+    // opens the pop-out that carries the provenance table.
+    auto* estimateLabel = window->findChild<QLabel*>(QStringLiteral("rainfallEstimateLabel"));
+    auto* coverageLabel = window->findChild<QLabel*>(QStringLiteral("rainfallCoverageLabel"));
+    auto* qualityLabel = window->findChild<QLabel*>(QStringLiteral("rainfallQualityLabel"));
+    auto* detailsButton = window->findChild<QToolButton*>(QStringLiteral("rainfallDetailsButton"));
+    if (!estimateLabel || !coverageLabel || !qualityLabel || !detailsButton) {
+        *error = QStringLiteral("rainfall readout widgets missing from the dock");
+        return false;
+    }
+    if (!estimateLabel->text().contains(QStringLiteral("Z-R estimate"))) {
+        *error = QStringLiteral("dock estimate block must name the product, got '%1'")
+                     .arg(estimateLabel->text());
+        return false;
+    }
+    if (!estimateLabel->toolTip().contains(QStringLiteral("lower-bound"))) {
+        *error = QStringLiteral("dock estimate tooltip must carry the lower-bound caveat");
+        return false;
+    }
+    detailsButton->click();
+    auto* dialogSummary = window->findChild<QLabel*>(QStringLiteral("rainfallDialogSummary"));
+    auto* flagTable = window->findChild<QTableWidget*>(QStringLiteral("rainfallFlagTable"));
+    if (!dialogSummary || !flagTable) {
+        *error = QStringLiteral("rainfall pop-out widgets missing");
+        return false;
+    }
+    if (!dialogSummary->text().contains(QStringLiteral("Z-R estimate"))) {
+        *error = QStringLiteral("rainfall pop-out must name the product, got '%1'")
+                     .arg(dialogSummary->text());
+        return false;
+    }
+    if (auto* dialog = qobject_cast<QDialog*>(dialogSummary->window())) dialog->close();
+
+    // Frame time, never the spill file's mtime: two of four volumes live on
+    // disk (written now, so identical mtimes) and the window still integrates
+    // the 15 minutes their scan times describe. Reading mtime here would give
+    // duplicate times, a zero window and an Invalid product.
+    QTemporaryDir spillDir;
+    if (!spillDir.isValid()) {
+        *error = QStringLiteral("rainfall temp dir failed");
+        return false;
+    }
+    const auto sharedChunk = std::make_shared<DecodedChunk>(rainfallSmokeVolume(40.0));
+    const auto base = QDateTime(QDate(2026, 10, 20), QTime(12, 0, 0), QTimeZone::UTC);
+    RadarSession session;
+    session.radarId = QStringLiteral("KTLX");
+    for (int index = 0; index < 4; ++index) {
+        RadarFrame frame;
+        frame.volumeId = QStringLiteral("vol-%1").arg(index);
+        frame.dataTime = base.addSecs(index * 300);
+        frame.chunkCount = 1;
+        if (index < 2) {
+            frame.spilledPath = spillDir.filePath(QStringLiteral("vol-%1.cwdv").arg(index));
+            if (!spillVolume(*sharedChunk, frame.spilledPath.toStdString())) {
+                *error = QStringLiteral("rainfall spill fixture failed");
+                return false;
+            }
+        } else {
+            frame.chunk = sharedChunk;
+        }
+        session.history.push_back(std::move(frame));
+    }
+    const auto frames = rainfallFrameSnapshot(session);
+    if (frames.size() != 4 || frames.front().dataTime != base ||
+        frames.back().dataTime != base.addSecs(900)) {
+        *error = QStringLiteral("rainfall snapshot lost the frame times");
+        return false;
+    }
+    if (frames.front().chunk || frames.front().spilledPath.isEmpty()) {
+        *error = QStringLiteral("rainfall snapshot should pass spilled frames through by path");
+        return false;
+    }
+    const auto result = accumulateRainfallHistory(frames, 370.0);
+    if (!result.grid.summary.valid || result.grid.summary.sampleCount != 4 ||
+        std::abs(result.grid.summary.windowSeconds - 900.0) > 1e-6) {
+        *error = QStringLiteral("rainfall window from frame times wrong: samples=%1 window=%2")
+                     .arg(result.grid.summary.sampleCount)
+                     .arg(result.grid.summary.windowSeconds);
+        return false;
+    }
+    if (std::abs(result.grid.summary.maximumMillimeters - 3.1) > 1e-9 ||
+        result.grid.summary.quality != RainfallQuality::Good) {
+        *error = QStringLiteral("rainfall integration wrong: peak=%1 quality=%2")
+                     .arg(result.grid.summary.maximumMillimeters)
+                     .arg(static_cast<int>(result.grid.summary.quality));
+        return false;
+    }
+    if (result.oldestVolumeTime != base || result.newestVolumeTime != base.addSecs(900) ||
+        result.unreadableSpillCount != 0) {
+        *error = QStringLiteral("rainfall window timestamps wrong");
+        return false;
+    }
+    // A spill that cannot be read is counted and skipped, never invented.
+    auto broken = frames;
+    broken.back().chunk.reset();
+    broken.back().spilledPath = spillDir.filePath(QStringLiteral("gone.cwdv"));
+    const auto brokenResult = accumulateRainfallHistory(broken, 370.0);
+    if (brokenResult.unreadableSpillCount != 1 ||
+        brokenResult.grid.summary.sampleCount != 3) {
+        *error = QStringLiteral("rainfall unreadable spill should be skipped: unreadable=%1 samples=%2")
+                     .arg(brokenResult.unreadableSpillCount)
+                     .arg(brokenResult.grid.summary.sampleCount);
+        return false;
+    }
+    if (brokenResult.grid.summary.quality != RainfallQuality::Marginal) {
+        *error = QStringLiteral("three volumes should read Marginal, got %1")
+                     .arg(static_cast<int>(brokenResult.grid.summary.quality));
+        return false;
+    }
+    // A frame with no scan time is not scorable: skip it, do not guess one.
+    auto timeless = frames;
+    timeless.front().dataTime = {};
+    const auto timelessResult = accumulateRainfallHistory(timeless, 370.0);
+    if (timelessResult.grid.summary.sampleCount != 3) {
+        *error = QStringLiteral("rainfall should skip a frame with no time, got %1 samples")
+                     .arg(timelessResult.grid.summary.sampleCount);
+        return false;
+    }
     return true;
 }
 
@@ -5720,6 +5969,10 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
         }
         if (!testMomentEncodingMerge(&window, &failure)) {
             std::cerr << "Moment encoding merge failed: " << failure.toStdString() << '\n';
+            return 1;
+        }
+        if (!testRainfallReadout(&window, &failure)) {
+            std::cerr << "Rainfall readout failed: " << failure.toStdString() << '\n';
             return 1;
         }
         if (!testContextMenuToolModes(&failure)) {

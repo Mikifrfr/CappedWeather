@@ -139,6 +139,14 @@ public:
     // cappedweather::kScanStaleSeconds so the threshold has one home and this
     // symbol still exists for the suite that compiles against it.
     static constexpr qint64 kScanStaleSeconds = cappedweather::kScanStaleSeconds;
+    // Z-R rainfall readout (Display tab). A lower-bound estimate over the
+    // volume history the session actually holds — never a measurement, never a
+    // bare number. Line 1 names the estimate and its peak, line 2 its window
+    // and coverage, line 3 the quality flag and the dominant caveat. Public and
+    // static because the wording IS the honesty contract: unit-tested exactly.
+    static QString rainfallEstimateLine(const RainfallSummary& summary);
+    static QString rainfallCoverageLine(const RainfallSummary& summary);
+    static QString rainfallQualityLine(const RainfallSummary& summary);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -164,6 +172,10 @@ private slots:
     // Scan diagnostics pop-out: a real slot (not just a method) so tests,
     // the command palette, and the Details button share one entry point.
     void showScanDiagnostics();
+    // Z-R rainfall pop-out: the dock block's numbers plus the per-flag
+    // provenance table and the unvalidated warning. Real slot for the same
+    // reason (tests, palette, Details button share it).
+    void showRainfallDetails();
     // RAOB sounding pop-out: hodograph plus sounding SRH ground truth and
     // freezing level for the current Bunkers motion. Real slot like above.
     void showSoundingDialog();
@@ -245,6 +257,15 @@ private:
     void refreshCrossSection();
     void refreshScanDialog();
     void populateScanDialog();
+    // Rainfall readout: snapshot the active session's window on the GUI thread
+    // (no I/O), integrate it on a worker, and install the result back on the UI
+    // thread. scheduleRainfallEstimate() no-ops when the window signature has
+    // not changed, so it is safe to call from every frame/volume/selection path.
+    void scheduleRainfallEstimate();
+    void startRainfallCompute();
+    void applyRainfallEstimate(RainfallHistoryResult result);
+    void refreshRainfallLabels();
+    void populateRainfallDialog();
     void togglePanelMaximized();
     // Moves the single product tab bar directly above the active panel cell
     // (1x1 / maximized: top of the column; multi-panel: grid tab row over
@@ -442,6 +463,22 @@ private:
     QCheckBox* trailCheck_ = nullptr;
     QCheckBox* smoothingCheck_ = nullptr;
     QLabel* scanDiagnosticsLabel_ = nullptr;
+    // Rainfall (Z-R estimate) block: three wrapped lines in the Display tab
+    // plus the pop-out that carries per-flag provenance. The grid is kept so
+    // the pop-out can name the peak gate and a future paint can reuse it.
+    QLabel* rainfallEstimateLabel_ = nullptr;
+    QLabel* rainfallCoverageLabel_ = nullptr;
+    QLabel* rainfallQualityLabel_ = nullptr;
+    QToolButton* rainfallDetailsButton_ = nullptr;
+    QPointer<QDialog> rainfallDialog_;
+    QLabel* rainfallDialogSummary_ = nullptr;
+    QTableWidget* rainfallFlagTable_ = nullptr;
+    QLabel* rainfallDialogNotes_ = nullptr;
+    RainfallHistoryResult rainfallLatest_;
+    QString rainfallSignature_;   // radar|volumes|newest volume the readout shows
+    QString rainfallJobRadarId_;  // radar the in-flight job was started for
+    bool rainfallInFlight_ = false;
+    bool rainfallDirty_ = false;
     QCheckBox* placefilesCheck_ = nullptr;
     QLabel* placefilesBadge_ = nullptr;
     QComboBox* scopeCombo_ = nullptr;

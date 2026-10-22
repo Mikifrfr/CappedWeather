@@ -4,6 +4,7 @@
 // MainWindow keeps playback/UI; this module owns the data window so session
 // logic is unit-testable without a QMainWindow.
 
+#include "core/derived_products.hpp"
 #include "core/level2_decoder.hpp"
 
 #include <QDateTime>
@@ -110,5 +111,47 @@ void enforceSessionSpillBudget(RadarSession& session, int maximumHistoryFrames, 
 // budget excluding the installed frame. Returns true when installed.
 bool installPrefetchedChunk(RadarSession& session, const QString& volumeId,
                             std::shared_ptr<DecodedChunk> chunk, int maximumHistoryFrames);
+
+// ---------------------------------------------------------------------------
+// Z-R rainfall accumulation input (serialized for an off-thread call)
+// ---------------------------------------------------------------------------
+// The engine needs one sample per volume with the volume's scan time, but a
+// DecodedChunk carries no time at all (and the CWDV spill format has none
+// either): the only honest clock is RadarFrame::dataTime. This snapshot keeps
+// that pairing explicit and is cheap to take on the GUI thread — a resident
+// frame borrows its chunk, a spilled frame carries only its path and its frame
+// time, so taking it never touches the disk and never shifts the RAM budget.
+struct RainfallFrameSnapshot {
+    QString volumeId;
+    QDateTime dataTime;                 // RadarFrame::dataTime; never file mtime
+    std::shared_ptr<DecodedChunk> chunk;  // null when the frame has spilled
+    QString spilledPath;                // set when chunk is null and still on disk
+};
+
+// The session's window, oldest entry first, capped to the newest
+// maximumVolumes (the derived history ceiling is 32 resident + 8 spilled).
+// Frames that are neither resident nor spilled are skipped: a dropped volume
+// has no data left to score, and its absence is already visible in the window
+// length the summary reports.
+std::vector<RainfallFrameSnapshot> rainfallFrameSnapshot(const RadarSession& session,
+                                                         int maximumVolumes = 40);
+
+struct RainfallHistoryResult {
+    RainfallGrid grid;
+    QString radarId;            // the radar the grid was built from
+    QDateTime oldestVolumeTime;  // frame time of the first credited volume
+    QDateTime newestVolumeTime;  // frame time of the last volume in the window
+    int frameCount = 0;         // frames handed in
+    int unreadableSpillCount = 0;  // frames whose disk copy failed to load
+};
+
+// Off-GUI-thread half of the readout: faults spilled frames back in from disk
+// by path, pairs every volume with its frame time, and integrates the Z-R
+// estimate over the newest volume's lowest tilt. Unreadable spills are counted
+// and skipped, never guessed at. Touches no session state, so it is safe to run
+// on a worker while playback keeps scrubbing.
+RainfallHistoryResult accumulateRainfallHistory(const std::vector<RainfallFrameSnapshot>& frames,
+                                                double radarElevationMeters,
+                                                const RainfallConfig& config = {});
 
 }  // namespace cappedweather
