@@ -1,6 +1,9 @@
 # GPU volume rendering of live Level II: design
 
-Status: design, not scheduled. 2D stays the primary console; this adds one 3D view.
+Status: M2 spike measured 2026-10-21 (card t_710dd647). The raymarch renders on
+D3D11; it is not wired into the panel toggle yet (see "Spike results" below for
+what is proved and what is not). 2D stays the primary console.
+
 
 ## Decisions (2026-10-08)
 
@@ -137,3 +140,140 @@ agrees regardless of backend.
 - Still open: RHI spike (`QRhiWidget`, one shader set), resolution step-down
   with 2+ live 3D panels, progressive refine, dual-pol second channel.
 - Brick resolution default stays 256 x 256 x 96 until profiling says otherwise.
+
+## Spike results — 2026-10-21 (card t_710dd647)
+
+Scope: one widget, one shader set, one product, D3D11. The CPU march is
+untouched and remains the fallback.
+
+### What exists now
+
+- `src/app/volume_camera.hpp` — `VolumeCamera` + `volumeCameraFor()`, moved out
+  of `radar_map_canvas.cpp` so the CPU march and the RHI march shoot the same
+  rays from one implementation (same math, behaviour unchanged).
+- `src/app/volume_canvas.{cpp,hpp}` — `VolumeCanvas : QRhiWidget` (a real
+  window, `setVolume` / `setTransferStops` / `setOrbit`), plus
+  `renderVolumeOffscreen()` which renders the same brick and camera into a
+  texture, reads it back and waits for the GPU: the number the probe and the
+  test use.
+- `RadarMapCanvas::volumeTransferStops()` — one ramp builder for the CPU march
+  and the GPU palette LUT, sampled through the shipped palette path. The CPU
+  block that used to inline those 48 stops now calls it; the stops are
+  identical.
+- `tools/volume3d_probe ... --gpu` — renders the same archive volume through
+  the widget, offscreen, and the shipping CPU panel path, then prints the three
+  lit_fraction numbers.
+- `tests/ui_smoke_test.cpp` — hermetic GPU/CPU comparison on an in-memory brick
+  (prints a note and skips the comparison if D3D11 is unavailable; CI without a
+  device does not fail).
+
+### Numbers (KTLX 2013-05-20 20:12Z REF, `KTLX20130520_201229_V06`)
+
+Brick 256 x 256 x 128, 1171.9 m voxels, 251,336 measured voxels. Camera:
+azimuth 180, elevation 40, 420 km, target z 7000 m, echo opacity 80.
+
+| size | CPU march (panel path) | GPU offscreen frame | GPU first frame (incl. upload) | lit GPU | lit CPU (as painted) |
+|---|---|---|---|---|---|
+| 720x450 | 241 ms | 2.3–4.9 ms | 112–117 ms | 0.0810 | 0.0757 |
+| 1440x900 | 802–950 ms | 3.8–8.1 ms | 91–132 ms | 0.0810 | 0.0599 |
+| 2880x1800 | 2183 ms | 17.9 ms | 129 ms | 0.0810 | 0.0436 |
+
+The GPU lit_fraction is resolution-independent to five decimals (same rays, same
+brick). The target (<16 ms at 1440x900) is met with margin: 3.8–8.1 ms across runs
+on a 7800 XT. "First frame" is device creation plus the 16.8 MB RG8 volume
+upload; a one-off, not a per-frame cost. GPU memory for the brick is 16.8 MB.
+
+Widget path: the real `VolumeCanvas` renders the same image as the offscreen
+render at 1440x900 (lit_fraction 0.08097 both, identical checksum), so the
+widget's presentation path does not alter the result. Screenshots:
+`docs/screenshots/volume3d-gpu-widget.png` (widget),
+`volume3d-gpu-offscreen.png` (offscreen), `volume3d-gpu-cpu.png` (shipping CPU
+panel path, same volume and camera, 950 ms chip).
+
+### CPU vs GPU: the gap is a CPU compositing bug, not a shading difference
+
+The GPU frame is brighter at the same camera: lit 0.0810 vs 0.0599 at 1440x900.
+That is not sampling noise. `RadarMapCanvas::rebuildVolumeRender` accumulates
+proper premultiplied RGB (`r += (1-a) * colour * shade * gate`) but stores it in
+`QImage::Format_ARGB32`, which QPainter interprets as **straight** alpha, so
+alpha is applied a second time when the image is painted. The panel preview is
+therefore dimmer than the transfer function says, and more so the lower the
+per-pixel alpha — which is why the CPU number keeps falling as the frame grows
+(the fixed-size HUD chip stops padding the count).
+
+Measured in the hermetic test on an identical brick and camera:
+
+- `lit_gpu = 0.0891`
+- `lit_cpu` as the panel paints it (ARGB32 + QPainter) = `0.0839`
+- `lit_cpu` with the same bytes composited as premultiplied = `0.0934`
+
+Reinterpreting the bytes as premultiplied moves the CPU image toward the GPU
+image, which pins the diagnosis (the test asserts that direction). The CPU path
+was deliberately **not** changed in this card ("CPU path unchanged"); the fix is
+a follow-up card.
+
+Second, smaller difference: the shader's coverage is the hardware-filtered
+weight of present corners (`sum w`), while `sampleBrickTrilinear` reports
+`count / 8`. Both are 1 inside data and 0 outside; they differ only in the
+sub-voxel falloff at hole edges, so the GPU edge is smoother rather than
+denser. Matching `count / 8` exactly would cost eight nearest taps per step for
+the sample plus forty-eight for the shading normal — 2-4x the frame time for a
+difference that is invisible at 1440x900. Reported, not papered over.
+
+### Findings that cost time (all reproduced on this box)
+
+1. **`QRhiWidget` does not open the render pass.** Qt 6.8.3 hands `render()` a
+   command buffer with no pass active; calling `cb->draw()` straight away
+   segfaults inside QRhi with no warning. `render()` must
+   `cb->beginPass(renderTarget(), colour, {1.0f, 0})` and `endPass()` itself.
+   Minimal reproduction: a QRhiWidget drawing one full-screen triangle crashes
+   without `beginPass` and renders three frames with it.
+2. **This Qt install has no Qt Shader Tools** (`bin/qsb` absent, no
+   `Qt6::ShaderTools`, no `QShaderBaker`), so GLSL/SPIR-V could not be compiled
+   into a cross-API `.qsb`. The shader is HLSL (Shader Model 5) built into a
+   `QShader` at runtime; QRhi's D3D11 backend compiles it through D3DCompile.
+   Consequence: the spike is **D3D11 only**. Vulkan/Metal/GL need the Shader
+   Tools module in the build (or checked-in `.qsb` files); a packaging decision
+   for the cross-API plan, not a code problem.
+3. **`QRhiTexture::OneDimensional` fails on D3D11** in this Qt build, so the
+   palette LUT is a 256x1 2-D texture sampled at `u = (255*t + 0.5)/256`.
+4. **3-D texture uploads need one entry per depth slice.** A single
+   whole-volume `QRhiTextureUploadEntry(0, 0, data)` created without error and
+   sampled as an all-zero texture (a black frame with no error). 128 slice
+   entries work.
+5. **The widget's render target carries a depth-stencil buffer**; the pipeline
+   is created against `renderTarget()->renderPassDescriptor()` and recreated
+   when Qt swaps that descriptor. Qt calls `initialize()` again in that case.
+6. **Colour agreement** was checked by eye on all three screenshots (same
+   diagonal storm, same core) and numerically by lit_fraction (GPU identical
+   across resolutions and between widget and offscreen).
+
+### Failure behaviour (proved, not asserted)
+
+With the HLSL deliberately broken, the probe prints one line and the CPU path
+still produces a frame:
+
+```
+gpu_offscreen failed error="HLSL shader compilation failed: 0x80004005"
+gpu_widget ready=0 backend=D3D11 frames=0 lit_fraction=0.00000 status="HLSL shader compilation failed: 0x80004005"
+cpu lit_fraction=0.07569 checksum=89923316 render_ms=316.0 screenshot=/tmp/failcase.png-cpu.png
+volume3d_probe=gpu_unavailable error="HLSL shader compilation failed: 0x80004005"
+```
+
+The widget never presents a black frame with no explanation: `statusLine()`
+carries the reason and `gpuFailed()` fires once. Texture/LUT creation failures
+and backend mismatches take the same path (`GPU 3D needs the Direct3D 11
+backend; this spike ships no shader set for <backend>`).
+
+### Not done (deliberately)
+
+- **No wiring into the panel toggle.** The 3D view is painted by
+  `RadarMapCanvas` with QPainter (image + orientation grid + chip + drag
+  rectangle). A full-size `QRhiWidget` child would cover that HUD, so making the
+  GPU path the panel's backend needs one of: (a) GPU render to an image on the
+  existing worker thread (adds a readback, keeps the HUD untouched), or (b) the
+  widget plus a transparent HUD overlay. Both are integration decisions with
+  their own measurements — a follow-up card, not part of the spike.
+- Empty-space skipping (32^3 occupancy) — stretch, not required; the 4-8 ms
+  frame leaves no reason to complicate the shader yet.
+- Backends other than D3D11, MSAA, multi-panel fill-rate policy.

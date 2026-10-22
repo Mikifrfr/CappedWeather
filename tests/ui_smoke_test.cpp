@@ -23,6 +23,12 @@
 #include "app/nexrad_source.hpp"
 #include "app/opera_source.hpp"
 #include "app/shortcut_help_dialog.hpp"
+#include "app/volume_camera.hpp"
+#include "app/volume_canvas.hpp"
+
+#include <QPainter>
+
+#include <cstring>
 #include "app/theme.hpp"
 #include "app/timeline_strip.hpp"
 #include "app/session_store.hpp"
@@ -6684,6 +6690,195 @@ LAT...LON 28128331 28218317 28288300 28188269 28128331
     std::cout << "Sidebar width round-trip: requested=" << requestedDockWidth
               << " dock=" << savedDockWidth << " persisted=" << storedDockWidth
               << " restored=" << restoredDockWidth << " settleMs=" << settleMs << '\n';
+
+// Inserted before the ShortcutHelpDialog block in tests/ui_smoke_test.cpp.
+    // --- GPU 3D raymarch (docs/gpu-volume-rendering.md) ---------------------
+    // Hermetic: a brick built in memory and marched twice at the same camera,
+    // once with the core sampling primitives the panel's CPU march uses and
+    // once through the QRhi raymarch. Both must light a similar share of the
+    // frame and the GPU frame must not be uniform. The panel path itself is
+    // measured against the GPU on the real KTLX volume by
+    // `volume3d_probe --gpu`; this keeps the contract under test without a
+    // fixture.
+    {
+        VolumeBrick brick;
+        brick.nx = 48;
+        brick.ny = 48;
+        brick.nz = 24;
+        brick.halfExtentMeters = 60000.0;
+        brick.topMeters = 12000.0;
+        brick.product = ProductKind::Reflectivity;
+        const std::size_t voxels = static_cast<std::size_t>(brick.nx) *
+                                   static_cast<std::size_t>(brick.ny) *
+                                   static_cast<std::size_t>(brick.nz);
+        brick.value.assign(voxels, 0);
+        brick.present.assign(voxels, 0);
+        for (int z = 0; z < brick.nz; ++z) {
+            for (int y = 0; y < brick.ny; ++y) {
+                for (int x = 0; x < brick.nx; ++x) {
+                    const double px = (x + 0.5) / brick.nx - 0.5;
+                    const double py = (y + 0.5) / brick.ny - 0.5;
+                    const double pz = static_cast<double>(z) / brick.nz;
+                    // A dense core plus a weaker anvil, both above the alpha
+                    // ramp's floor so the frame carries real opacity.
+                    const double core = std::sqrt((px + 0.05) * (px + 0.05) +
+                                                  (py - 0.02) * (py - 0.02) +
+                                                  (pz - 0.20) * (pz - 0.20));
+                    const double anvil = std::sqrt((px - 0.12) * (px - 0.12) +
+                                                   (py + 0.05) * (py + 0.05) +
+                                                   (pz - 0.38) * (pz - 0.38));
+                    double value = 0.0;
+                    if (core < 0.17) value = std::max(value, 0.86 - core * 1.6);
+                    if (anvil < 0.24) value = std::max(value, 0.58 - anvil * 0.8);
+                    if (value <= 0.0) continue;
+                    const std::size_t flat =
+                        (static_cast<std::size_t>(z) * brick.ny + y) * brick.nx + x;
+                    brick.value[flat] = static_cast<std::uint8_t>(std::clamp(value, 0.0, 1.0) * 255.0);
+                    brick.present[flat] = 1;
+                }
+            }
+        }
+        const QSize gpuSize(240, 150);
+        const double target[3] = {0.0, 0.0, 3000.0};
+        const VolumeCamera camera = volumeCameraFor(brick, 180.0, 40.0, 150000.0, target);
+        const auto stops =
+            RadarMapCanvas::volumeTransferStops(ProductKind::Reflectivity,
+                                                RadarMapCanvas::PaletteKind::Capped);
+        constexpr double kAmbientTest = 0.46;
+        constexpr float kDensityTest = 1.2e-3F;
+        const double lightTest[3] = {-0.5, -0.5, 0.7071};
+        const int opacityPercent = 80;
+        const double opacityScale = opacityPercent / 100.0;
+
+        // CPU reference march, mirroring RadarMapCanvas::rebuildVolumeRender
+        // step for step but at test resolution.
+        QImage cpuImage(gpuSize, QImage::Format_ARGB32);
+        cpuImage.fill(Qt::transparent);
+        const double spanX = 2.0 * brick.halfExtentMeters / brick.nx;
+        const double spanY = 2.0 * brick.halfExtentMeters / brick.ny;
+        const double spanZ = brick.topMeters / brick.nz;
+        const double stepMeters = std::max({spanX, spanY, spanZ}) * 0.5;
+        const double diagonal = std::sqrt(8.0 * brick.halfExtentMeters * brick.halfExtentMeters +
+                                          brick.topMeters * brick.topMeters);
+        const int maxSteps = static_cast<int>(diagonal / stepMeters) + 2;
+        const double aspect = static_cast<double>(gpuSize.width()) / gpuSize.height();
+        for (int y = 0; y < gpuSize.height(); ++y) {
+            auto* scan = reinterpret_cast<QRgb*>(cpuImage.scanLine(y));
+            for (int x = 0; x < gpuSize.width(); ++x) {
+                const double px = ((static_cast<double>(x) + 0.5) / gpuSize.width() * 2.0 - 1.0) * aspect;
+                const double py = 1.0 - (static_cast<double>(y) + 0.5) / gpuSize.height() * 2.0;
+                double dir[3] = {
+                    camera.forward[0] * camera.focal + camera.right[0] * px + camera.up[0] * py,
+                    camera.forward[1] * camera.focal + camera.right[1] * px + camera.up[1] * py,
+                    camera.forward[2] * camera.focal + camera.right[2] * px + camera.up[2] * py,
+                };
+                const double dirLen = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                for (int axis = 0; axis < 3; ++axis) dir[axis] /= dirLen;
+                const auto hit = intersectVolumeBox(brick, camera.eye, dir);
+                if (!hit.has_value() || hit->tExit <= 0.0) continue;
+                double t = std::max(hit->tEnter, 0.0);
+                float r = 0.0F, g = 0.0F, b = 0.0F, a = 0.0F;
+                int steps = 0;
+                while (t < hit->tExit && a < 0.98F && steps < maxSteps) {
+                    const double sx = camera.eye[0] + dir[0] * t;
+                    const double sy = camera.eye[1] + dir[1] * t;
+                    const double sz = camera.eye[2] + dir[2] * t;
+                    const auto sample = sampleBrickTrilinear(brick, sx, sy, sz);
+                    if (sample.has_value()) {
+                        const Rgba color = evaluateTransfer(stops, sample->value01);
+                        const float sigma = color.a * sample->coverage * static_cast<float>(opacityScale);
+                        const float gate =
+                            1.0F - std::exp(-sigma * kDensityTest * static_cast<float>(stepMeters));
+                        if (gate > 0.002F) {
+                            float shade = static_cast<float>(kAmbientTest);
+                            if (const auto normal = brickSurfaceNormal(brick, sx, sy, sz)) {
+                                const double lit = normal->x * lightTest[0] + normal->y * lightTest[1] +
+                                                   normal->z * lightTest[2];
+                                shade += static_cast<float>((1.0 - kAmbientTest) * std::max(0.0, lit));
+                            }
+                            r += (1.0F - a) * color.r * shade * gate;
+                            g += (1.0F - a) * color.g * shade * gate;
+                            b += (1.0F - a) * color.b * shade * gate;
+                            a += (1.0F - a) * gate;
+                        }
+                    }
+                    t += stepMeters;
+                    ++steps;
+                }
+                if (a <= 0.0F) continue;
+                scan[x] = qRgba(static_cast<int>(std::clamp(r, 0.0F, 1.0F) * 255.0F),
+                                static_cast<int>(std::clamp(g, 0.0F, 1.0F) * 255.0F),
+                                static_cast<int>(std::clamp(b, 0.0F, 1.0F) * 255.0F),
+                                static_cast<int>(std::clamp(a, 0.0F, 1.0F) * 255.0F));
+            }
+        }
+        const auto litFraction = [](const QImage& frame) {
+            if (frame.isNull()) return 0.0;
+            long long lit = 0;
+            for (int y = 0; y < frame.height(); ++y) {
+                const auto* line = reinterpret_cast<const QRgb*>(frame.constScanLine(y));
+                for (int x = 0; x < frame.width(); ++x) {
+                    const QRgb px = line[x];
+                    if (qRed(px) + qGreen(px) + qBlue(px) > 90) ++lit;
+                }
+            }
+            return static_cast<double>(lit) /
+                   (static_cast<double>(frame.width()) * frame.height());
+        };
+        // Composite the CPU march over the 3D view background the way the
+        // panel's QPainter path does, so both numbers describe a finished frame.
+        QImage cpuComposite(cpuImage.size(), QImage::Format_RGB32);
+        cpuComposite.fill(QColor(8, 13, 16));
+        {
+            QPainter composer(&cpuComposite);
+            composer.drawImage(0, 0, cpuImage);
+        }
+        const double cpuLit = litFraction(cpuComposite);
+        // Diagnosis for the known gap: the panel stores premultiplied RGB in a
+        // Format_ARGB32 image, so QPainter multiplies by alpha a second time and
+        // the CPU preview paints dimmer than the GPU one (which composites
+        // once). Reinterpreting the same bytes as premultiplied is what the
+        // panel should paint; it must land closer to the GPU number.
+        QImage cpuPremultiplied(cpuImage.size(), QImage::Format_ARGB32_Premultiplied);
+        for (int y = 0; y < cpuImage.height(); ++y)
+            std::memcpy(cpuPremultiplied.scanLine(y), cpuImage.constScanLine(y),
+                        static_cast<std::size_t>(cpuImage.width()) * 4);
+        QImage cpuPremultipliedComposite(cpuPremultiplied.size(), QImage::Format_RGB32);
+        cpuPremultipliedComposite.fill(QColor(8, 13, 16));
+        {
+            QPainter composer(&cpuPremultipliedComposite);
+            composer.drawImage(0, 0, cpuPremultiplied);
+        }
+        const double cpuLitPremultiplied = litFraction(cpuPremultipliedComposite);
+
+        const VolumeGpuFrame gpu =
+            renderVolumeOffscreen(brick, camera, stops, opacityPercent, gpuSize, 2);
+        if (!gpu.ok) {
+            std::cout << "note: GPU 3D raymarch unavailable (" << gpu.error.toStdString()
+                      << "); skipping the GPU/CPU lit_fraction comparison\n";
+        } else {
+            const double gpuLit = litFraction(gpu.image);
+            std::cout << "GPU 3D raymarch: backend=" << gpu.backend.toStdString()
+                      << " device=" << gpu.device.toStdString() << " frame_ms=" << gpu.frameMs
+                      << " lit_gpu=" << gpuLit << " lit_cpu=" << cpuLit
+                      << " lit_cpu_premultiplied=" << cpuLitPremultiplied << '\n';
+            if (std::abs(gpuLit - cpuLitPremultiplied) > std::abs(gpuLit - cpuLit)) {
+                std::cerr << "CPU/GPU 3D gap is not the premultiplied-alpha mismatch: gpu=" << gpuLit
+                          << " panel_composite=" << cpuLit
+                          << " premultiplied_composite=" << cpuLitPremultiplied << '\n';
+                return 1;
+            }
+            if (gpuLit < 0.02 || gpuLit > 0.95) {
+                std::cerr << "GPU 3D frame is empty or uniform: lit_fraction=" << gpuLit << '\n';
+                return 1;
+            }
+            if (std::abs(gpuLit - cpuLit) > 0.08) {
+                std::cerr << "GPU and CPU 3D images disagree: lit_gpu=" << gpuLit
+                          << " lit_cpu=" << cpuLit << '\n';
+                return 1;
+            }
+        }
+    }
 
     ShortcutHelpDialog helpDialog;
     if (helpDialog.windowTitle() != QStringLiteral("Keyboard shortcuts — CappedWeather")) {

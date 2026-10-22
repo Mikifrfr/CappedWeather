@@ -1,6 +1,7 @@
 #include "app/radar_map_canvas.hpp"
 
 #include "app/http_client.hpp"
+#include "app/volume_camera.hpp"
 #include "core/radar_geometry.hpp"
 #include "core/scan_diagnostics.hpp"
 
@@ -1942,6 +1943,33 @@ QColor RadarMapCanvas::colorForValue(const ProductKind product, const double val
     const auto normalized = std::clamp((value - descriptor.minimum) /
                                            (descriptor.maximum - descriptor.minimum), 0.0, 1.0);
     return productColor(product, normalized, palette, opacityPercent, custom);
+}
+
+std::vector<RgbaStop> RadarMapCanvas::volumeTransferStops(const ProductKind product,
+                                                          const PaletteKind palette,
+                                                          const QVector<PaletteStop>& custom) {
+    // 48 samples of the shipped palette colour plus the 3D alpha ramp. The CPU
+    // march samples this vector; the RHI backend bakes the same vector into its
+    // 256-entry LUT, so the 2D map, CPU 3D and GPU 3D cannot drift in colour.
+    std::vector<RgbaStop> stops;
+    stops.reserve(48);
+    const auto rampAlpha = [](double v01, bool folds) {
+        const double t = folds ? std::fabs(v01 - 0.5) * 2.0 : v01;
+        const double edge0 = folds ? 0.12 : 0.24;
+        const double edge1 = folds ? 0.50 : 0.60;
+        const double s = std::clamp((t - edge0) / (edge1 - edge0), 0.0, 1.0);
+        return (s * s * (3.0 - 2.0 * s)) * (folds ? 0.85 : 0.92);
+    };
+    const bool folds = product == ProductKind::Velocity;
+    for (int stop = 0; stop < 48; ++stop) {
+        const double normalized = static_cast<double>(stop) / 47.0;
+        const QColor color = productColor(product, normalized, palette, 100, custom);
+        stops.push_back({static_cast<float>(normalized), static_cast<float>(color.redF()),
+                         static_cast<float>(color.greenF()),
+                         static_cast<float>(color.blueF()),
+                         static_cast<float>(rampAlpha(normalized, folds))});
+    }
+    return stops;
 }
 
 QString RadarMapCanvas::probeText() const {
@@ -5611,50 +5639,6 @@ void RadarMapCanvas::setVolume3dMode(const bool enabled) {
 
 namespace {
 
-// Orbit camera around the brick center. Kept file-local and plain-math so
-// the future RHI backend can mirror it exactly (same eye, same rays).
-struct VolumeCamera {
-    double eye[3] = {0.0, 0.0, 0.0};
-    double forward[3] = {0.0, 0.0, 0.0};
-    double right[3] = {0.0, 0.0, 0.0};
-    double up[3] = {0.0, 0.0, 0.0};
-    double focal = 1.0;
-};
-
-VolumeCamera volumeCameraFor(const VolumeBrick& brick, const double orbitAzimuthDeg,
-                             const double orbitElevationDeg, const double distanceMeters,
-                             const double target[3]) {
-    (void)brick; // box dims come from the caller; the camera only needs target
-    VolumeCamera camera;
-    const double azimuth = orbitAzimuthDeg * kPi / 180.0;
-    const double elevation = orbitElevationDeg * kPi / 180.0;
-    const double cosEl = std::cos(elevation);
-    camera.eye[0] = target[0] + distanceMeters * cosEl * std::sin(azimuth);
-    camera.eye[1] = target[1] + distanceMeters * cosEl * std::cos(azimuth);
-    camera.eye[2] = target[2] + distanceMeters * std::sin(elevation);
-    double fwd[3] = {target[0] - camera.eye[0], target[1] - camera.eye[1],
-                     target[2] - camera.eye[2]};
-    const double fwdLen = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
-    for (int axis = 0; axis < 3; ++axis) camera.forward[axis] = fwd[axis] / fwdLen;
-    // right = normalize(cross(forward, worldUp)): east on the right when
-    // looking north. The sign matters: a negated right flips up with it and
-    // the whole view renders upside down (north down, east left). Degenerate
-    // only when looking straight down, which the elevation clamp never allows.
-    double right[3] = {camera.forward[1], -camera.forward[0], 0.0};
-    double rightLen = std::sqrt(right[0] * right[0] + right[1] * right[1]);
-    if (rightLen < 1e-9) {
-        right[0] = 1.0;
-        right[1] = 0.0;
-        rightLen = 1.0;
-    }
-    for (int axis = 0; axis < 3; ++axis) camera.right[axis] = right[axis] / rightLen;
-    camera.up[0] = camera.right[1] * camera.forward[2] - camera.right[2] * camera.forward[1];
-    camera.up[1] = camera.right[2] * camera.forward[0] - camera.right[0] * camera.forward[2];
-    camera.up[2] = camera.right[0] * camera.forward[1] - camera.right[1] * camera.forward[0];
-    camera.focal = 1.0 / std::tan(22.5 * kPi / 180.0); // 45-degree vertical FOV
-    return camera;
-}
-
 // Project an ENU point to panel pixels with a volume camera. False when the
 // point is behind the eye. Inverse of the marcher's pixel-to-ray mapping.
 bool projectVolumePoint(const VolumeCamera& camera, const double point[3], const int width,
@@ -5803,26 +5787,10 @@ void RadarMapCanvas::rebuildVolumeRender(const bool fast) {
             }
             if (stale()) return;
             // Transfer stops sampled from the live palette so 2D and 3D agree
-            // on color. Alpha stays a fixed ramp here (the RHI shader mirrors
-            // it) scaled by the echo opacity.
-            std::vector<RgbaStop> stops;
-            stops.reserve(48);
-            const auto rampAlpha = [](double v01, bool folds) {
-                const double t = folds ? std::fabs(v01 - 0.5) * 2.0 : v01;
-                const double edge0 = folds ? 0.12 : 0.24;
-                const double edge1 = folds ? 0.50 : 0.60;
-                const double s = std::clamp((t - edge0) / (edge1 - edge0), 0.0, 1.0);
-                return (s * s * (3.0 - 2.0 * s)) * (folds ? 0.85 : 0.92);
-            };
-            const bool folds = product == ProductKind::Velocity;
-            for (int stop = 0; stop < 48; ++stop) {
-                const double normalized = static_cast<double>(stop) / 47.0;
-                const QColor color = productColor(product, normalized, palette, 100, customPalette);
-                stops.push_back({static_cast<float>(normalized), static_cast<float>(color.redF()),
-                                 static_cast<float>(color.greenF()),
-                                 static_cast<float>(color.blueF()),
-                                 static_cast<float>(rampAlpha(normalized, folds))});
-            }
+            // on color. Alpha stays a fixed ramp here (the RHI LUT mirrors it)
+            // scaled by the echo opacity. Shared with the RHI backend through
+            // volumeTransferStops() so both marches use one ramp.
+            const std::vector<RgbaStop> stops = volumeTransferStops(product, palette, customPalette);
             const int renderWidth = std::max(1, logicalSize.width() / divisor);
             const int renderHeight = std::max(1, logicalSize.height() / divisor);
             QImage image(renderWidth, renderHeight, QImage::Format_ARGB32);

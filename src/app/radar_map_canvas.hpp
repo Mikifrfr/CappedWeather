@@ -370,6 +370,8 @@ public:
                                             QPointF* out) const;
     [[nodiscard]] bool volume3dGroundPointAt(const QPoint& pixel, double* xMeters,
                                              double* yMeters) const;
+    // March time of the last completed CPU 3D frame, for probes and tests.
+    [[nodiscard]] double volumeRenderMs() const { return volumeRenderMs_; }
     void setVolumeQuality(int decodedChunks, int totalChunks, int failedChunks,
                           std::size_t rejectedMessages = 0, std::size_t rejectedBlocks = 0);
     void setLoading(bool loading, const QString& message = {});
@@ -414,6 +416,11 @@ public:
     static QColor colorForValue(ProductKind product, double value, PaletteKind palette,
                                 int opacityPercent = 100,
                                 const QVector<PaletteStop>& custom = {});
+    // Transfer stops for the 3D march: colour sampled from the same shipped
+    // palette path (colorForValue) plus the volume alpha ramp. The CPU march and
+    // the RHI palette LUT both build from this, so the three views agree.
+    static std::vector<RgbaStop> volumeTransferStops(ProductKind product, PaletteKind palette,
+                                                     const QVector<PaletteStop>& custom = {});
     QString probeText() const;
     QRectF infoCardRect() const { return pinnedInfoCardRect_; }
     double infoCardScrollOffset() const { return pinnedInfoScrollOffset_; }

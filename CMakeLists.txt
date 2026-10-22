@@ -203,6 +203,9 @@ if(CAPPEDWEATHER_BUILD_APP)
             src/app/placefile_source.hpp
             src/app/radar_map_canvas.cpp
             src/app/radar_map_canvas.hpp
+            src/app/volume_camera.hpp
+            src/app/volume_canvas.cpp
+            src/app/volume_canvas.hpp
             src/app/s3_listing.cpp
             src/app/s3_listing.hpp
             src/app/session_store.cpp
@@ -278,6 +281,13 @@ if(CAPPEDWEATHER_BUILD_APP)
         )
 
         add_library(cappedweather_ui STATIC ${CAPPEDWEATHER_UI_SOURCES})
+
+        # QRhi and QShader live in the module's versioned include directory
+        # (include/QtGui/<version>/QtGui/rhi), which Qt6::Gui does not add to the
+        # include path. Qt6::GuiPrivate would add it but also exposes private
+        # headers; the volume raymarch only uses the public rhi headers.
+        target_include_directories(cappedweather_ui PRIVATE
+            "${CAPPEDWEATHER_QT_ROOT}/include/QtGui/${Qt6_VERSION}/QtGui")
 
         target_link_libraries(cappedweather_ui PUBLIC
             cappedweather_core
